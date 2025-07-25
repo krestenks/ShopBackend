@@ -8,7 +8,7 @@ fun FlowContent.bookingForm(shopId: Int? = null, customerId: Int? = null) {
         h2 { +"Book Appointment" }
 
         form {
-            action = "/appointments/submit"
+            action = "/api/booking/submit"
             method = FormMethod.post
 
             if (shopId != null) {
@@ -24,6 +24,7 @@ fun FlowContent.bookingForm(shopId: Int? = null, customerId: Int? = null) {
                     name = "shop_id"
                 }
                 br()
+                br()
             }
 
             if (customerId != null) {
@@ -34,11 +35,12 @@ fun FlowContent.bookingForm(shopId: Int? = null, customerId: Int? = null) {
                 }
             }
 
-            label { htmlFor = "employeeSelect"; +"Select Employee:" }
+            label { htmlFor = "employeeSelect"; +"Select Employee:  " }
             select {
                 id = "employeeSelect"
                 name = "employee_id"
             }
+            br()
             br()
 
             label { +"Select Services:" }
@@ -46,20 +48,24 @@ fun FlowContent.bookingForm(shopId: Int? = null, customerId: Int? = null) {
                 id = "serviceCheckboxes"
             }
 
-            label { htmlFor = "dateSelect"; +"Select Date:" }
+            br()
+            br()
+
+            label { htmlFor = "dateSelect"; +"Select Date:  " }
             select {
                 id = "dateSelect"
                 name = "appointment_date"
             }
             br()
+            br()
 
-            label { htmlFor = "timeSelect"; +"Select Time:" }
+            label { htmlFor = "timeSelect"; +"Select Time:  " }
             select {
                 id = "timeSelect"
                 name = "appointment_time"
             }
             br()
-
+            br()
             input {
                 type = InputType.submit
                 value = "Book Appointment"

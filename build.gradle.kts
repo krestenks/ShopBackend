@@ -18,6 +18,8 @@ dependencies {
     implementation("org.slf4j:slf4j-simple:2.0.13")
     implementation("org.mindrot:jbcrypt:0.4")
     implementation("io.ktor:ktor-server-core:$ktorVersion")
+    implementation("io.ktor:ktor-server-auth:${ktorVersion}")
+    implementation("io.ktor:ktor-server-auth-jwt:${ktorVersion}")
     implementation("io.ktor:ktor-server-netty:$ktorVersion")
     implementation("io.ktor:ktor-server-sessions:${ktorVersion}")
     implementation("io.ktor:ktor-server-html-builder:$ktorVersion")

@@ -84,74 +84,6 @@ class WebAdmin(private val db: DataBase) {
                 }
             }
 
-            // API code
-
-            get("/api/shops") {
-                val shops = db.getAllShops()
-                call.respond(ShopList(shops))
-            }
-
-/*            get("/api/employees") {
-                val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
-                if (shopId == null) {
-                    call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
-                    return@get
-                }
-                val employees = db.getEmployeesForShop(shopId)
-                call.respond(EmployeeList(employees))
-            }
-
-            get("/api/employees") {
-                val shopId = call.parameters["shop_id"]?.toIntOrNull()
-                if (shopId == null) {
-                    call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
-                    return@get
-                }
-
-                val employees = db.getEmployeesForShop(shopId)
-                val simplified = employees.map { SimpleEmployee(it.id, it.name) }
-                call.respond(simplified)
-            }
-
-            get("/api/services") {
-                val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
-                if (employeeId == null) {
-                    call.respond(HttpStatusCode.BadRequest, "Missing or invalid employee_id")
-                    return@get
-                }
-                val services = db.getServicesForEmployee(employeeId)
-                call.respond(ServiceList(services))
-            }
-
-            get("/api/timeslots") {
-                val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
-                val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
-                val date = call.request.queryParameters["date"]
-                val duration = call.request.queryParameters["duration"]?.toIntOrNull()
-
-                if (employeeId == null || shopId == null || date == null || duration == null) {
-                    call.respond(HttpStatusCode.BadRequest, "Missing or invalid parameters")
-                    return@get
-                }
-
-                val timeSlots = db.getAvailableTimeSlots(employeeId, shopId, date, duration)
-                call.respond(timeSlots)
-            }
-
-
-            get("/api/services") {
-                val employeeId = call.parameters["employee_id"]?.toIntOrNull()
-                if (employeeId == null) {
-                    call.respond(HttpStatusCode.BadRequest, "Missing or invalid employee_id")
-                    return@get
-                }
-
-                val services = db.getServicesForEmployee(employeeId)
-                val simplified = services.map { SimpleService(it.id, it.name, it.duration) }
-                call.respond(simplified)
-            }
-             */
-
             get("/managers") {
                 val managers = db.getAllManagers()
                 call.respondHtml {
@@ -903,23 +835,45 @@ class WebAdmin(private val db: DataBase) {
 
 
 
-           get("/test-booking-link") {
-                    call.respondText(
-                        """
-                        <html>
-                          <body>
-                            <form action="/test-booking-link" method="post">
-                              Shop ID: <input name="shop_id" type="number" /><br/>
-                              Phone: <input name="phone" type="text" /><br/>
-                              <button type="submit">Generate Link</button>
-                            </form>
-                          </body>
-                        </html>
-                        """.trimIndent(), ContentType.Text.Html
-                    )
+            get("/test-booking-link") {
+                val shops = db.getAllShops() // Replace with your actual method to get shops
+
+                val optionsHtml = shops.joinToString("\n") { shop ->
+                    """<option value="${shop.id}">${shop.name}</option>"""
                 }
 
-                post("/test-booking-link") {
+                call.respondText(
+                    """
+        <html>
+          <body>
+            <form action="/test-booking-link" method="post">
+              <label for="shopSelect">Shop:</label>
+              <select id="shopSelect" name="shop_id" required>
+                $optionsHtml
+              </select>
+              <br/>
+              Phone: <input name="phone" type="text" required />
+              <br/>
+              <button type="submit">Generate Link</button>
+            </form>
+            <br>
+            <form action="/api/booking/create" method="post">
+              <label for="shopSelect2">Shop:</label>
+              <select id="shopSelect2" name="shop_id" required>
+                $optionsHtml
+              </select>
+              <br/>
+              Phone: <input name="phone" type="text" required />
+              <br/>
+              <button type="submit">Generate SMS text</button>
+            </form>
+          </body>
+        </html>
+        """.trimIndent(), ContentType.Text.Html
+                )
+            }
+
+            post("/test-booking-link") {
                     val params = call.receiveParameters()
                     val shopId = params["shop_id"]?.toIntOrNull()
                     val phone = params["phone"]
@@ -929,10 +883,10 @@ class WebAdmin(private val db: DataBase) {
                     }
 
                     val customerId = db.ensureCustomerByPhone(phone) // implement if needed
-                    val token = db.generateBookingToken( customerId, shopId, phone)
+                    val booking_token = db.generateBookingToken( customerId, shopId, phone)
 
                     val baseUrl = System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:9091"
-                    val fullUrl = "$baseUrl/api/link/$token"
+                    val fullUrl = "$baseUrl/api/book?token=$booking_token"
 
                     call.respondText(
                         """<html><body>Generated link: <a href="$fullUrl">$fullUrl</a></body></html>""",

@@ -1,5 +1,6 @@
 // SharedRoutes.kt
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
 import io.ktor.server.html.respondHtml
@@ -17,37 +18,108 @@ import kotlinx.html.li
 import kotlinx.html.p
 import kotlinx.html.title
 import kotlinx.html.ul
+import shared.components.bookingForm
+
+
+suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
+    val token = request.queryParameters["token"]
+        ?: request.headers["X-Booking-Token"]
+        ?: request.cookies["booking_token"] // ✅ new fallback
+    if (token == null) return null
+    return db.getBookingTokenInfo(token)
+}
 
 // Accepts a DataBase reference (or other services) as a parameter
 fun Route.sharedBookingRoutes(db: DataBase) {
 
+    get("/api/book") {
+        val token = call.request.queryParameters["token"]
+        if (token == null) {
+            return@get call.respond(HttpStatusCode.BadRequest, "Missing token")
+        }
 
-    get("/api/link/2918315f16ff") {
-        // This is where you verify token and redirect to booking
-        // Or return booking info as JSON
+        val bookingInfo = db.getBookingTokenInfo(token)
+        if (bookingInfo == null) {
+            return@get call.respond(HttpStatusCode.NotFound, "Invalid or expired token")
+        }
 
+        call.response.cookies.append("booking_token", token, path = "/", httpOnly = true)
+
+        // Extract data from DB row
+        val shopId = bookingInfo.shopId
+        val customerId = bookingInfo.customerId
+
+        println("Serving bookingform $shopId, $customerId")
+
+        // Serve the HTML form
         call.respondHtml {
+            head {
+                title { +"Book Appointment" }
+            }
             body {
-                h3 { +"Nice booking." }
-                a("/login") { +"Try again" }
+                bookingForm(shopId = shopId, customerId = customerId)
             }
         }
     }
 
 
-    // Add more customer API endpoints as needed
+    post("/api/booking/create") {
+        val params = call.receiveParameters()
+        val shopId = params["shop_id"]?.toIntOrNull()
+        val phone = params["phone"]
 
-    get("/api/employees") {
-        val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
-        if (shopId == null) {
-            call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
+        if (shopId == null || phone == null) {
+            return@post call.respond(HttpStatusCode.BadRequest, "Missing shop_id or phone")
+        }
+
+        val customerId = db.ensureCustomerByPhone(phone) // implement if needed
+        val bookingToken = db.generateBookingToken( customerId, shopId, phone)
+
+        val baseUrl = System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:9091"
+        val fullUrl = "$baseUrl/api/book?token=$bookingToken"
+
+        call.respondText(
+            """Book here: $fullUrl""",
+            ContentType.Text.Plain
+        )
+    }
+
+    get("/api/shops") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
             return@get
         }
+
+        // Optional: Use only customerId/shopId from token to prevent tampering
+        val customerId = bookingInfo.customerId
+        val shopId = bookingInfo.shopId
+        val shops = db.getAllShops()
+        call.respond(ShopList(shops))
+    }
+
+    get("/api/employees") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@get
+        }
+
+        // Optional: Use only customerId/shopId from token to prevent tampering
+        val customerId = bookingInfo.customerId
+        val shopId = bookingInfo.shopId
+
         val employees = db.getEmployeesForShop(shopId)
         call.respond(EmployeeList(employees))
     }
 
     get("/api/services") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@get
+        }
+
         val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
         if (employeeId == null) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid employee_id")
@@ -58,12 +130,19 @@ fun Route.sharedBookingRoutes(db: DataBase) {
     }
 
     get("/api/timeslots") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@get
+        }
+
+        // Optional: Use only customerId/shopId from token to prevent tampering
+        val shopId = bookingInfo.shopId
         val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
-        val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
         val date = call.request.queryParameters["date"]
         val duration = call.request.queryParameters["duration"]?.toIntOrNull()
 
-        if (employeeId == null || shopId == null || date == null || duration == null) {
+        if (employeeId == null || date == null || duration == null) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid parameters")
             return@get
         }
@@ -73,14 +152,23 @@ fun Route.sharedBookingRoutes(db: DataBase) {
     }
 
     // Handle POST to create appointment
-    post("/appointments/submit") {
+    post("/api/booking/submit") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@post
+        }
+
+        // Optional: Use only customerId/shopId from token to prevent tampering
+        val customerId = bookingInfo.customerId
+        val shopId = bookingInfo.shopId
+
         val params = call.receiveParameters()
         val employeeId = params["employee_id"]?.toIntOrNull()
-        val shopId = params["shop_id"]?.toIntOrNull()
         val dateTimeStr = params["appointment_time"] // Expected format: "yyyy-MM-dd HH:mm"
         val serviceIds = params.getAll("service_ids")?.mapNotNull { it.toIntOrNull() } ?: emptyList()
 
-        if (employeeId == null || shopId == null || dateTimeStr.isNullOrBlank() || serviceIds.isEmpty()) {
+        if (employeeId == null || dateTimeStr.isNullOrBlank() || serviceIds.isEmpty()) {
             call.respond(HttpStatusCode.BadRequest, "Missing required form data.")
             return@post
         }
@@ -111,7 +199,7 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         }
 
         // Add appointment and services
-        val appointmentId = db.addAppointment(employeeId, shopId, dateTimeMillis, totalDuration)
+        val appointmentId = db.addAppointment(employeeId, shopId, customerId, dateTimeMillis, totalDuration)
         if (appointmentId == -1) {
             call.respond(HttpStatusCode.InternalServerError, "Failed to create appointment.")
             return@post
@@ -119,10 +207,18 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         db.addServicesToAppointment(appointmentId, serviceIds)
 
         // Redirect or respond success
-        call.respondRedirect("/booking/confirmation?appointment_id=$appointmentId")
+        call.respondRedirect("/api/booking/confirmation?appointment_id=$appointmentId")
     }
 
-    get("/booking/confirmation") {
+    get("/api/booking/confirmation") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@get
+        }
+
+        db.markBookingTokenUsed(bookingInfo.token)
+
         val appointmentId = call.request.queryParameters["appointment_id"]?.toIntOrNull()
 
         if (appointmentId == null) {
@@ -175,9 +271,6 @@ fun Route.sharedBookingRoutes(db: DataBase) {
                         }
                     }
                 }
-
-                br()
-                a(href = "/") { +"← Back to homepage" }
             }
         }
     }

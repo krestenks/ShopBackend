@@ -6,10 +6,12 @@ document.addEventListener("DOMContentLoaded", function () {
     const timeSelect = document.getElementById("timeSelect");
 
     function fetchShops() {
+        console.log("[BookingUI] Fetching shops...");
         fetch("/api/shops")
             .then(res => res.json())
             .then(data => {
                 const shops = data.shops || data;
+                console.log("[BookingUI] Shops fetched:", shops);
                 shops.forEach(shop => {
                     const option = document.createElement("option");
                     option.value = shop.id;
@@ -19,14 +21,17 @@ document.addEventListener("DOMContentLoaded", function () {
                 if (shops.length > 0) {
                     shopSelect.dispatchEvent(new Event("change"));
                 }
-            });
+            })
+            .catch(err => console.error("[BookingUI] Error fetching shops:", err));
     }
 
     function fetchEmployees(shopId) {
+        console.log(`[BookingUI] Fetching employees for shopId=${shopId}...`);
         fetch(`/api/employees?shop_id=${shopId}`)
             .then(res => res.json())
             .then(data => {
                 const employees = data.employees || data;
+                console.log("[BookingUI] Employees fetched:", employees);
                 employeeSelect.innerHTML = "";
                 employees.forEach(emp => {
                     const opt = document.createElement("option");
@@ -35,14 +40,17 @@ document.addEventListener("DOMContentLoaded", function () {
                     employeeSelect.appendChild(opt);
                 });
                 employeeSelect.dispatchEvent(new Event("change"));
-            });
+            })
+            .catch(err => console.error("[BookingUI] Error fetching employees:", err));
     }
 
     function fetchServices(employeeId) {
+        console.log(`[BookingUI] Fetching services for employeeId=${employeeId}...`);
         fetch(`/api/services?employee_id=${employeeId}`)
             .then(response => response.json())
             .then(data => {
                 const services = data.services || data;
+                console.log("[BookingUI] Services fetched:", services);
                 serviceContainer.innerHTML = "";
                 services.forEach(service => {
                     const checkbox = document.createElement("input");
@@ -60,10 +68,12 @@ document.addEventListener("DOMContentLoaded", function () {
                     container.appendChild(label);
                     serviceContainer.appendChild(container);
                 });
-            });
+            })
+            .catch(err => console.error("[BookingUI] Error fetching services:", err));
     }
 
     function populateDateOptions() {
+        console.log("[BookingUI] Populating date options...");
         dateSelect.innerHTML = "";
         const today = new Date();
         for (let i = 0; i < 7; i++) {
@@ -86,11 +96,17 @@ document.addEventListener("DOMContentLoaded", function () {
         const duration = Array.from(selected).reduce((sum, cb) => sum + parseInt(cb.dataset.duration), 0);
         const date = dateSelect.value;
 
-        if (!shopId || !employeeId || duration === 0 || !date) return;
+        console.log(`[BookingUI] Fetching timeslots for shopId=${shopId}, employeeId=${employeeId}, date=${date}, duration=${duration}`);
+
+        if (!shopId || !employeeId || duration === 0 || !date) {
+            console.warn("[BookingUI] Missing required parameters for timeslots fetch.");
+            return;
+        }
 
         fetch(`/api/timeslots?employee_id=${employeeId}&shop_id=${shopId}&date=${date}&duration=${duration}`)
             .then(res => res.json())
             .then(slots => {
+                console.log("[BookingUI] Time slots fetched:", slots);
                 timeSelect.innerHTML = "";
                 if (slots.length === 0) {
                     const opt = document.createElement("option");
@@ -106,30 +122,47 @@ document.addEventListener("DOMContentLoaded", function () {
                         timeSelect.appendChild(opt);
                     });
                 }
-            });
+            })
+            .catch(err => console.error("[BookingUI] Error fetching time slots:", err));
     }
 
-    function getShopId() {
-        if (shopSelect) {
-            return shopSelect.value;
-        } else if (serviceContainer?.dataset?.shopId) {
+function getShopId() {
+    if (shopSelect) {
+        return shopSelect.value;
+    } else {
+        // Try hidden input fallback:
+        const hiddenShopInput = document.querySelector('input[name="shop_id"]');
+        if (hiddenShopInput) {
+            return hiddenShopInput.value;
+        }
+        if (serviceContainer?.dataset?.shopId) {
             return serviceContainer.dataset.shopId;
         }
-        return null;
     }
+    return null;
+}
 
     // ========== Event Listeners ==========
 
     shopSelect?.addEventListener("change", () => {
+        console.log("[BookingUI] shopSelect changed:", shopSelect.value);
         fetchEmployees(shopSelect.value);
     });
 
     employeeSelect?.addEventListener("change", () => {
+        console.log("[BookingUI] employeeSelect changed:", employeeSelect.value);
         fetchServices(employeeSelect.value);
     });
 
-    serviceContainer?.addEventListener("change", fetchTimeSlots);
-    dateSelect?.addEventListener("change", fetchTimeSlots);
+    serviceContainer?.addEventListener("change", () => {
+        console.log("[BookingUI] service selection changed");
+        fetchTimeSlots();
+    });
+
+    dateSelect?.addEventListener("change", () => {
+        console.log("[BookingUI] dateSelect changed:", dateSelect.value);
+        fetchTimeSlots();
+    });
 
     // ========== Initialization ==========
 

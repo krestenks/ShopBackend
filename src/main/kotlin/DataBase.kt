@@ -1,3 +1,4 @@
+import kotlinx.html.currentTimeMillis
 import org.mindrot.jbcrypt.BCrypt
 import java.io.File
 import java.security.MessageDigest
@@ -9,6 +10,7 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import kotlinx.serialization.Serializable
 import java.util.UUID
+import kotlin.String
 
 @Serializable
 data class SimpleEmployee(val id: Int, val name: String)
@@ -24,6 +26,10 @@ data class Shop(val id: Int, val name: String, val address: String?, val directi
 data class Service(val id: Int, val name: String, val price: Double, val duration: Int)
 @Serializable
 data class TimeSlot(val start: Long, val end: Long)
+@Serializable
+data class Customer(val id: Int, val phone: String, val name: String, val status: String, val payment: Int, val language: Int)
+
+data class BookingTokenInfo(val shopId: Int, val customerId: Int, val token: String)
 data class Appointment(
     val id: Int,
     val employeeId: Int,
@@ -32,6 +38,19 @@ data class Appointment(
     val duration: Int,
     val price: Double
 )
+@Serializable
+data class AppointmentWithServices(
+    val id: Int,
+    val employeeId: Int,
+    val shopId: Int,
+    val dateTime: Long,
+    val duration: Int,
+    val price: Double,
+    val services: List<Service>,
+    val employee: Employee?,
+    val customer: Customer?
+)
+
 
 
 @Serializable
@@ -157,7 +176,115 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     // === DAO methods ===
 
+    fun authenticateShop(username: String, password: String): Shop? {
+        val stmt = connection.prepareStatement("SELECT * FROM shops WHERE username = ?")
+        stmt.setString(1, username)
+        val rs = stmt.executeQuery()
+
+        if (rs.next()) {
+            val hash = rs.getString("password_hash")
+            println("Authenticate shop with pwd:$password, hash: $hash")
+            if (BCrypt.checkpw(password, hash)) {
+                println("Shop verified")
+                return Shop(
+                    id = rs.getInt("id"),
+                    name = rs.getString("name"),
+                    address = rs.getString("address"),
+                    directions = rs.getString("directions"),
+                    managerId = rs.getInt("manager_id")
+                )
+            }
+        }
+
+        rs.close()
+        stmt.close()
+        return null
+    }
+
+    fun authenticateManager(username: String, password: String): Manager? {
+        val stmt = connection.prepareStatement("SELECT * FROM managers WHERE username = ?")
+        stmt.setString(1, username)
+        val rs = stmt.executeQuery()
+
+        if (rs.next()) {
+            val hash = rs.getString("password_hash")
+            println("Authenticate manager with pwd:$password, hash: $hash")
+            if (BCrypt.checkpw(password, hash)) {
+                println("Manager verified")
+                return Manager(
+                    id = rs.getInt("id"),
+                    name = rs.getString("name"),
+                    username = rs.getString("username"),
+                    passwordHash = rs.getString("password_hash"),
+                    phone = rs.getString("phone")
+                )
+            }
+        }
+
+        rs.close()
+        stmt.close()
+        return null
+    }
+
+
     // Booking
+
+    fun getBookingTokenInfo(token: String): BookingTokenInfo? {
+        val sql = """
+        SELECT shop_id, customer_id, created_at, used
+        FROM booking_links
+        WHERE token = ?
+    """.trimIndent()
+
+        val now = Instant.now().epochSecond
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, token)
+            val rs = stmt.executeQuery()
+            if (rs.next()) {
+                val shopId = rs.getInt("shop_id")
+                val customerId = rs.getInt("customer_id")
+                val createdAt = rs.getLong("created_at")
+                val used = rs.getInt("used")
+
+                if ((used == 0) && (createdAt > (System.currentTimeMillis()-3600000)) )
+                {
+                    return BookingTokenInfo(shopId, customerId, token)
+                }
+                else
+                {
+                    println("Booking used or too old: $token, $used, $createdAt")
+                }
+            }
+        }
+
+        return null
+    }
+
+    fun markBookingTokenUsed(token: String): Boolean {
+        val sql = "UPDATE booking_links SET used = 1 WHERE token = ?"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, token)
+            val updatedRows = stmt.executeUpdate()
+            return updatedRows > 0
+        }
+    }
+
+    fun deleteOldBookingTokens(olderThanMillis: Long = 3600_000) {
+        val cutoff = System.currentTimeMillis() - olderThanMillis
+
+        val sql = """
+        DELETE FROM booking_links
+        WHERE used = 1 OR created_at < ?
+    """.trimIndent()
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, cutoff)
+            val deleted = stmt.executeUpdate()
+            println("Deleted $deleted old or used booking tokens")
+        }
+    }
+
     fun generateBookingToken(customerId: Int, shopId: Int, phone: String): String {
         val token = UUID.randomUUID().toString().replace("-", "").take(12)
         val createdAt = System.currentTimeMillis()
@@ -175,6 +302,33 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         return token
     }
+
+    fun getCustomerById(id: Int): Customer? {
+        val stmt = connection.prepareStatement(
+            "SELECT id, phone, name, status, payment, language FROM customers WHERE id = ?"
+        )
+        stmt.setInt(1, id)
+        val rs = stmt.executeQuery()
+
+        val customer = if (rs.next()) {
+            Customer(
+                id = rs.getInt("id"),
+                phone = rs.getString("phone"),
+                name = rs.getString("name"),
+                status = rs.getString("status"),
+                payment = rs.getInt("payment"),
+                language = rs.getInt("language")
+            )
+        } else {
+            null
+        }
+
+        rs.close()
+        stmt.close()
+        return customer
+    }
+
+
     fun getCustomerIdByPhone(phone: String): Int? {
         val stmt = connection.prepareStatement("SELECT id FROM customers WHERE phone = ?")
         stmt.setString(1, phone)
@@ -211,15 +365,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
 
     // Add a new appointment with placeholder price (to be updated later)
-    fun addAppointment(employeeId: Int, shopId: Int, dateTime: Long, duration: Int): Int {
+    fun addAppointment(employeeId: Int, shopId: Int, customerId: Int, dateTime: Long, duration: Int): Int {
         val stmt = connection.prepareStatement(
-            "INSERT INTO appointments (employee_id, shop_id, date_time, duration, price) VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO appointments (employee_id, shop_id, customer_id, date_time, duration, price) VALUES (?, ?, ?, ?, ?, ?)"
         )
         stmt.setInt(1, employeeId)
         stmt.setInt(2, shopId)
-        stmt.setLong(3, dateTime)
-        stmt.setInt(4, duration)
-        stmt.setDouble(5, 0.0)
+        stmt.setInt(3, customerId)
+        stmt.setLong(4, dateTime)
+        stmt.setInt(5, duration)
+        stmt.setDouble(6, 0.0)
         stmt.executeUpdate()
         stmt.close()
 
@@ -333,6 +488,36 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         rs.close()
         stmt.close()
         return appointment
+    }
+
+    fun getAppointmentsForShop(shopId: Int): List<AppointmentWithServices> {
+        val stmt = connection.prepareStatement("SELECT * FROM appointments WHERE shop_id = ?")
+        stmt.setInt(1, shopId)
+        val rs = stmt.executeQuery()
+
+        val appointments = mutableListOf<AppointmentWithServices>()
+        while (rs.next()) {
+            val appointmentId = rs.getInt("id")
+            val services = getServicesForAppointment(appointmentId)
+
+            appointments.add(
+                AppointmentWithServices(
+                    id = appointmentId,
+                    employeeId = rs.getInt("employee_id"),
+                    shopId = rs.getInt("shop_id"),
+                    dateTime = rs.getLong("date_time"),
+                    duration = rs.getInt("duration"),
+                    price = rs.getDouble("price"),
+                    services = services,
+                    customer = getCustomerById(rs.getInt("customer_id")),
+                    employee = getEmployeeById(rs.getInt("employee_id"))
+                )
+            )
+        }
+
+        rs.close()
+        stmt.close()
+        return appointments
     }
 
 
@@ -519,6 +704,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    fun isManagerOfShop(managerId: Int, shopId: Int): Boolean {
+        val sql = "SELECT 1 FROM shops WHERE id = ? AND manager_id = ? LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, managerId)
+            val rs = stmt.executeQuery()
+            val isAuthorized = rs.next()
+            rs.close()
+            return isAuthorized
+        }
+    }
+
+
     fun getAllManagers(): List<Manager> {
         val result = mutableListOf<Manager>()
         val stmt = connection.prepareStatement("SELECT * FROM managers")
@@ -640,7 +838,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         } else null
         rs.close()
         stmt.close()
-        connection.close()
         return manager
     }
 
@@ -687,6 +884,33 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    fun getShopsForManager(managerId: Int): List<Shop> {
+        println("getShopsForManager: $managerId")
+
+        val stmt = connection.prepareStatement(
+            "SELECT * FROM shops WHERE manager_id = ?"
+        )
+        stmt.setInt(1, managerId)
+        val rs = stmt.executeQuery()
+
+        val shops = mutableListOf<Shop>()
+        while (rs.next()) {
+            val shop = Shop(
+                id = rs.getInt("id"),
+                name = rs.getString("name"),
+                address = rs.getString("address"),
+                directions = rs.getString("directions"),
+                managerId = rs.getInt("manager_id")
+            )
+            shops.add(shop)
+        }
+
+        println("Returning shops: $shops")
+
+        rs.close()
+        stmt.close()
+        return shops
+    }
 
     fun getAllShops(): List<Shop> {
         val shops = mutableListOf<Shop>()

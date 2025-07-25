@@ -7,6 +7,11 @@ import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.routing.*
 import org.mindrot.jbcrypt.BCrypt
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.Json
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import io.ktor.server.auth.*
+import io.ktor.server.auth.jwt.*
 
 class ShopBackend {
     companion object {
@@ -21,7 +26,19 @@ class ShopBackend {
             println("Generated bcrypt hash: $hash")
 
             val webAdmin = WebAdmin(db)
-            val customerApi = CustomerApi(db) // You'll define this next
+            val customerApi = CustomerApi(db)
+            val mobileApi = MobileApi(db)
+
+            fun startCleanupScheduler() {
+                val executor = Executors.newSingleThreadScheduledExecutor()
+                executor.scheduleAtFixedRate({
+                    try {
+                        db.deleteOldBookingTokens()
+                    } catch (e: Exception) {
+                        println("Error during booking token cleanup: ${e.message}")
+                    }
+                }, 0, 1, TimeUnit.HOURS)
+            }
 
             runBlocking {
                 launch {
@@ -48,10 +65,23 @@ class ShopBackend {
                             customerApi.setupRoutes(this)
                         }
                         println("Customer API server started on port 9091")
-                    }.start(wait = true)
-
+                    }.start(wait = false)
                 }
+                launch {
+                    embeddedServer(Netty, port = 9092) {
+                        install(ContentNegotiation) {
+                            json(Json { prettyPrint = true })
+                        }
+
+                        JwtConfig.install(this)
+                        routing {
+                            mobileApi.setupRoutes(this)
+                        }
+
+                }.start(wait = true)
+
             }
+        }
         }
     }
 }

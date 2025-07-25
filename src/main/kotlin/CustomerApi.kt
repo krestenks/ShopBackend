@@ -20,6 +20,7 @@ class CustomerApi(private val db: DataBase) {
             static("/static") {
                 resources("static")
             }
+
             sharedBookingRoutes(db) // <- Include shared routes
 
             // Show form to create a new appointment
