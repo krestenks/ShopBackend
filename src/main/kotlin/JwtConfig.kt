@@ -16,11 +16,13 @@ object JwtConfig {
         application.install(Authentication) {
             jwt("jwt") {
                 realm = JwtConfig.realm
+                val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30// 30 days
                 verifier(
                     JWT
                         .require(Algorithm.HMAC256(secret))
                         .withAudience(audience)
                         .withIssuer(issuer)
+                        .acceptExpiresAt(expiresAt)
                         .build()
                 )
                 validate { credential ->
@@ -35,7 +37,7 @@ object JwtConfig {
     }
 
     fun generateToken(userId: Int, role: String): String {
-        val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30 // 30 days
+        val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30// 30 days
         return JWT.create()
             .withAudience(audience)
             .withIssuer(issuer)
