@@ -35,7 +35,7 @@ object JwtConfig {
     }
 
     fun generateToken(userId: Int, role: String): String {
-        val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 // 30 days
+        val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30 // 30 days
         return JWT.create()
             .withAudience(audience)
             .withIssuer(issuer)

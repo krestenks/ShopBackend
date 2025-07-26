@@ -11,7 +11,7 @@ fun FlowContent.bookingForm(shopId: Int? = null, customerId: Int? = null) {
             action = "/api/booking/submit"
             method = FormMethod.post
 
-            if (shopId != null) {
+            if (shopId != null && shopId > -1) {
                 input {
                     type = InputType.hidden
                     name = "shop_id"

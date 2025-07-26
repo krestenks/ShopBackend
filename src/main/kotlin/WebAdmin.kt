@@ -818,7 +818,10 @@ class WebAdmin(private val db: DataBase) {
                             }
                         }
                         br()
-                        a(href = "/appointments/add") { +"Add New Appointment" }
+                        val bookingToken = db.generateBookingToken( 0, -1, "12345678")
+                        val baseUrl = System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:9091"
+                        val fullUrl = "$baseUrl/api/book?token=$bookingToken"
+                        a(href = fullUrl) { +"Add New Appointment" }
                     }
                 }
             }

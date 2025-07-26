@@ -305,7 +305,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getCustomerById(id: Int): Customer? {
         val stmt = connection.prepareStatement(
-            "SELECT id, phone, name, status, payment, language FROM customers WHERE id = ?"
+            "SELECT * FROM customers WHERE id = ?"
         )
         stmt.setInt(1, id)
         val rs = stmt.executeQuery()
@@ -342,7 +342,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun insertNewCustomer(phone: String): Int {
-        val insertStmt = connection.prepareStatement("INSERT INTO customers (phone, status) VALUES (?, 'New')")
+        val insertStmt = connection.prepareStatement("INSERT INTO customers (phone, status, name, payment, language) VALUES (?, 'New', 'NoName', 0, 0)")
         insertStmt.setString(1, phone)
         insertStmt.executeUpdate()
         insertStmt.close()
@@ -491,7 +491,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getAppointmentsForShop(shopId: Int): List<AppointmentWithServices> {
-        val stmt = connection.prepareStatement("SELECT * FROM appointments WHERE shop_id = ?")
+        val stmt = connection.prepareStatement("SELECT * FROM appointments WHERE shop_id = ? ORDER BY date_time ASC")
         stmt.setInt(1, shopId)
         val rs = stmt.executeQuery()
 

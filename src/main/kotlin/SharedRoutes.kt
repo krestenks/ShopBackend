@@ -107,7 +107,12 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         // Optional: Use only customerId/shopId from token to prevent tampering
         val customerId = bookingInfo.customerId
-        val shopId = bookingInfo.shopId
+        var shopId: Int? = bookingInfo.shopId
+        if(shopId != null && shopId < 0)
+        {
+            shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
+        }
+        if(shopId == null) { shopId = 0}
 
         val employees = db.getEmployeesForShop(shopId)
         call.respond(EmployeeList(employees))
@@ -136,13 +141,25 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             return@get
         }
 
-        // Optional: Use only customerId/shopId from token to prevent tampering
-        val shopId = bookingInfo.shopId
+        // Enforce shopId from token, but allow override only if current shopId is -1
+        val tokenShopId = bookingInfo.shopId
+        val queryShopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
+
+        val shopId = if (tokenShopId == -1 && queryShopId != null) {
+            queryShopId
+        } else {
+            tokenShopId
+        }
+
+        if (shopId == null || shopId <= 0) {
+            call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
+            return@get
+        }
         val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
         val date = call.request.queryParameters["date"]
         val duration = call.request.queryParameters["duration"]?.toIntOrNull()
 
-        if (employeeId == null || date == null || duration == null) {
+        if (employeeId == null || date == null || duration == null || shopId == null) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid parameters")
             return@get
         }
@@ -161,9 +178,25 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         // Optional: Use only customerId/shopId from token to prevent tampering
         val customerId = bookingInfo.customerId
-        val shopId = bookingInfo.shopId
-
+        // Enforce shopId from token, but allow override only if current shopId is -1
+        val tokenShopId = bookingInfo.shopId
         val params = call.receiveParameters()
+        val queryShopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
+            ?: params["shop_id"]?.toIntOrNull()
+
+        println("/api/booking/submit $tokenShopId, $queryShopId")
+
+        val shopId = if (tokenShopId == -1 && queryShopId != null) {
+            queryShopId
+        } else {
+            tokenShopId
+        }
+
+        if (shopId == null || shopId <= 0) {
+            call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
+            return@post
+        }
+
         val employeeId = params["employee_id"]?.toIntOrNull()
         val dateTimeStr = params["appointment_time"] // Expected format: "yyyy-MM-dd HH:mm"
         val serviceIds = params.getAll("service_ids")?.mapNotNull { it.toIntOrNull() } ?: emptyList()
