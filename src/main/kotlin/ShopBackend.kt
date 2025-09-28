@@ -19,6 +19,8 @@ class ShopBackend {
         fun main(args: Array<String>) {
             println("ShopBackend started!")
 
+            val dbPath = "";
+
             val db = DataBase() // This loads or creates the DB
             println("Database initialized.")
 
