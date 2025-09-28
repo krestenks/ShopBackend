@@ -2,43 +2,43 @@
 # Upsun-style CI/build descriptor (example)
 # Adjust './gradlew' vs 'gradle' depending on your repo
 
-
 version: "1.0"
 name: ShopBackend
 
-
 environment:
-JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+  JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
 
+routes:
+  - src: "https://{default}/"
+    dest: "http://localhost:9090"
+  - src: "https://{default}/api/"
+    dest: "http://localhost:9091"
+  - src: "https://{default}/mobile/"
+    dest: "http://localhost:9092"
 
 steps:
-- name: Install dependencies
-run: |
-chmod +x ./gradlew || true
-./gradlew --no-daemon dependencies || true
+  - name: Install dependencies
+    run: |
+      chmod +x ./gradlew || true
+      ./gradlew --no-daemon dependencies || true
 
+  - name: Build
+    run: |
+      ./gradlew --no-daemon clean build -x test
 
-- name: Build
-run: |
-./gradlew --no-daemon clean build -x test
-
-
-- name: Package
-run: |
-mkdir -p dist
-# adjust path if your jar name differs
-cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
-
+  - name: Package
+    run: |
+      mkdir -p dist
+      # adjust path if your jar name differs
+      cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
 
 artifacts:
-- src: dist/ShopBackend.jar
-dest: /artifacts/ShopBackend.jar
-
+  - src: dist/ShopBackend.jar
+    dest: /artifacts/ShopBackend.jar
 
 # optional: cache Gradle wrapper and .gradle
 cache:
-- .gradle
-- ~/.gradle
-
+  - .gradle
+  - ~/.gradle
 
 # If your CI system expects additional fields, add them here.
