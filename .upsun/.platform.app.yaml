@@ -1,0 +1,22 @@
+# .platform.app.yaml
+name: shopbackend
+type: "docker:17" # using Docker build
+
+
+# Declare persistent storage for SQLite
+mounts:
+'/data': 'shared:files'
+
+
+relationships: {}
+
+
+hooks:
+build: |
+echo "Using Docker-based app; build handled by Dockerfile"
+
+
+disk: 1024
+
+
+# If you want to expose ports, platform.sh routes should be configured separately.

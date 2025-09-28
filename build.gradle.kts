@@ -1,3 +1,5 @@
+
+
 plugins {
     kotlin("jvm") version "1.9.10"
     kotlin("plugin.serialization") version "1.9.0"
@@ -6,6 +8,11 @@ plugins {
 
 kotlin {
     jvmToolchain(17)
+}
+
+tasks.jar {
+    archiveFileName.set("ShopBackend.jar")
+    destinationDirectory.set(file("$projectDir/dist"))
 }
 
 repositories {

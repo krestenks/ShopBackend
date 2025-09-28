@@ -1,0 +1,44 @@
+# .upsun/config.yaml
+# Upsun-style CI/build descriptor (example)
+# Adjust './gradlew' vs 'gradle' depending on your repo
+
+
+version: "1.0"
+name: ShopBackend
+
+
+environment:
+JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+
+
+steps:
+- name: Install dependencies
+run: |
+chmod +x ./gradlew || true
+./gradlew --no-daemon dependencies || true
+
+
+- name: Build
+run: |
+./gradlew --no-daemon clean build -x test
+
+
+- name: Package
+run: |
+mkdir -p dist
+# adjust path if your jar name differs
+cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
+
+
+artifacts:
+- src: dist/ShopBackend.jar
+dest: /artifacts/ShopBackend.jar
+
+
+# optional: cache Gradle wrapper and .gradle
+cache:
+- .gradle
+- ~/.gradle
+
+
+# If your CI system expects additional fields, add them here.
