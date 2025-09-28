@@ -1,16 +1,15 @@
-# .platform/routes.yaml
-
-main:
+"https://{default}/":
   type: upstream
   upstream: "shopbackend:http"
-  url: "https://{default}/"
 
-api:
+"https://{default}/api/":
   type: upstream
   upstream: "shopbackend:http"
-  url: "https://{default}/api/"
 
-mobile:
+"https://{default}/mobile/":
   type: upstream
   upstream: "shopbackend:http"
-  url: "https://{default}/mobile/"
+
+"https://www.{default}/":
+  type: redirect
+  to: "https://{default}/"
