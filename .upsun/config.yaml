@@ -1,43 +1,55 @@
 # .upsun/config.yaml
-# Upsun / platform-style configuration
-# Top-level keys must be one of: applications, services, or routes
 
 applications:
   shopbackend:
-    # type can be 'docker' or 'php' etc. Use docker here if you build an image, otherwise leave generic.
-    type: "generic"
-    disk: 1024
-    environment:
-      JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+    type: "java:17"
 
-    # Build hooks: run your Gradle build here and produce the dist/ShopBackend.jar artifact.
+    # Optional: if your code isn't at repo root, set the source root
+    # source:
+    #   root: "/"
+
+    variables:
+      env:
+        JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+
+    # Writable, persistent storage (e.g., for file uploads, SQLite, etc.)
+    mounts:
+      "data":
+        source: storage
+        source_path: "data"
+
+    # Build your jar once during the build phase.
     hooks:
       build: |
         set -euo pipefail
         chmod +x ./gradlew || true
         ./gradlew --no-daemon clean build -x test
-        mkdir -p dist
-        # copy the fat jar if present, otherwise the regular jar
-        cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
+        # Copy the built JAR to a stable filename so the start command is simple.
+        cp build/libs/*-all.jar app.jar || cp build/libs/*.jar app.jar
 
-    # artifacts that will be uploaded from the built repo
-    artifacts:
-      - src: dist/ShopBackend.jar
-        dest: /artifacts/ShopBackend.jar
+    # How the app is served
+    web:
+      commands:
+        # Expose your app on the port provided by Upsun ($PORT).
+        # For Spring Boot, --server.port=$PORT works; for other frameworks set their port option.
+        start: |
+          java -jar app.jar --server.port=$PORT
 
-    # optional relationships or services can be declared here if needed
-    relationships: {}
+      # If you also serve static files directly, you can add locations here.
+      # locations:
+      #   "/":
+      #     passthru: true
 
-# Routes: map public paths to internal ports. Adjust domains/paths as needed for your environment.
+# Routes: each key is the public URL; route to the app's HTTP upstream.
 routes:
-  src: "https://{default}/"
-  dest: "http://localhost:9090"
-  src: "https://{default}/api/"
-  dest: "http://localhost:9091"
-  src: "https://{default}/mobile/"
-  dest: "http://localhost:9092"
+  "https://{default}/":
+    type: upstream
+    upstream: "shopbackend:http"
 
-# Optional cache entries (keep Gradle caches)
-cache:
-  - .gradle
-  - ~/.gradle
+  "https://{default}/api/":
+    type: upstream
+    upstream: "shopbackend:http"
+
+  "https://{default}/mobile/":
+    type: upstream
+    upstream: "shopbackend:http"
