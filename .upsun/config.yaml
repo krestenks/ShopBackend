@@ -30,12 +30,12 @@ applications:
 
 # Routes: map public paths to internal ports. Adjust domains/paths as needed for your environment.
 routes:
-  - src: "https://{default}/"
-    dest: "http://localhost:9090"
-  - src: "https://{default}/api/"
-    dest: "http://localhost:9091"
-  - src: "https://{default}/mobile/"
-    dest: "http://localhost:9092"
+  src: "https://{default}/"
+  dest: "http://localhost:9090"
+  src: "https://{default}/api/"
+  dest: "http://localhost:9091"
+  src: "https://{default}/mobile/"
+  dest: "http://localhost:9092"
 
 # Optional cache entries (keep Gradle caches)
 cache:
