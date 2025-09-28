@@ -1,0 +1,9 @@
+"https://{default}/":
+  type: upstream
+  upstream: "shopbackend:http"
+"https://{default}/api/":
+  type: upstream
+  upstream: "shopbackend:http"
+"https://{default}/mobile/":
+  type: upstream
+  upstream: "shopbackend:http"
