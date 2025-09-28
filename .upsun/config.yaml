@@ -20,21 +20,15 @@ applications:
 
     # Build your jar once during the build phase.
     hooks:
-      build: |
-        set -eu
-        chmod +x ./gradlew || true
-        ./gradlew --no-daemon clean build -x test
-        # Copy the built JAR to a stable filename so the start command is simple.
-        mkdir -p dist
-        cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
+     build: |
+       set -eu
+       chmod +x ./gradlew || true
+       ./gradlew --no-daemon clean shadowJar -x test
 
-    # How the app is served
     web:
       commands:
-        # Expose your app on the port provided by Upsun ($PORT).
-        # For Spring Boot, --server.port=$PORT works; for other frameworks set their port option.
-        start: |
-          java -jar app.jar --server.port=$PORT
+      # Ktor reads these system properties; host ensures it binds externally.
+      start: 'java -Dktor.deployment.host=0.0.0.0 -Dktor.deployment.port=$PORT -jar dist/ShopBackend.jar --db=/data/ShopManager.db'
 
       # If you also serve static files directly, you can add locations here.
       # locations:

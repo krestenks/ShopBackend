@@ -15,7 +15,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 class CustomerApi(private val db: DataBase) {
-    fun setupRoutes(routing: Routing) {
+    fun setupRoutes(routing: Route) {
         routing {
             static("/static") {
                 resources("static")

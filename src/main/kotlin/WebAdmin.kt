@@ -18,7 +18,7 @@ class WebAdmin(private val db: DataBase) {
 
     data class AdminSession(val username: String)
 
-    fun setupRoutes(routing: Routing) {
+    fun setupRoutes(routing: Route) {
         routing {
             static("/static") {
                 resources("static")

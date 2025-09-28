@@ -1,23 +1,14 @@
-
-
 plugins {
     kotlin("jvm") version "1.9.10"
     kotlin("plugin.serialization") version "1.9.0"
     application
+    id("com.github.johnrengelman.shadow") version "8.1.1"   // ⬅ add
 }
 
-kotlin {
-    jvmToolchain(17)
-}
+kotlin { jvmToolchain(17) }
 
-tasks.jar {
-    archiveFileName.set("ShopBackend.jar")
-    destinationDirectory.set(file("$projectDir/dist"))
-}
+repositories { mavenCentral() }
 
-repositories {
-    mavenCentral()
-}
 val ktorVersion = "2.3.7"
 
 dependencies {
@@ -25,10 +16,10 @@ dependencies {
     implementation("org.slf4j:slf4j-simple:2.0.13")
     implementation("org.mindrot:jbcrypt:0.4")
     implementation("io.ktor:ktor-server-core:$ktorVersion")
-    implementation("io.ktor:ktor-server-auth:${ktorVersion}")
-    implementation("io.ktor:ktor-server-auth-jwt:${ktorVersion}")
+    implementation("io.ktor:ktor-server-auth:$ktorVersion")
+    implementation("io.ktor:ktor-server-auth-jwt:$ktorVersion")
     implementation("io.ktor:ktor-server-netty:$ktorVersion")
-    implementation("io.ktor:ktor-server-sessions:${ktorVersion}")
+    implementation("io.ktor:ktor-server-sessions:$ktorVersion")
     implementation("io.ktor:ktor-server-html-builder:$ktorVersion")
     implementation("io.ktor:ktor-server-content-negotiation:$ktorVersion")
     implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
@@ -37,4 +28,11 @@ dependencies {
 
 application {
     mainClass.set("MainKt")
+}
+
+tasks.jar { enabled = false } // optional: avoid producing a thin jar
+
+tasks.shadowJar {
+    archiveFileName.set("ShopBackend.jar")
+    destinationDirectory.set(layout.projectDirectory.dir("dist"))
 }

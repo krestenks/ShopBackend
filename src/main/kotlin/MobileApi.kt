@@ -61,7 +61,7 @@ suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginI
 
 
 class MobileApi(private val db: DataBase) {
-    fun setupRoutes(routing: Routing) {
+    fun setupRoutes(routing: Route) {
         routing {
 
             post("/api/mobile/login") {
