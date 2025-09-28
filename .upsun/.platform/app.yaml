@@ -1,0 +1,17 @@
+applications:
+  shopbackend:
+    type: "docker:17"
+    disk: 1024
+
+    # Environment variables
+    variables:
+      env:
+        JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+
+    # Persistent storage for SQLite
+    mounts:
+      "/data": "shared:files"
+
+    hooks:
+      build: |
+        echo "Building Docker-based ShopBackend app..."

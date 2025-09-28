@@ -1,0 +1,14 @@
+main:
+  type: upstream
+  upstream: "shopbackend:http"
+  url: "https://{default}/"
+
+api:
+  type: upstream
+  upstream: "shopbackend:http"
+  url: "https://{default}/api/"
+
+mobile:
+  type: upstream
+  upstream: "shopbackend:http"
+  url: "https://{default}/mobile/"
