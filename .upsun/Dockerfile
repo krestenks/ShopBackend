@@ -25,7 +25,7 @@ RUN cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/Sho
 VOLUME ["/data"]
 
 # Expose ports your app listens on
-EXPOSE 9090 9091 9092
+EXPOSE 8080
 
 # Runtime command, passing SQLite DB path
 CMD ["java", "-jar", "/app/dist/ShopBackend.jar", "--db.path=/data/ShopManager.db"]
