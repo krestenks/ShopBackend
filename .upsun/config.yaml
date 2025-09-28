@@ -21,11 +21,12 @@ applications:
     # Build your jar once during the build phase.
     hooks:
       build: |
-        set -euo pipefail
+        set -eu
         chmod +x ./gradlew || true
         ./gradlew --no-daemon clean build -x test
         # Copy the built JAR to a stable filename so the start command is simple.
-        cp build/libs/*-all.jar app.jar || cp build/libs/*.jar app.jar
+        mkdir -p dist
+        cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
 
     # How the app is served
     web:
