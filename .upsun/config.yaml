@@ -27,8 +27,8 @@ applications:
 
     web:
       commands:
-      # Ktor reads these system properties; host ensures it binds externally.
-      start: 'java -Dktor.deployment.host=0.0.0.0 -Dktor.deployment.port=$PORT -jar dist/ShopBackend.jar --db=/data/ShopManager.db'
+        # Ktor reads these system properties; host ensures it binds externally.
+        start: 'java -Dktor.deployment.host=0.0.0.0 -Dktor.deployment.port=$PORT -jar dist/ShopBackend.jar --db=/data/ShopManager.db'
 
       # If you also serve static files directly, you can add locations here.
       # locations:
