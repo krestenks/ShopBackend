@@ -1,22 +1,31 @@
-# Dockerfile
-FROM eclipse-temurin:17-jdk-jammy
+# Use official OpenJDK 17
+FROM eclipse-temurin:17-jdk-alpine
 
-
+# Set working directory
 WORKDIR /app
 
+# Copy Gradle wrapper and source
+COPY gradlew .
+COPY gradle gradle
+COPY build.gradle.kts .
+COPY settings.gradle.kts .
+COPY src src
 
-# Copy jar built by CI into image
-COPY dist/ShopBackend.jar /app/ShopBackend.jar
+# Make Gradle wrapper executable
+RUN chmod +x ./gradlew
 
+# Build the jar
+RUN ./gradlew clean shadowJar -x test
 
-# Create directory for SQLite DB and make it a volume in deployments
-RUN mkdir -p /data
+# Copy the jar to /app
+RUN mkdir -p dist
+RUN cp build/libs/*-all.jar dist/ShopBackend.jar || cp build/libs/*.jar dist/ShopBackend.jar
+
+# Make /data persistent
 VOLUME ["/data"]
 
-
-# Expose expected ports
+# Expose ports your app listens on
 EXPOSE 9090 9091 9092
 
-
-# Default command
-CMD ["java", "-jar", "/app/ShopBackend.jar", "--db.path=/data/ShopManager.db"]
+# Runtime command, passing SQLite DB path
+CMD ["java", "-jar", "/app/dist/ShopBackend.jar", "--db.path=/data/ShopManager.db"]
