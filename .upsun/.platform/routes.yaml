@@ -1,3 +1,5 @@
+# .platform/routes.yaml
+
 main:
   type: upstream
   upstream: "shopbackend:http"
