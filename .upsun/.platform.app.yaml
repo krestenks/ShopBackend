@@ -18,17 +18,17 @@ applications:
         echo "Building Docker-based ShopBackend app..."
 
 routes:
-  shopbackend_main:
+  main:
     type: upstream
     upstream: "shopbackend:http"
     url: "https://{default}/"
 
-  shopbackend_api:
+  api:
     type: upstream
     upstream: "shopbackend:http"
     url: "https://{default}/api/"
 
-  shopbackend_mobile:
+  mobile:
     type: upstream
     upstream: "shopbackend:http"
     url: "https://{default}/mobile/"
