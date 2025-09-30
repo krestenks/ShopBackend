@@ -27,7 +27,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("MainKt")
+    mainClass.set("ShopBackend")
 }
 
 tasks.jar { enabled = false } // optional: avoid producing a thin jar
