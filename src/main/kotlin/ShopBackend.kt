@@ -43,6 +43,8 @@ object ShopBackend {
         val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
         val host = "0.0.0.0"
 
+        println("ShopBackend listening on $host:$port")
+
         embeddedServer(Netty, port = port, host = host) {
             // global plugins
             install(ContentNegotiation) {
