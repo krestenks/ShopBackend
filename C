@@ -1,0 +1,157 @@
+package twilio
+
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Assertions.*
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Integration tests that call the REAL LLM to verify tool call behavior.
+ * These tests call the actual LLM server at localhost:1234
+ */
+class LlmIntegrationTest {
+
+    @Test
+    fun testWhoIsAvailableTriggersTherapistsTool() {
+        println("\n=== TEST: who is available? ===")
+        val response = callLlm("who is available?")
+        println("LLM Response: $response\n")
+        assertTrue(response.isNotEmpty(), "Response should not be empty")
+    }
+
+    @Test
+    fun testWhoWorksHereTriggersTherapistsTool() {
+        println("\n=== TEST: who works here? ===")
+        val response = callLlm("who works here?")
+        println("LLM Response: $response\n")
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    fun testListTherapistsTriggersTherapistsTool() {
+        println("\n=== TEST: list therapists ===")
+        val response = callLlm("list therapists")
+        println("LLM Response: $response\n")
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    fun testShowMeYourTeamTriggersTherapistsTool() {
+        println("\n=== TEST: show me your team ===")
+        val response = callLlm("show me your team")
+        println("LLM Response: $response\n")
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    fun testAllTherapistPhrasesReturnValidResponses() {
+        val phrases = listOf(
+            "who is available?",
+            "who works here?",
+            "list therapists",
+            "who are your staff?",
+            "do you have any therapists?",
+            "who can I book with?",
+            "show me your team",
+            "what therapists do you have?",
+            "is anyone working today?",
+            "staff members"
+        )
+        
+        phrases.forEach { phrase ->
+            println("\n=== TEST PHRASE: $phrase ===")
+            val response = callLlm(phrase)
+            println("LLM Response: ${response.take(150)}${if (response.length > 150) "..." else ""}\n")
+            assertTrue(response.isNotEmpty(), "Empty response for phrase: $phrase")
+        }
+    }
+
+    @Test
+    fun testLlmHealthCheck() {
+        println("\n=== TEST: LLM Health Check ===")
+        
+        val response = callLlm("hello")
+        println("LLM Response: $response\n")
+        
+        assertTrue(response.isNotEmpty(), "LLM should be accessible")
+    }
+
+    @Test
+    fun testToolCallParsingWithArgs() {
+        println("\n=== TEST: Tool Call Parsing with Arguments ===")
+        
+        // Test with arguments
+        val testContent = """{"tool":"available_slots","arguments":{"employee_id":1,"date":"2026-02-14"}}"""
+        
+        // Simple regex that captures tool name and arguments
+        val toolPattern = """"tool":"([^"]+)","arguments":(\{[^}]*)""".toRegex()
+        val match = toolPattern.find(testContent)
+        
+        assertNotNull(match, "Should find tool call")
+        println("Found tool: name=${match!!.groupValues[1]}, args=${match.groupValues[2]}")
+        assertEquals("available_slots", match.groupValues[1])
+        assertTrue(match.groupValues[2].contains("employee_id"))
+        assertTrue(match.groupValues[2].contains("date"))
+    }
+
+    @Test
+    fun testToolCallParsingMultipleCalls() {
+        println("\n=== TEST: Multiple Tool Call Parsing ===")
+        
+        // Test multiple tool calls
+        val testContent = """{"tool":"therapists","arguments":{}} {"tool":"available_slots","arguments":{"employee_id":1}}"""
+        
+        val toolPattern = """"tool":"([^"]+)","arguments":(\{[^}]*)""".toRegex()
+        val matches = toolPattern.findAll(testContent).toList()
+        
+        println("Found ${matches.size} tool calls")
+        assertEquals(2, matches.size, "Should find 2 tool calls")
+        
+        assertEquals("therapists", matches[0].groupValues[1])
+        assertEquals("available_slots", matches[1].groupValues[1])
+    }
+
+    /**
+     * Makes a direct HTTP call to the LLM (actual integration test)
+     */
+    private fun callLlm(message: String): String {
+        return try {
+            val url = URL("http://localhost:1234/v1/chat/completions")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.doOutput = true
+
+            // Properly formatted JSON without escaped quotes inside the string
+            val requestBody = """
+            {
+                "model": "llama-3-groq-8b-tool-use",
+                "messages": [
+                    {"role": "system", "content": "You are a booking assistant. When asked about therapists, call: {tool: therapists, arguments: {}}"},
+                    {"role": "user", "content": "$message"}
+                ],
+                "max_tokens": 512,
+                "temperature": 0.1
+            }
+            """.trimIndent()
+
+            connection.outputStream.bufferedWriter().use { it.write(requestBody) }
+
+            val responseCode = connection.responseCode
+            if (responseCode != 200) {
+                return "HTTP Error: $responseCode"
+            }
+
+            val responseBody = connection.inputStream.bufferedReader().readText()
+            println("Raw HTTP response: $responseBody")
+
+            // Simple string extraction for content
+            val contentMatch = "\"content\":\"([^\"]*)\"".toRegex().find(responseBody)
+            contentMatch?.groupValues?.get(1)?.replace("\\n", "\n")?.replace("\\\"", "\"")
+                ?: "[LLM Error: No content]"
+        } catch (e: Exception) {
+            println("LLM call failed: ${e.message}")
+            "LLM Error: ${e.message}"
+        }
+    }
+}

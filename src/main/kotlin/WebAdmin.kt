@@ -10,7 +10,7 @@ import io.ktor.server.routing.*
 import io.ktor.server.sessions.*
 import kotlinx.html.*
 import org.mindrot.jbcrypt.BCrypt
-import shared.components.bookingForm
+import shared.components.BookingUI
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -47,7 +47,8 @@ class WebAdmin(private val db: DataBase) {
                 val password = params["password"] ?: ""
 
                 val allowedAdminUsername = "admin"
-                val expectedHash = "\$2a\$12\$nQk81rAIlxMeoP.RcBZd9eaJ.wK2fanoVl7y0w18cNXipPZAZsf6G" // Hash of "1234"
+                val expectedHash = "$2a$12\$bRyq/lqNzQbmYGAzS2V2qexIOd3es/8.URdwPmcamFTBGieqsodpW" // Hash of "1234"
+                //val expectedHash = "\$2a\$12\$L6lsy/RxF/FKk0ct4tQrL.f7acwEbf9wNatDed3PJKCNakSBVlKP2" //
 
                 if (username == allowedAdminUsername && org.mindrot.jbcrypt.BCrypt.checkpw(password, expectedHash)) {
                     call.sessions.set(AdminSession(username))
@@ -766,9 +767,9 @@ class WebAdmin(private val db: DataBase) {
                 call.respondRedirect("/assign-services")
             }
 
-            get("/assign-services/remove") {
-                val empId = call.request.queryParameters["emp"]?.toIntOrNull()
-                val svcId = call.request.queryParameters["svc"]?.toIntOrNull()
+            get("/unassign-service") {
+                val empId = call.request.queryParameters["employee_id"]?.toIntOrNull()
+                val svcId = call.request.queryParameters["service_id"]?.toIntOrNull()
                 if (empId != null && svcId != null) {
                     db.removeServiceFromEmployee(empId, svcId)
                 }
@@ -828,12 +829,18 @@ class WebAdmin(private val db: DataBase) {
 
             // Show form to create a new appointment
             get("/appointments/add") {
-                call.respondHtml {
-                    body {
-                        header()
-                        bookingForm(customerId = 1) // or from call.parameters
-                    }
-                }
+                call.respondText(
+                    """
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Book Appointment</title></head>
+                    <body>
+                    ${BookingUI.getFormHtml(shopId = 1, customerId = 1)}
+                    </body>
+                    </html>
+                    """.trimIndent(),
+                    ContentType.Text.Html
+                )
             }
 
 

@@ -16,7 +16,6 @@ import io.ktor.util.pipeline.PipelineContext
 import kotlinx.html.*
 import kotlinx.serialization.json.Json
 import org.mindrot.jbcrypt.BCrypt
-import shared.components.bookingForm
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.serialization.*

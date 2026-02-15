@@ -1,0 +1,171 @@
+package twilio
+
+import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
+import io.mockk.*
+
+/**
+ * Integration tests that call the REAL LLM to verify tool call behavior.
+ * These tests require the LLM server to be running at localhost:1234
+ * 
+ * Set environment variable LLM_AVAILABLE=true to enable these tests:
+ * LLM_AVAILABLE=true ./gradlew test
+ * 
+ * Or on Windows:
+ * set LLM_AVAILABLE=true && gradlew test
+ */
+class LlmIntegrationTest {
+
+    private val mockDb = mockk<DataBase>(relaxed = true)
+    private val config = ChatbotConfig(
+        lmStudioUrl = "http://localhost:1234/v1",
+        lmStudioModel = "llama-3-groq-8b-tool-use"
+    )
+    private val service = TwilioChatbotService(mockDb, config)
+
+    // Setup mock data
+    init {
+        every { mockDb.getEmployeesForShop(1) } returns listOf(
+            DataBase.Employee(1, "Bill", "12345678"),
+            DataBase.Employee(2, "Bimi", "87654321")
+        )
+        every { mockDb.getServicesForEmployee(1) } returns listOf(
+            DataBase.Service(1, "Massage", 100.0, 60),
+            DataBase.Service(2, "Facial", 80.0, 45)
+        )
+        every { mockDb.getServicesForEmployee(2) } returns listOf(
+            DataBase.Service(3, "Deep Tissue", 150.0, 90)
+        )
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testWhoIsAvailableTriggersTherapistsTool() = runBlocking {
+        val response = service.processMessage("+4512345678", "who is available?", 1)
+        
+        println("Response: $response")
+        
+        // The response should mention therapists or the tool should have been called
+        // We verify the system is working by checking response is not an error
+        assertFalse(response.contains("Sorry, I'm having trouble"), 
+            "LLM should be accessible and return a valid response")
+        assertTrue(response.isNotEmpty(), "Response should not be empty")
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testWhoWorksHereTriggersTherapistsTool() = runBlocking {
+        val response = service.processMessage("+4512345678", "who works here?", 1)
+        
+        println("Response: $response")
+        
+        assertFalse(response.contains("Sorry, I'm having trouble"))
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testListTherapistsTriggersTherapistsTool() = runBlocking {
+        val response = service.processMessage("+4512345678", "list therapists", 1)
+        
+        println("Response: $response")
+        
+        assertFalse(response.contains("Sorry, I'm having trouble"))
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testShowMeYourTeamTriggersTherapistsTool() = runBlocking {
+        val response = service.processMessage("+4512345678", "show me your team", 1)
+        
+        println("Response: $response")
+        
+        assertFalse(response.contains("Sorry, I'm having trouble"))
+        assertTrue(response.isNotEmpty())
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testAllTherapistPhrasesReturnValidResponses() = runBlocking {
+        val phrases = listOf(
+            "who is available?",
+            "who works here?",
+            "list therapists",
+            "who are your staff?",
+            "do you have any therapists?",
+            "who can I book with?",
+            "show me your team",
+            "what therapists do you have?",
+            "is anyone working today?",
+            "staff members"
+        )
+        
+        phrases.forEach { phrase ->
+            val response = service.processMessage("+4512345678$phrase", phrase, 1)
+            println("Phrase: '$phrase' -> Response: ${response.take(100)}...")
+            
+            assertFalse(response.contains("Sorry, I'm having trouble"), 
+                "LLM failed for phrase: $phrase")
+            assertTrue(response.isNotEmpty(), 
+                "Empty response for phrase: $phrase")
+        }
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testConversationContinuesWithMultipleMessages() = runBlocking {
+        // First message
+        val response1 = service.processMessage("+4512345678", "hi", 1)
+        println("Response 1: ${response1.take(100)}")
+        
+        // Second message
+        val response2 = service.processMessage("+4512345678", "who is available?", 1)
+        println("Response 2: ${response2.take(100)}")
+        
+        // Third message  
+        val response3 = service.processMessage("+4512345678", "thanks", 1)
+        println("Response 3: ${response3.take(100)}")
+        
+        assertFalse(response1.contains("Sorry, I'm having trouble"))
+        assertFalse(response2.contains("Sorry, I'm having trouble"))
+        assertFalse(response3.contains("Sorry, I'm having trouble"))
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testDifferentPhoneNumbersHaveSeparateConversations() = runBlocking {
+        val response1 = service.processMessage("+4512345678", "hi", 1)
+        val response2 = service.processMessage("+4587654321", "hi", 1)
+        
+        println("User 1 response: ${response1.take(50)}")
+        println("User 2 response: ${response2.take(50)}")
+        
+        assertFalse(response1.contains("Sorry, I'm having trouble"))
+        assertFalse(response2.contains("Sorry, I'm having trouble"))
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "LLM_AVAILABLE", matches = "true")
+    fun testLlmHealthCheck() = runBlocking {
+        // Simple health check - if this works, LLM is accessible
+        val response = service.processMessage("+4512345678", "hello", 1)
+        
+        println("Health check response: ${response.take(100)}")
+        
+        assertFalse(response.contains("Sorry, I'm having trouble"), 
+            "LLM health check failed - is the server running at localhost:1234?")
+    }
+}
+
+/**
+ * Test helper to check if LLM is available
+ */
+object LlmAvailability {
+    @JvmStatic
+    fun isLlmAvailable(): Boolean {
+        return System.getenv("LLM_AVAILABLE")?.equals("true", ignoreCase = true) ?: false
+    }
+}

@@ -160,10 +160,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             );
             """,
             """
-            CREATE TABLE IF NOT EXISTS employee_specialty (
+            CREATE TABLE IF NOT EXISTS employee_services (
                 employee_id INTEGER,
-                specialty_id INTEGER,
-                PRIMARY KEY (employee_id, specialty_id)
+                service_id INTEGER,
+                PRIMARY KEY (employee_id, service_id)
             );
             """
         )
@@ -171,6 +171,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         for (sql in sqlStatements) {
             connection.createStatement().use { stmt -> stmt.execute(sql) }
         }
+
+        // Migration: rename old table if it exists
+        try {
+            connection.createStatement().use { stmt ->
+                stmt.execute("ALTER TABLE employee_specialty RENAME TO employee_services")
+                println("Migrated employee_specialty to employee_services")
+            }
+        } catch (e: Exception) {
+            // Table already exists or other error - ignore
+        }
+
         println("All tables ready.")
     }
 
@@ -739,7 +750,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun addManager(name: String, username: String, password: String, phone: String?) {
         val stmt = connection.prepareStatement("""
-        INSERT INTO managers (name, username, password, phone)
+        INSERT INTO managers (name, username, password_hash, phone)
         VALUES (?, ?, ?, ?)
     """)
         val hashedPassword = BCrypt.hashpw(password, BCrypt.gensalt())

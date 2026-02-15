@@ -18,7 +18,7 @@ import kotlinx.html.li
 import kotlinx.html.p
 import kotlinx.html.title
 import kotlinx.html.ul
-import shared.components.bookingForm
+import shared.components.BookingUI
 
 
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
@@ -52,14 +52,18 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         println("Serving bookingform $shopId, $customerId")
 
         // Serve the HTML form
-        call.respondHtml {
-            head {
-                title { +"Book Appointment" }
-            }
-            body {
-                bookingForm(shopId = shopId, customerId = customerId)
-            }
-        }
+        call.respondText(
+            """
+            <!DOCTYPE html>
+            <html>
+            <head><title>Book Appointment</title></head>
+            <body>
+            ${BookingUI.getFormHtml(shopId, customerId)}
+            </body>
+            </html>
+            """.trimIndent(),
+            ContentType.Text.Html
+        )
     }
 
 

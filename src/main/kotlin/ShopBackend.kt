@@ -13,68 +13,75 @@ import java.util.concurrent.TimeUnit
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import org.mindrot.jbcrypt.BCrypt
+import twilio.TwilioChatbotService
+import twilio.ChatbotConfig
+import twilio.twilioRoutes
+import twilio.chatTestRoutes
+import twilio.chatApiRoutes
 
 object ShopBackend {
     @JvmStatic
     fun main(args: Array<String>) {
-        println("ShopBackend starting…")
+        println("ShopBackend starting...")
 
-        // --- Parse CLI args ---
-        val dbPath = parseDbArg(args) ?: ""   // empty means "use default inside DataBase"
+        // Parse CLI args
+        val dbPath = parseDbArg(args) ?: ""
         if (dbPath.isNotBlank()) println("Using database path: $dbPath")
 
-        // --- Create DB (constructor accepts optional path) ---
+        // Create DB
         val db = DataBase(dbPath)
         println("Database initialized.")
 
-        // just keeping your demo hash/log
+        // Demo hash
         val hash = BCrypt.hashpw("1234", BCrypt.gensalt(12))
         println("Generated bcrypt hash: $hash")
 
-        // --- Instantiate route handlers ---
+        // Instantiate route handlers
         val webAdmin = WebAdmin(db)
         val customerApi = CustomerApi(db)
         val mobileApi = MobileApi(db)
 
-        // --- Background cleanup every hour ---
+        // Initialize chatbot
+        val chatbotConfig = ChatbotConfig(
+            twilioAccountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+            twilioAuthToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+            twilioFromNumber = System.getenv("TWILIO_FROM_NUMBER") ?: "",
+            lmStudioUrl = System.getenv("LM_STUDIO_URL") ?: "http://localhost:1234/v1",
+            lmStudioModel = System.getenv("LM_MODEL") ?: "llama-3-groq-8b-tool-use"
+        )
+        val chatbotService = TwilioChatbotService(db, chatbotConfig)
+        println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")
+
+        // Background cleanup
         startCleanupScheduler(db)
 
-        // --- Single server, single port ---
+        // Server
         val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
         val host = "0.0.0.0"
 
         println("ShopBackend listening on $host:$port")
 
         embeddedServer(Netty, port = port, host = host) {
-            // global plugins
             install(ContentNegotiation) {
                 json(Json { prettyPrint = false })
             }
             install(Sessions) {
                 cookie<WebAdmin.AdminSession>("ADMIN_SESSION")
             }
-            // If your mobile API needs JWT globally, you can install once here.
-            // If it should only apply under /mobile, keep auth config local in that route.
             JwtConfig.install(this)
 
             routing {
-                // Admin at /
                 route("/") { webAdmin.setupRoutes(this) }
-
-                // Customer API at /api
                 route("/api") { customerApi.setupRoutes(this) }
-
-                // Mobile API at /mobile
                 route("/mobile") { mobileApi.setupRoutes(this) }
+                twilioRoutes(db, chatbotService)
+                chatTestRoutes(db, chatbotService)
+                chatApiRoutes(db, chatbotService)
             }
-
         }.start(wait = true)
-
-        println("Server started on $host:$port")
     }
 
     private fun parseDbArg(args: Array<String>): String? {
-        // supports: --db=/path/file.db  OR  --db /path/file.db
         val key = "--db"
         for (i in args.indices) {
             val a = args[i]
@@ -90,16 +97,14 @@ object ShopBackend {
 
     private fun startCleanupScheduler(db: DataBase) {
         val tf = ThreadFactory { r ->
-            Thread(r, "cleanup-scheduler").apply {
-                isDaemon = true // don’t block shutdown
-            }
+            Thread(r, "cleanup-scheduler").apply { isDaemon = true }
         }
         val executor = Executors.newSingleThreadScheduledExecutor(tf)
         executor.scheduleAtFixedRate({
             try {
                 db.deleteOldBookingTokens()
             } catch (e: Exception) {
-                println("Error during booking token cleanup: ${e.message}")
+                println("Error during cleanup: ${e.message}")
             }
         }, 0, 1, TimeUnit.HOURS)
     }
