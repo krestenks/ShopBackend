@@ -344,6 +344,15 @@ class WebAdmin(private val db: DataBase) {
                 }
                 val shop = db.getShopById(id) ?: return@get call.respondRedirect("/shops")
                 val managers = db.getAllManagers()
+                val voiceConfig = db.getShopVoiceConfig(id)
+                db.ensureDefaultShopOpeningHours(id)
+                val openingHours = db.getShopOpeningHours(id).associateBy { it.dayOfWeek }
+
+                fun fmt(min: Int): String {
+                    val h = min / 60
+                    val m = min % 60
+                    return "%02d:%02d".format(h, m)
+                }
 
                 call.respondHtml {
                     body {
@@ -369,6 +378,79 @@ class WebAdmin(private val db: DataBase) {
                                     }
                                 }
                             }
+
+                            hr()
+                            h3 { +"Twilio Voice / Welcome message" }
+
+                            label { +"Shop Twilio number (E.164):" }
+                            br()
+                            textInput {
+                                name = "twilio_number"
+                                value = voiceConfig.twilioNumber ?: ""
+                                placeholder = "+4512345678"
+                            }
+                            br(); br()
+
+                            label { +"Welcome message (OPEN):" }
+                            br()
+                            textArea {
+                                name = "welcome_open_message"
+                                style = "width: 100%; height: 80px;"
+                                +voiceConfig.welcomeOpenMessage
+                            }
+                            br(); br()
+
+                            label { +"Welcome message (CLOSED):" }
+                            br()
+                            textArea {
+                                name = "welcome_closed_message"
+                                style = "width: 100%; height: 80px;"
+                                +voiceConfig.welcomeClosedMessage
+                            }
+
+                            hr()
+                            h3 { +"Opening hours" }
+
+                            table {
+                                style = "border-collapse: collapse;"
+                                fun row(dow: Int, labelText: String) {
+                                    val row = openingHours[dow]
+                                    tr {
+                                        td { +labelText }
+                                        td {
+                                            checkBoxInput {
+                                                name = "oh_${dow}_closed"
+                                                if (row?.closed == true) checked = true
+                                            }
+                                            +" Closed"
+                                        }
+                                        td {
+                                            +"Open: "
+                                            textInput {
+                                                name = "oh_${dow}_open"
+                                                value = fmt(row?.openMinute ?: (9 * 60))
+                                                placeholder = "09:00"
+                                            }
+                                        }
+                                        td {
+                                            +"Close: "
+                                            textInput {
+                                                name = "oh_${dow}_close"
+                                                value = fmt(row?.closeMinute ?: (17 * 60))
+                                                placeholder = "17:00"
+                                            }
+                                        }
+                                    }
+                                }
+                                row(1, "Mon")
+                                row(2, "Tue")
+                                row(3, "Wed")
+                                row(4, "Thu")
+                                row(5, "Fri")
+                                row(6, "Sat")
+                                row(7, "Sun")
+                            }
+
                             br()
                             submitInput { value = "Save Changes" }
                         }
@@ -386,6 +468,40 @@ class WebAdmin(private val db: DataBase) {
 
                 if (id != null) {
                     db.updateShop(id, name, address, directions, managerId)
+
+                    // Voice config
+                    val voice = ShopVoiceConfig(
+                        shopId = id,
+                        twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
+                        welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
+                        welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
+                    )
+                    db.upsertShopVoiceConfig(voice)
+
+                    // Opening hours
+                    fun parseMin(s: String?): Int? {
+                        if (s.isNullOrBlank()) return null
+                        val parts = s.trim().split(":")
+                        if (parts.size != 2) return null
+                        val h = parts[0].toIntOrNull() ?: return null
+                        val m = parts[1].toIntOrNull() ?: return null
+                        if (h !in 0..23 || m !in 0..59) return null
+                        return h * 60 + m
+                    }
+
+                    val rows = (1..7).map { dow ->
+                        val closed = params["oh_${dow}_closed"] != null
+                        val openMin = parseMin(params["oh_${dow}_open"]) ?: 9 * 60
+                        val closeMin = parseMin(params["oh_${dow}_close"]) ?: 17 * 60
+                        ShopOpeningHours(
+                            shopId = id,
+                            dayOfWeek = dow,
+                            openMinute = openMin,
+                            closeMinute = closeMin,
+                            closed = closed,
+                        )
+                    }
+                    db.upsertShopOpeningHours(rows)
                 }
                 call.respondRedirect("/shops")
             }

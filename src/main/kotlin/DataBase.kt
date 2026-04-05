@@ -62,6 +62,26 @@ data class EmployeeList(val employees: List<Employee>)
 @Serializable
 data class ServiceList(val services: List<Service>)
 
+@Serializable
+data class ShopVoiceConfig(
+    val shopId: Int,
+    val twilioNumber: String? = null,
+    val welcomeOpenMessage: String = "Hello and welcome. We are open.",
+    val welcomeClosedMessage: String = "Hello and welcome. We are currently closed.",
+)
+
+@Serializable
+data class ShopOpeningHours(
+    val shopId: Int,
+    /** 1=Mon .. 7=Sun */
+    val dayOfWeek: Int,
+    /** Minutes since midnight, local shop time */
+    val openMinute: Int,
+    /** Minutes since midnight, local shop time */
+    val closeMinute: Int,
+    val closed: Boolean = false,
+)
+
 
 class DataBase(dbFileName: String = "ShopManager.db") {
     private val dbFile = File(dbFileName)
@@ -165,6 +185,25 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 service_id INTEGER,
                 PRIMARY KEY (employee_id, service_id)
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS shop_voice_config (
+                shop_id INTEGER PRIMARY KEY,
+                twilio_number TEXT,
+                welcome_open_message TEXT,
+                welcome_closed_message TEXT
+            );
+            """
+            ,
+            """
+            CREATE TABLE IF NOT EXISTS shop_opening_hours (
+                shop_id INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                open_minute INTEGER NOT NULL,
+                close_minute INTEGER NOT NULL,
+                closed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (shop_id, day_of_week)
+            );
             """
         )
 
@@ -183,6 +222,104 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         println("All tables ready.")
+    }
+
+    // === Shop voice config ===
+
+    fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
+        val sql = "SELECT shop_id, twilio_number, welcome_open_message, welcome_closed_message FROM shop_voice_config WHERE shop_id = ?"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) {
+                ShopVoiceConfig(
+                    shopId = rs.getInt("shop_id"),
+                    twilioNumber = rs.getString("twilio_number"),
+                    welcomeOpenMessage = rs.getString("welcome_open_message") ?: ShopVoiceConfig(shopId).welcomeOpenMessage,
+                    welcomeClosedMessage = rs.getString("welcome_closed_message") ?: ShopVoiceConfig(shopId).welcomeClosedMessage,
+                )
+            } else {
+                ShopVoiceConfig(shopId)
+            }
+        }
+    }
+
+    fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
+        val sql = """
+            INSERT INTO shop_voice_config (shop_id, twilio_number, welcome_open_message, welcome_closed_message)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(shop_id) DO UPDATE SET
+                twilio_number = excluded.twilio_number,
+                welcome_open_message = excluded.welcome_open_message,
+                welcome_closed_message = excluded.welcome_closed_message
+        """.trimIndent()
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, config.shopId)
+            stmt.setString(2, config.twilioNumber)
+            stmt.setString(3, config.welcomeOpenMessage)
+            stmt.setString(4, config.welcomeClosedMessage)
+            stmt.executeUpdate()
+        }
+    }
+
+    // === Shop opening hours ===
+
+    fun getShopOpeningHours(shopId: Int): List<ShopOpeningHours> {
+        val sql = "SELECT shop_id, day_of_week, open_minute, close_minute, closed FROM shop_opening_hours WHERE shop_id = ? ORDER BY day_of_week"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<ShopOpeningHours>()
+            while (rs.next()) {
+                result += ShopOpeningHours(
+                    shopId = rs.getInt("shop_id"),
+                    dayOfWeek = rs.getInt("day_of_week"),
+                    openMinute = rs.getInt("open_minute"),
+                    closeMinute = rs.getInt("close_minute"),
+                    closed = rs.getInt("closed") != 0,
+                )
+            }
+            return result
+        }
+    }
+
+    fun ensureDefaultShopOpeningHours(shopId: Int) {
+        // Only insert defaults if the shop has no rows yet.
+        val existing = getShopOpeningHours(shopId)
+        if (existing.isNotEmpty()) return
+
+        // Default: Mon-Fri 09:00-17:00, Sat 10:00-14:00, Sun closed.
+        val defaults = buildList {
+            for (dow in 1..5) add(ShopOpeningHours(shopId, dow, 9 * 60, 17 * 60, closed = false))
+            add(ShopOpeningHours(shopId, 6, 10 * 60, 14 * 60, closed = false))
+            add(ShopOpeningHours(shopId, 7, 0, 0, closed = true))
+        }
+        upsertShopOpeningHours(defaults)
+    }
+
+    fun upsertShopOpeningHours(rows: List<ShopOpeningHours>) {
+        if (rows.isEmpty()) return
+        val sql = """
+            INSERT INTO shop_opening_hours (shop_id, day_of_week, open_minute, close_minute, closed)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(shop_id, day_of_week) DO UPDATE SET
+                open_minute = excluded.open_minute,
+                close_minute = excluded.close_minute,
+                closed = excluded.closed
+        """.trimIndent()
+
+        connection.prepareStatement(sql).use { stmt ->
+            for (r in rows) {
+                stmt.setInt(1, r.shopId)
+                stmt.setInt(2, r.dayOfWeek)
+                stmt.setInt(3, r.openMinute)
+                stmt.setInt(4, r.closeMinute)
+                stmt.setInt(5, if (r.closed) 1 else 0)
+                stmt.addBatch()
+            }
+            stmt.executeBatch()
+        }
     }
 
     // === DAO methods ===
