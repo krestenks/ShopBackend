@@ -26,11 +26,13 @@ object ShopBackend {
         println("ShopBackend starting...")
 
         // Parse CLI args
-        val dbPath = parseDbArg(args) ?: ""
-        if (dbPath.isNotBlank()) println("Using database path: $dbPath")
+        val dbPath = parseDbArg(args)
+        if (!dbPath.isNullOrBlank()) println("Using database path: $dbPath")
 
         // Create DB
-        val db = DataBase(dbPath)
+        // IMPORTANT: don't pass an empty string to DataBase(..), because File("") resolves to the
+        // current directory and SQLite will fail with SQLITE_CANTOPEN_ISDIR.
+        val db = if (!dbPath.isNullOrBlank()) DataBase(dbPath) else DataBase()
         println("Database initialized.")
 
         // Demo hash
