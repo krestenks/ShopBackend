@@ -24,7 +24,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
     )
 
     fun twiml(xmlInsideResponse: String): String =
-        """<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response>$xmlInsideResponse</Response>"""
+        """<?xml version="1.0" encoding="UTF-8"?><Response>$xmlInsideResponse</Response>"""
 
     fun isShopOpenNow(shopId: Int): Boolean {
         // Uses system timezone (server) for now. If we need per-shop timezone later, we can add it.
@@ -86,11 +86,11 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
             val gatherAction = "${PublicBaseUrl.fromCall(call)}/api/twilio/voice/menu"
             val xml = """
-                <Say voice=\"alice\">${escapeForXml(welcome)}</Say>
-                <Gather numDigits=\"1\" action=\"${escapeForXml(gatherAction)}\" method=\"POST\">
-                  <Say voice=\"alice\">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
+                <Say voice="alice">${escapeForXml(welcome)}</Say>
+                <Gather numDigits="1" action="${escapeForXml(gatherAction)}" method="POST">
+                  <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
                 </Gather>
-                <Say voice=\"alice\">Goodbye.</Say>
+                <Say voice="alice">Goodbye.</Say>
             """.trimIndent()
 
             call.respondText(twiml(xml), ContentType.Text.Xml)
@@ -105,11 +105,11 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
             val gatherAction = "${PublicBaseUrl.fromCall(call)}/api/twilio/voice/menu"
             val xml = """
-                <Say voice=\"alice\">${escapeForXml(welcome)}</Say>
-                <Gather numDigits=\"1\" action=\"${escapeForXml(gatherAction)}\" method=\"POST\">
-                  <Say voice=\"alice\">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
+                <Say voice="alice">${escapeForXml(welcome)}</Say>
+                <Gather numDigits="1" action="${escapeForXml(gatherAction)}" method="POST">
+                  <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
                 </Gather>
-                <Say voice=\"alice\">Goodbye.</Say>
+                <Say voice="alice">Goodbye.</Say>
             """.trimIndent()
 
             call.respondText(twiml(xml), ContentType.Text.Xml)
@@ -161,8 +161,8 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 // Safe default: show shop number as callerId to the operator.
                 val callerId = fromNumber
                 val xml = """
-                    <Say voice=\"alice\">Please wait while we connect you.</Say>
-                    <Dial callerId=\"${escapeForXml(callerId)}\"><Number>${escapeForXml(operator)}</Number></Dial>
+                    <Say voice="alice">Please wait while we connect you.</Say>
+                    <Dial callerId="${escapeForXml(callerId)}"><Number>${escapeForXml(operator)}</Number></Dial>
                 """.trimIndent()
                 call.respondText(twiml(xml), ContentType.Text.Xml)
                 return@post
