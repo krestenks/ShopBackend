@@ -79,7 +79,7 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         val customerId = db.ensureCustomerByPhone(phone) // implement if needed
         val bookingToken = db.generateBookingToken( customerId, shopId, phone)
 
-        val baseUrl = PublicBaseUrl.get()
+        val baseUrl = PublicBaseUrl.fromCall(call)
         val fullUrl = "$baseUrl/api/book?token=$bookingToken"
 
         call.respondText(

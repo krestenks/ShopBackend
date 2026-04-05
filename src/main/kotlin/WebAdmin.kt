@@ -820,7 +820,7 @@ class WebAdmin(private val db: DataBase) {
                         }
                         br()
                         val bookingToken = db.generateBookingToken( 0, -1, "12345678")
-                        val baseUrl = PublicBaseUrl.get()
+                        val baseUrl = PublicBaseUrl.fromCall(call)
                         val fullUrl = "$baseUrl/api/book?token=$bookingToken"
                         a(href = fullUrl) { +"Add New Appointment" }
                     }
@@ -895,7 +895,7 @@ class WebAdmin(private val db: DataBase) {
                     val customerId = db.ensureCustomerByPhone(phone) // implement if needed
                     val booking_token = db.generateBookingToken( customerId, shopId, phone)
 
-                    val baseUrl = PublicBaseUrl.get()
+                    val baseUrl = PublicBaseUrl.fromCall(call)
                     val fullUrl = "$baseUrl/api/book?token=$booking_token"
 
                     call.respondText(
