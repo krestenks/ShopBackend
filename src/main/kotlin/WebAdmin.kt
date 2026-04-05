@@ -85,6 +85,58 @@ class WebAdmin(private val db: DataBase) {
                 }
             }
 
+            get("/twilio/setup") {
+                val shops = db.getAllShops()
+                val baseUrl = PublicBaseUrl.fromCall(call).trimEnd('/')
+                val voiceWebhook = "$baseUrl/api/twilio/voice/welcome"
+
+                call.respondHtml {
+                    body {
+                        header()
+                        h2 { +"Twilio setup (no Studio)" }
+                        p {
+                            +"For each shop Twilio number, configure in Twilio Console: Phone Numbers → (number) → Voice & Fax → 'A call comes in' → Webhook (POST)."
+                        }
+                        p {
+                            +"Webhook URL to paste: "
+                            code { +voiceWebhook }
+                        }
+                        p {
+                            +"(This endpoint returns TwiML that plays the welcome message, and supports: press 1 = SMS booking link, press 2 = forward to operator when open.)"
+                        }
+
+                        h3 { +"Shop readiness" }
+                        table {
+                            style = "border-collapse: collapse; width: 100%;"
+                            tr {
+                                th { +"Shop" }
+                                th { +"Shop Twilio #" }
+                                th { +"Operator #" }
+                                th { +"Welcome (open/closed)" }
+                                th { +"Opening hours" }
+                                th { +"Actions" }
+                            }
+                            for (s in shops) {
+                                val vc = db.getShopVoiceConfig(s.id)
+                                db.ensureDefaultShopOpeningHours(s.id)
+                                val ohCount = db.getShopOpeningHours(s.id).size
+                                tr {
+                                    td { +s.name }
+                                    td { +(vc.twilioNumber ?: "(missing)") }
+                                    td { +(vc.operatorPhone ?: "(missing)") }
+                                    td {
+                                        val ok = vc.welcomeOpenMessage.isNotBlank() && vc.welcomeClosedMessage.isNotBlank()
+                                        +(if (ok) "OK" else "Missing")
+                                    }
+                                    td { +"$ohCount/7" }
+                                    td { a(href = "/shops/edit?id=${s.id}") { +"Edit shop" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             get("/managers") {
                 val managers = db.getAllManagers()
                 call.respondHtml {
@@ -391,6 +443,15 @@ class WebAdmin(private val db: DataBase) {
                             }
                             br(); br()
 
+                            label { +"Operator phone (E.164) for call forwarding:" }
+                            br()
+                            textInput {
+                                name = "operator_phone"
+                                value = voiceConfig.operatorPhone ?: ""
+                                placeholder = "+4512345678"
+                            }
+                            br(); br()
+
                             label { +"Welcome message (OPEN):" }
                             br()
                             textArea {
@@ -473,6 +534,7 @@ class WebAdmin(private val db: DataBase) {
                     val voice = ShopVoiceConfig(
                         shopId = id,
                         twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
+                        operatorPhone = params["operator_phone"]?.trim()?.takeIf { it.isNotBlank() },
                         welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
                     )
@@ -1030,6 +1092,7 @@ class WebAdmin(private val db: DataBase) {
             a(href = "/") { +"Home" }; +" | "
             a(href = "/managers") { +"Managers" }; +" | "
             a(href = "/shops") { +"Shops" }; +" | "
+            a(href = "/twilio/setup") { +"Twilio setup" }; +" | "
             a(href = "/employees") { +"Employees" }; +" | "
             a(href = "/services") { +"Services" }; +" | "
             a(href = "/assign-services") { +"Assign Services" }; +" | "

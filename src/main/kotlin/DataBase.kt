@@ -66,6 +66,7 @@ data class ServiceList(val services: List<Service>)
 data class ShopVoiceConfig(
     val shopId: Int,
     val twilioNumber: String? = null,
+    val operatorPhone: String? = null,
     val welcomeOpenMessage: String = "Hello and welcome. We are open.",
     val welcomeClosedMessage: String = "Hello and welcome. We are currently closed.",
 )
@@ -190,6 +191,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             CREATE TABLE IF NOT EXISTS shop_voice_config (
                 shop_id INTEGER PRIMARY KEY,
                 twilio_number TEXT,
+                operator_phone TEXT,
                 welcome_open_message TEXT,
                 welcome_closed_message TEXT
             );
@@ -227,7 +229,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // === Shop voice config ===
 
     fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
-        val sql = "SELECT shop_id, twilio_number, welcome_open_message, welcome_closed_message FROM shop_voice_config WHERE shop_id = ?"
+        val sql = "SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message FROM shop_voice_config WHERE shop_id = ?"
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
@@ -235,6 +237,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 ShopVoiceConfig(
                     shopId = rs.getInt("shop_id"),
                     twilioNumber = rs.getString("twilio_number"),
+                    operatorPhone = rs.getString("operator_phone"),
                     welcomeOpenMessage = rs.getString("welcome_open_message") ?: ShopVoiceConfig(shopId).welcomeOpenMessage,
                     welcomeClosedMessage = rs.getString("welcome_closed_message") ?: ShopVoiceConfig(shopId).welcomeClosedMessage,
                 )
@@ -246,10 +249,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
         val sql = """
-            INSERT INTO shop_voice_config (shop_id, twilio_number, welcome_open_message, welcome_closed_message)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 twilio_number = excluded.twilio_number,
+                operator_phone = excluded.operator_phone,
                 welcome_open_message = excluded.welcome_open_message,
                 welcome_closed_message = excluded.welcome_closed_message
         """.trimIndent()
@@ -257,8 +261,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, config.shopId)
             stmt.setString(2, config.twilioNumber)
-            stmt.setString(3, config.welcomeOpenMessage)
-            stmt.setString(4, config.welcomeClosedMessage)
+            stmt.setString(3, config.operatorPhone)
+            stmt.setString(4, config.welcomeOpenMessage)
+            stmt.setString(5, config.welcomeClosedMessage)
             stmt.executeUpdate()
         }
     }
@@ -319,6 +324,30 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 stmt.addBatch()
             }
             stmt.executeBatch()
+        }
+    }
+
+    /**
+     * Map an incoming Twilio call/SMS `To` number to a shop.
+     *
+     * We match against the per-shop configured Twilio number in [shop_voice_config].
+     */
+    fun findShopIdByTwilioNumber(twilioToNumber: String): Int? {
+        val normalized = twilioToNumber.trim()
+        if (normalized.isBlank()) return null
+
+        val sql = """
+            SELECT shop_id
+            FROM shop_voice_config
+            WHERE replace(replace(replace(twilio_number, ' ', ''), '-', ''), '(', '') =
+                  replace(replace(replace(?, ' ', ''), '-', ''), '(', '')
+            LIMIT 1
+        """.trimIndent()
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, normalized)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("shop_id") else null
         }
     }
 
