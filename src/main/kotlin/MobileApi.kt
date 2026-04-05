@@ -19,6 +19,7 @@ import org.mindrot.jbcrypt.BCrypt
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.serialization.*
+import twilio.TwilioVoiceCallService
 
 @Serializable
 data class LoginRequest(val username: String, val password: String)
@@ -62,6 +63,14 @@ suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginI
 class MobileApi(private val db: DataBase) {
     fun setupRoutes(routing: Route) {
         routing {
+
+            // Twilio voice service configuration
+            val voiceService = TwilioVoiceCallService(
+                accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+                fromNumber = System.getenv("TWILIO_FROM_NUMBER") ?: "",
+                publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
+            )
 
             post("/api/mobile/login") {
                 val loginRequest = call.receive<LoginRequest>()
@@ -110,6 +119,78 @@ class MobileApi(private val db: DataBase) {
 
                     val appointments = db.getAppointmentsForShop(shopId)
                     call.respond(appointments)
+                }
+
+
+                /**
+                 * Call the customer tied to an existing appointment and play a TTS message.
+                 *
+                 * Request: JSON {"message":"..."} (optional)
+                 * Response: JSON {"success":true/false, "status":int, "twilio":string}
+                 */
+                post("/api/mobile/manager/appointments/{appointmentId}/call-customer") {
+                    val loginInfo = authenticateManager()
+                    if (loginInfo == null) {
+                        call.respond(HttpStatusCode.Unauthorized)
+                        return@post
+                    }
+
+                    val appointmentId = call.parameters["appointmentId"]?.toIntOrNull()
+                    if (appointmentId == null) {
+                        call.respond(HttpStatusCode.BadRequest, "Missing or invalid appointmentId")
+                        return@post
+                    }
+
+                    val appointment = db.getAppointmentWithServicesById(appointmentId)
+                        ?: run {
+                            call.respond(HttpStatusCode.NotFound, "Appointment not found")
+                            return@post
+                        }
+
+                    if (appointment.customer?.phone.isNullOrBlank()) {
+                        call.respond(HttpStatusCode.NotFound, "Appointment/customer phone not found")
+                        return@post
+                    }
+
+                    // Authorization: shops can only call for their own appointments. Managers can call for shops they own.
+                    when (loginInfo.role) {
+                        "shop" -> {
+                            if (loginInfo.shopId != appointment.shopId) {
+                                call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                                return@post
+                            }
+                        }
+                        "manager" -> {
+                            val managerId = loginInfo.managerId
+                            if (managerId == null || !db.isManagerOfShop(managerId, appointment.shopId)) {
+                                call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                                return@post
+                            }
+                        }
+                        else -> {
+                            call.respond(HttpStatusCode.Forbidden, "Invalid role")
+                            return@post
+                        }
+                    }
+
+                    @Serializable
+                    data class CallCustomerRequest(val message: String? = null)
+
+                    val body = runCatching { call.receive<CallCustomerRequest>() }.getOrNull()
+                    val message = body?.message?.takeIf { it.isNotBlank() }
+                        ?: "Hello. We are ready for you now. Please come to the door."
+
+                    val toPhone = appointment.customer!!.phone
+                    println("[TwilioVoice] Calling customer $toPhone for appointment $appointmentId (shop ${appointment.shopId})")
+                    val result = voiceService.callCustomer(toPhoneE164 = toPhone, message = message, appointmentId = appointmentId)
+
+                    call.respond(
+                        mapOf(
+                            "success" to result.success,
+                            "status" to result.status,
+                            "twilio" to result.body,
+                        )
+                    )
                 }
 
                 post("/api/mobile/manager/booking/create") {

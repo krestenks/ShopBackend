@@ -501,6 +501,40 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return appointment
     }
 
+
+    /**
+     * Convenience helper for features that need to contact the customer (e.g. Twilio voice call).
+     *
+     * NOTE: The [Appointment] model currently does not expose customer_id, so this method returns
+     * the richer [AppointmentWithServices] which includes the [customer] object.
+     */
+    fun getAppointmentWithServicesById(appointmentId: Int): AppointmentWithServices? {
+        val stmt = connection.prepareStatement("SELECT * FROM appointments WHERE id = ?")
+        stmt.setInt(1, appointmentId)
+        val rs = stmt.executeQuery()
+
+        val result = if (rs.next()) {
+            val services = getServicesForAppointment(appointmentId)
+            AppointmentWithServices(
+                id = appointmentId,
+                employeeId = rs.getInt("employee_id"),
+                shopId = rs.getInt("shop_id"),
+                dateTime = rs.getLong("date_time"),
+                duration = rs.getInt("duration"),
+                price = rs.getDouble("price"),
+                services = services,
+                customer = getCustomerById(rs.getInt("customer_id")),
+                employee = getEmployeeById(rs.getInt("employee_id"))
+            )
+        } else {
+            null
+        }
+
+        rs.close()
+        stmt.close()
+        return result
+    }
+
     fun getAppointmentsForShop(shopId: Int): List<AppointmentWithServices> {
         val stmt = connection.prepareStatement("SELECT * FROM appointments WHERE shop_id = ? ORDER BY date_time ASC")
         stmt.setInt(1, shopId)

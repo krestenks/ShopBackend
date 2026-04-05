@@ -18,6 +18,7 @@ import twilio.ChatbotConfig
 import twilio.twilioRoutes
 import twilio.chatTestRoutes
 import twilio.chatApiRoutes
+import twilio.twilioVoiceRoutes
 
 object ShopBackend {
     @JvmStatic
@@ -75,6 +76,7 @@ object ShopBackend {
                 route("/api") { customerApi.setupRoutes(this) }
                 route("/mobile") { mobileApi.setupRoutes(this) }
                 twilioRoutes(db, chatbotService)
+                twilioVoiceRoutes(db)
                 chatTestRoutes(db, chatbotService)
                 chatApiRoutes(db, chatbotService)
             }
