@@ -16,13 +16,18 @@ object BookingUI {
             <input type="hidden" name="shop_id" value="$shopId" />
             $customerIdHtml
             <label>Employee:</label>
-            <select name="employee_id" required><option value="">Select an employee</option></select><br><br>
+            <select id="employeeSelect" name="employee_id" required>
+                <option value="">Select an employee</option>
+            </select>
+            <br><br>
             <label>Services:</label>
-            <div id="services-container"></div><br>
+            <div id="serviceCheckboxes"></div><br>
             <label>Date:</label>
-            <input type="date" name="date" required /><br><br>
+            <select id="dateSelect" required></select>
+            <br><br>
             <label>Time:</label>
-            <div id="timeslots-container"></div><br><br>
+            <select id="timeSelect" name="appointment_time" required></select>
+            <br><br>
             <button type="submit">Book Appointment</button>
         </form>
         """.trimIndent()

@@ -5,6 +5,8 @@ document.addEventListener("DOMContentLoaded", function () {
     const dateSelect = document.getElementById("dateSelect");
     const timeSelect = document.getElementById("timeSelect");
 
+    // Booking link page does not show a shop dropdown. In that mode, shopId comes from hidden input.
+
     function fetchShops() {
         console.log("[BookingUI] Fetching shops...");
         fetch("/api/shops")
@@ -33,6 +35,18 @@ document.addEventListener("DOMContentLoaded", function () {
                 const employees = data.employees || data;
                 console.log("[BookingUI] Employees fetched:", employees);
                 employeeSelect.innerHTML = "";
+
+                if (!employees || employees.length === 0) {
+                    const opt = document.createElement("option");
+                    opt.value = "";
+                    opt.textContent = "No employees found";
+                    opt.disabled = true;
+                    opt.selected = true;
+                    employeeSelect.appendChild(opt);
+                    console.warn("[BookingUI] No employees returned for shopId=", shopId);
+                    return;
+                }
+
                 employees.forEach(emp => {
                     const opt = document.createElement("option");
                     opt.value = emp.id;
@@ -117,6 +131,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 } else {
                     slots.forEach(time => {
                         const opt = document.createElement("option");
+                        // Backend expects appointment_time in "yyyy-MM-dd HH:mm" (space, not 'T').
                         opt.value = time;
                         opt.textContent = time;
                         timeSelect.appendChild(opt);

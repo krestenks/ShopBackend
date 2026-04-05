@@ -56,9 +56,13 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             """
             <!DOCTYPE html>
             <html>
-            <head><title>Book Appointment</title></head>
+            <head>
+              <title>Book Appointment</title>
+            </head>
             <body>
             ${BookingUI.getFormHtml(shopId, customerId)}
+
+            <script src="/static/booking-ui.js"></script>
             </body>
             </html>
             """.trimIndent(),
