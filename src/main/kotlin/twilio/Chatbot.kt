@@ -23,7 +23,7 @@ data class ChatbotConfig(
     val twilioAuthToken: String = "",
     val twilioFromNumber: String = "",
     val lmStudioUrl: String = "http://localhost:1234/v1",
-    val lmStudioModel: String = "llama-3-groq-8b-tool-use"
+    val lmStudioModel: String = "essentialai/rnj-1"
 )
 
 data class ChatMessage(val role: String, val content: String)
@@ -32,24 +32,141 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
     private val history = mutableMapOf<String, MutableList<ChatMessage>>()
     private val client = HttpClient(CIO)
     private val initializedConversations = mutableSetOf<String>()
+    // Store pending booking details for confirmation detection
+    private val pendingBookings = mutableMapOf<String, MutableMap<String, String?>>()
+
+    private val confirmationKeywords = listOf(
+        "yes", "yes please", "yes!", "yes!", "correct", "that's correct",
+        "book it", "book now", "book this", "proceed", "go ahead",
+        "confirm", "confirmed", "sure", "absolutely", "sounds good", "that works",
+        "ok", "okay", "kk", "fine", "great"
+    )
 
     suspend fun processMessage(fromPhone: String, message: String, shopId: Int = 1): String {
         val phone = if (fromPhone.contains(":")) fromPhone.substringAfter(":") else fromPhone
         val convKey = "$phone:$shopId"
         val conv = history.getOrPut(convKey) { mutableListOf() }
 
-        // First message: initialize with system prompt AND force therapist list
+        // First message: return welcome message directly, then initialize history
         if (!initializedConversations.contains(convKey)) {
+            val welcomeMessage = getWelcomeMessage(shopId)
+            
+            // Initialize history AFTER returning welcome
             conv.add(ChatMessage("system", getSystemPrompt(shopId)))
             initializedConversations.add(convKey)
+            conv.add(ChatMessage("assistant", welcomeMessage))
             
-            // Force fetch therapists so LLM can't hallucinate
-            val therapists = getTherapists(shopId)
-            conv.add(ChatMessage("tool", """{"tool":"list_therapists","data":$therapists}"""))
+            return welcomeMessage
+        }
+
+        // Check if user is confirming a booking (looking at last assistant message)
+        val userMessage = message.lowercase().trim()
+        val isConfirmation = confirmationKeywords.any { userMessage.contains(it) }
+        
+        if (isConfirmation) {
+            val pending = pendingBookings[convKey]
+            if (pending != null) {
+                // Auto-confirm the booking
+                println("[AutoBooking] Detected confirmation, triggering book_appointment tool")
+                val toolResult = executeBookAppointment(pending, shopId)
+                pendingBookings.remove(convKey)
+                
+                // Parse the result and return confirmation message
+                try {
+                    val resultJson = Json.parseToJsonElement(toolResult).jsonObject
+                    val data = resultJson["data"]?.jsonObject
+                    if (data?.get("success")?.jsonPrimitive?.content == "true") {
+                        val confId = data["confirmationId"]?.jsonPrimitive?.content ?: "unknown"
+                        return "✅ Booking confirmed!\n\nConfirmation ID: $confId\n\nThank you for booking!"
+                    } else {
+                        val error = data?.get("error")?.jsonPrimitive?.content ?: "Unknown error"
+                        return "Booking failed: $error\n\nPlease try again."
+                    }
+                } catch (e: Exception) {
+                    return "Booking processed, but couldn't display confirmation details."
+                }
+            }
         }
 
         conv.add(ChatMessage("user", message))
-        return callLLM(conv, shopId, convKey)
+        val response = callLLM(conv, shopId, convKey)
+        
+        // Store pending booking details from the conversation
+        extractAndStorePendingBooking(conv, convKey, shopId)
+        
+        return response
+    }
+
+    private fun extractAndStorePendingBooking(conv: List<ChatMessage>, convKey: String, shopId: Int) {
+        val pending = mutableMapOf<String, String?>()
+        
+        // Look through conversation for booking info
+        for (msg in conv) {
+            val content = msg.content.lowercase()
+            
+            // Extract therapist
+            if (content.contains("bimi")) {
+                val emp = db.getEmployeesForShop(shopId).find { it.name.equals("Bimi", ignoreCase = true) }
+                if (emp != null) pending["therapist"] = emp.id.toString()
+            } else if (content.contains("bill")) {
+                val emp = db.getEmployeesForShop(shopId).find { it.name.equals("Bill", ignoreCase = true) }
+                if (emp != null) pending["therapist"] = emp.id.toString()
+            }
+            
+            // Extract service
+            if (content.contains("b2b") || content.contains("b2b massage")) {
+                pending["treatment"] = "B2B Massage"
+            } else if (content.contains("massage")) {
+                pending["treatment"] = "Massage"
+            } else if (content.contains("neck")) {
+                pending["treatment"] = "Neck massage"
+            }
+            
+            // Extract time - handle 23:00, 23.00, 2300 formats and convert to HH:mm
+            val timeRegex = Regex("""(\d{1,2})[.:](\d{2})""")
+            val timeMatch = timeRegex.find(content)
+            if (timeMatch != null) {
+                val hour = timeMatch.groupValues[1]
+                val minute = timeMatch.groupValues[2]
+                pending["time"] = "$hour:$minute"
+                println("[AutoBooking] Extracted time: $hour:$minute")
+            } else if (content.contains("today")) {
+                pending["time"] = "today"
+            }
+        }
+        
+        // Only store if we have at least therapist and some info
+        if (pending.isNotEmpty() && pending.containsKey("therapist")) {
+            pendingBookings[convKey] = pending
+            println("[AutoBooking] Stored pending booking: $pending")
+        }
+    }
+
+    private fun executeBookAppointment(pending: Map<String, String?>, shopId: Int): String {
+        val therapistId = pending["therapist"] ?: return """{"error":"No therapist","success":false}"""
+        val treatment = pending["treatment"] ?: "Massage"
+        val time = pending["time"] ?: ""
+        
+        // Determine the actual time
+        val today = LocalDate.now().toString()
+        val startIso = if (time.contains("today")) {
+            // Use current time or default
+            "$today 23:00"
+        } else if (time.isNotEmpty() && time.contains(":")) {
+            "$today $time"
+        } else {
+            "$today 23:00"
+        }
+        
+        // Get duration for the treatment
+        val duration = try {
+            val services = db.getServicesForEmployee(therapistId.toInt())
+            services.find { it.name.equals(treatment, ignoreCase = true) }?.duration ?: 60
+        } catch (e: Exception) {
+            60
+        }
+        
+        return bookAppointment(therapistId, null, treatment, startIso, duration, shopId)
     }
 
     private suspend fun callLLM(messages: List<ChatMessage>, shopId: Int = 1, convKey: String): String = withContext(Dispatchers.IO) {
@@ -103,91 +220,213 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
     private fun parseAndExecuteAllTools(content: String, shopId: Int): List<String> {
         val results = mutableListOf<String>()
         
-        // Try parallel format: {"Name": "tool_name", "arguments": {...}}
-        val parallelPattern = """\{"name":\s*"([^"]+)",\s*"arguments":\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*)\}""".toRegex()
-        val parallelMatches = parallelPattern.findAll(content).toList()
+        // Unescape the JSON string (LLM returns escaped quotes)
+        val unescapedContent = content
+            .replace("\\\"", "\"")
+            .replace("\\n", "\n")
+            .trim()
         
-        if (parallelMatches.isNotEmpty()) {
-            parallelMatches.forEach { match ->
-                val toolName = match.groupValues[1]
-                val argsJson = match.groupValues[2]
-                val result = executeTool(toolName, argsJson, shopId)
-                results.add(result)
-                println("[Tool] Executed $toolName: $result")
+        // Find all potential tool call JSON objects
+        val indices = findJsonObjectIndices(unescapedContent)
+        
+        for ((start, end) in indices) {
+            val jsonStr = unescapedContent.substring(start, end)
+            try {
+                val json = Json.parseToJsonElement(jsonStr).jsonObject
+                
+                // Check for "tool" format
+                val toolName = json["tool"]?.jsonPrimitive?.content
+                val argsElement = json["arguments"]
+                
+                // Or check for "name" format (parallel/OpenAI style)
+                val name = if (toolName == null) json["name"]?.jsonPrimitive?.content else null
+                val finalToolName = toolName ?: name
+                
+                if (finalToolName != null && argsElement != null) {
+                    // argsElement is already a JsonObject - pass it directly!
+                    val argsJson = argsElement.jsonObject
+                    val result = executeTool(finalToolName, argsJson, shopId)
+                    results.add(result)
+                    println("[Tool] Executed $finalToolName: $result")
+                }
+            } catch (e: Exception) {
+                println("[Parse] Skipping invalid JSON: ${jsonStr.take(100)}")
             }
-            return results
-        }
-        
-        // Try sequential format: {"tool":"...","arguments":{...}}
-        val sequentialPattern = """\{"tool":\s*"([^"]+)",\s*"arguments":\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*)\}""".toRegex()
-        val sequentialMatches = sequentialPattern.findAll(content).toList()
-        
-        if (sequentialMatches.isNotEmpty()) {
-            sequentialMatches.forEach { match ->
-                val toolName = match.groupValues[1]
-                val argsJson = match.groupValues[2]
-                val result = executeTool(toolName, argsJson, shopId)
-                results.add(result)
-                println("[Tool] Executed $toolName: $result")
-            }
-            return results
         }
         
         return results
     }
 
-    private fun executeTool(toolName: String, argsJson: String, shopId: Int): String {
+    // Find all balanced JSON objects in the content
+    private fun findJsonObjectIndices(content: String): List<Pair<Int, Int>> {
+        val results = mutableListOf<Pair<Int, Int>>()
+        var i = 0
+        
+        while (i < content.length) {
+            if (content[i] == '{') {
+                val end = findMatchingBrace(content, i)
+                if (end > i) {
+                    results.add(Pair(i, end + 1))
+                    i = end + 1
+                } else {
+                    i++
+                }
+            } else {
+                i++
+            }
+        }
+        
+        return results
+    }
+
+    // Find the index of the matching closing brace
+    private fun findMatchingBrace(s: String, openIndex: Int): Int {
+        var depth = 0
+        var inString = false
+        var i = openIndex
+        
+        while (i < s.length) {
+            val c = s[i]
+            
+            if (c == '"' && (i == 0 || s[i - 1] != '\\')) {
+                inString = !inString
+            } else if (!inString) {
+                if (c == '{') depth++
+                if (c == '}') {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+            i++
+        }
+        return -1
+    }
+
+    private fun executeTool(toolName: String, args: JsonObject, shopId: Int): String {
         return try {
-            val args = Json.parseToJsonElement("{$argsJson}").jsonObject
+            // Helper to get string from args with flexible key names
+            fun getArg(key1: String, key2: String? = null): String? {
+                return args[key1]?.jsonPrimitive?.content ?: key2?.let { args[it]?.jsonPrimitive?.content }
+            }
+            
             when (toolName) {
                 "list_therapists" -> {
                     val therapists = getTherapists(shopId)
                     """{"tool":"list_therapists","data":$therapists}"""
                 }
                 "get_therapist_details" -> {
-                    val therapistId = args["therapistId"]?.jsonPrimitive?.content
+                    val therapistId = getArg("therapistId", "therapist_id")
                         ?: return """{"error":"Missing therapistId"}"""
                     val details = getTherapistDetails(therapistId)
                     """{"tool":"get_therapist_details","data":$details}"""
                 }
                 "get_therapist_availability" -> {
-                    val therapistId = args["therapistId"]?.jsonPrimitive?.content
-                        ?: return """{"error":"Missing therapistId"}"""
-                    val dateIso = args["dateIso"]?.jsonPrimitive?.content ?: LocalDate.now().toString()
-                    val durationMinutes = args["durationMinutes"]?.jsonPrimitive?.content?.toInt() ?: 60
-                    val slots = getTherapistAvailability(therapistId, dateIso, durationMinutes, shopId)
-                    """{"tool":"get_therapist_availability","data":$slots}"""
+                    var therapistIdInput = getArg("therapistId", "therapist_id") ?: getArg("therapist")
+                    // If therapist is a name (not ID), look it up
+                    val therapistId = therapistIdInput?.toIntOrNull() ?: therapistIdInput?.let { name ->
+                        db.getEmployeesForShop(shopId).find { emp -> 
+                            emp.name.equals(name, ignoreCase = true) 
+                        }?.id
+                    } ?: return """{"error":"Missing therapist"}"""
+                    
+                    val dateIso = getArg("dateIso", "date") ?: LocalDate.now().toString()
+                    val durationMinutes = getArg("durationMinutes")?.toInt() ?: 60
+                    val result = db.getTherapistAvailabilityResult(therapistId, dateIso, durationMinutes, shopId)
+                    """{"tool":"get_therapist_availability","data":$result}"""
                 }
                 "find_joint_availability" -> {
-                    val therapistIdsStr = args["therapistIds"]?.jsonPrimitive?.content
+                    val therapistIdsStr = getArg("therapistIds", "therapist_ids")
                         ?: return """{"error":"Missing therapistIds"}"""
-                    val therapistIds = therapistIdsStr.split(",").map { it.trim() }
-                    val dateIso = args["dateIso"]?.jsonPrimitive?.content ?: LocalDate.now().toString()
-                    val durationMinutes = args["durationMinutes"]?.jsonPrimitive?.content?.toInt() ?: 60
-                    val slots = findJointAvailability(therapistIds, dateIso, durationMinutes, shopId)
-                    """{"tool":"find_joint_availability","data":$slots}"""
+                    val therapistIds = therapistIdsStr.split(",").mapNotNull { it.trim().toIntOrNull() }
+                    val dateIso = getArg("dateIso", "date") ?: LocalDate.now().toString()
+                    val durationMinutes = getArg("durationMinutes")?.toInt() ?: 60
+                    val result = db.getJointAvailabilityResult(therapistIds, shopId, dateIso, durationMinutes)
+                    """{"tool":"find_joint_availability","data":$result}"""
                 }
                 "list_open_time_slots" -> {
-                    val dateIso = args["dateIso"]?.jsonPrimitive?.content ?: LocalDate.now().toString()
-                    val durationMinutes = args["durationMinutes"]?.jsonPrimitive?.content?.toInt() ?: 60
+                    val dateIso = getArg("dateIso", "date") ?: LocalDate.now().toString()
+                    val durationMinutes = getArg("durationMinutes")?.toInt() ?: 60
                     val slots = listOpenTimeSlots(dateIso, durationMinutes)
                     """{"tool":"list_open_time_slots","data":$slots}"""
                 }
                 "book_appointment" -> {
-                    val therapistId = args["therapistId"]?.jsonPrimitive?.content
-                    val customerName = args["customerName"]?.jsonPrimitive?.content
-                    val treatment = args["treatment"]?.jsonPrimitive?.content
-                        ?: return """{"error":"Missing treatment"}"""
-                    val startIso = args["startIso"]?.jsonPrimitive?.content
-                        ?: return """{"error":"Missing startIso"}"""
-                    val durationMinutes = args["durationMinutes"]?.jsonPrimitive?.content?.toInt() ?: 60
-                    val confirmation = bookAppointment(therapistId, customerName, treatment, startIso, durationMinutes, shopId)
+                    // Accept flexible parameter names
+                    var therapistIdInput = getArg("therapistId", "therapist_id") ?: getArg("therapist")
+                    val customerName = getArg("customerName")
+                    val serviceIdInput = getArg("service_id", "serviceId")?.toIntOrNull()
+                    val treatment = getArg("treatment") ?: getArg("service")
+                    val startIso = getArg("startIso") ?: getArg("start_iso") ?: getArg("date_time") ?: run {
+                        val date = getArg("date", "dateIso")
+                        val time = getArg("time", "timeIso")
+                        if (date != null && time != null) "$date $time" else null
+                    }
+                    val durationMinutes = getArg("durationMinutes")?.toInt() ?: getArg("duration")?.toInt()
+                    
+                    // If therapist is a name (not ID), look it up
+                    val therapistId = therapistIdInput?.toIntOrNull()?.toString() ?: therapistIdInput?.let { name ->
+                        db.getEmployeesForShop(shopId).find { emp -> 
+                            emp.name.equals(name, ignoreCase = true) 
+                        }?.id?.toString()
+                    }
+                    
+                    // If service_id is provided, look up the service
+                    var finalTreatment: String? = treatment
+                    var finalDuration: Int? = durationMinutes
+                    if (serviceIdInput != null && therapistId != null) {
+                        val services = db.getServicesForEmployee(therapistId.toInt())
+                        val service = services.find { it.id == serviceIdInput }
+                        if (service != null) {
+                            finalTreatment = service.name
+                            finalDuration = service.duration
+                        }
+                    }
+                    
+                    // Clean up treatment name if still needed
+                    val cleanTreatment = finalTreatment?.let { raw ->
+                        val empId = therapistId?.toIntOrNull()
+                        if (empId != null) {
+                            val services = db.getServicesForEmployee(empId)
+                            val match = services.find { s -> 
+                                raw.contains(s.name, ignoreCase = true) || 
+                                s.name.equals(raw, ignoreCase = true)
+                            }
+                            match?.name ?: raw
+                        } else raw
+                    }
+                    
+                    // Validation
+                    if (therapistId == null) {
+                        return """{"error":"Missing therapist"}"""
+                    }
+                    if (cleanTreatment == null) {
+                        val availableServices = db.getServicesForEmployee(therapistId.toInt()).joinToString(", ") { it.name }
+                        return """{"error":"ASK FIRST: Which treatment? Available: $availableServices"}"""
+                    }
+                    if (startIso == null) {
+                        return """{"error":"ASK FIRST: When? Please provide date and time like: 2024-03-15 20:00"}"""
+                    }
+                    if (finalDuration == null) {
+                        val matchingService = db.getServicesForEmployee(therapistId.toInt()).find { s -> 
+                            s.name.equals(cleanTreatment, ignoreCase = true) 
+                        }
+                        if (matchingService != null) {
+                            finalDuration = matchingService.duration
+                        } else {
+                            return """{"error":"ASK FIRST: How long? The $cleanTreatment is available in different durations."}"""
+                        }
+                    }
+                    
+                    val confirmation = bookAppointment(therapistId, customerName, cleanTreatment!!, startIso, finalDuration!!, shopId)
                     """{"tool":"book_appointment","data":$confirmation}"""
                 }
+                "show_menu" -> {
+                    val menu = generateTherapistMenu(shopId)
+                    """{"tool":"show_menu","data":"$menu"}"""
+                }
                 "book_multi_appointment" -> {
-                    val customerName = args["customerName"]?.jsonPrimitive?.content
-                    val appointmentsJson = args["appointments"]?.jsonPrimitive?.content
-                        ?: return """{"error":"Missing appointments"}"""
+                    val customerName = getArg("customerName")
+                    val appointmentsJson = getArg("appointments")
+                        ?: return """{"error":"ASK FIRST: Ask customer for all booking details before calling this tool."}"""
                     val confirmations = bookMultiAppointment(appointmentsJson, customerName, shopId)
                     """{"tool":"book_multi_appointment","data":$confirmations}"""
                 }
@@ -207,24 +446,49 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
         val id = therapistId.toIntOrNull() ?: return """{"error":"Invalid therapistId"}"""
         val emp = db.getEmployeeById(id) ?: return """{"error":"Therapist not found"}"""
         val services = db.getServicesForEmployee(id)
-        return """{"therapistId":"$therapistId","name":"${emp.name}","specialities":[],"services":[${services.map { """{"id":${it.id},"name":"${it.name}","price":${it.price},"duration":${it.duration}}""" }.joinToString()}]}"""
+        val servicesJson = services.joinToString(",") { s -> 
+            """{"id":${s.id},"name":"${s.name}","price":${s.price},"duration":${s.duration}}"""
+        }
+        return """{"therapistId":"$therapistId","name":"${emp.name}","specialities":[],"services":[$servicesJson]}"""
     }
 
     private fun getTherapistAvailability(therapistId: String, dateIso: String, durationMinutes: Int, shopId: Int): String {
         val id = therapistId.toIntOrNull() ?: return """{"error":"Invalid therapistId"}"""
-        val slots = db.getAvailableTimeSlots(id, shopId, dateIso, durationMinutes)
-        val slotObjects = slots.map { """{"startIso":"$it","endIso":"${it.replace(" ", "T")}"}""" }.joinToString()
-        return """{"therapistId":"$therapistId","dateIso":"$dateIso","durationMinutes":$durationMinutes,"slots":[$slotObjects]}"""
+        
+        // Get slots summary from database helper
+        val available = db.getAvailableTimeSlotsSummary(id, shopId, dateIso, durationMinutes)
+        
+        return """{"therapistId":"$therapistId","dateIso":"$dateIso","durationMinutes":$durationMinutes,"available":"$available"}"""
     }
 
     private fun findJointAvailability(therapistIds: List<String>, dateIso: String, durationMinutes: Int, shopId: Int): String {
-        val allSlots = therapistIds.mapNotNull { id ->
-            val slots = db.getAvailableTimeSlots(id.toIntOrNull() ?: return@mapNotNull null, shopId, dateIso, durationMinutes).toSet()
-            slots
-        }.reduceOrNull { acc, set -> acc.intersect(set) } ?: emptySet()
+        // Find common slots across all therapists
+        var common: MutableList<String>? = null
+        for (id in therapistIds) {
+            val intId = id.toIntOrNull() ?: continue
+            val slots = db.getAvailableTimeSlots(intId, shopId, dateIso, durationMinutes)
+            val slotSet = mutableSetOf<String>()
+            for (s in slots) slotSet.add(s)
+            if (common == null) {
+                common = ArrayList()
+                for (s in slotSet) common.add(s)
+            } else {
+                val newCommon = ArrayList<String>()
+                for (c in common) {
+                    if (slotSet.contains(c)) newCommon.add(c)
+                }
+                common = newCommon
+            }
+        }
+        val allSlots = common ?: emptyList<String>()
         
-        val slotObjects = allSlots.map { """{"startIso":"$it","endIso":"${it.replace(" ", "T")}"}""" }.joinToString()
-        return """{"therapistIds":${therapistIds.map { "\"$it\"" }},"dateIso":"$dateIso","slots":[$slotObjects]}"""
+        // Summarize instead of listing all
+        val count = allSlots.size
+        val firstSlot = if (allSlots.isNotEmpty()) allSlots[0].replace(" ", "T") else "none"
+        val lastSlot = if (allSlots.isNotEmpty()) allSlots[allSlots.size - 1].replace(" ", "T") else "none"
+        
+        val therapistIdsJson = therapistIds.joinToString(",") { "\"$it\"" }
+        return "{\"therapistIds\":[$therapistIdsJson],\"dateIso\":\"$dateIso\",\"durationMinutes\":$durationMinutes,\"available\":\"$count slots from $firstSlot to $lastSlot\"}"
     }
 
     private fun listOpenTimeSlots(dateIso: String, durationMinutes: Int): String {
@@ -281,60 +545,70 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
         }
     }
 
-    private fun getSystemPrompt(shopId: Int = 1): String {
-        val today = LocalDate.now()
-        val tomorrow = today.plusDays(1)
-        
+    private fun getSystemPrompt(shopId: Int): String {
         return """
-You are a booking assistant for a massage studio that offers massage and other services.
-
-Context:
-- The customer is contacting shopId=$shopId. Do not ask which shop.
-- Today's date is $today (ISO format, local to the shop).
-
-Interpret:
-- "today" as $today
-- "tomorrow" as $tomorrow
+Booking assistant for massage studio. Your job is to help customers book appointments.
 
 CRITICAL RULES:
-- Never invent therapists, services, or availability. Use tools.
-- Never list therapist names unless they came from list_therapists tool output.
-- Never say a time is "with a therapist" unless it came from get_therapist_availability for that therapist.
-- Never claim a booking is confirmed unless book_appointment returns a confirmationId.
-
-Tool usage:
-If you need to call a tool, respond with ONLY:
-{"tool":"TOOL_NAME","arguments":{...}}
-No other text.
+1. When customer says YES, CORRECT, BOOK IT, CONFIRM, or any confirmation words -> IMMEDIATELY call the book_appointment tool with all the booking details. Do NOT ask again if they already confirmed!
+2. After booking tool returns success -> Tell customer "Booking confirmed!" with the details
+3. Do NOT say "booking confirmed" until AFTER the tool returns success
+4. If tool returns error -> Handle it appropriately (ask for different time, etc.)
 
 Available tools:
-1. {"tool":"list_therapists","arguments":{"shopId":"$shopId"}}
-   For: who works here?, list therapists, staff, team, etc.
+- list_therapists: List all therapists
+- get_therapist_details: Get details for a specific therapist
+- get_therapist_availability: Get available time slots for a therapist
+- list_open_time_slots: List open time slots
+- book_appointment: Book an appointment (THIS IS THE FINAL STEP!)
+- show_menu: Show the massage menu with services and prices
 
-2. {"tool":"get_therapist_details","arguments":{"therapistId":"1"}}
-   For: what can [name] do?, [name]'s details, therapist info.
+Booking flow:
+1. Ask for therapist name (or let customer pick from menu)
+2. Ask for service/treatment name
+3. Ask for date and time
+4. Ask customer to confirm (yes/correct)
+5. Call book_appointment tool IMMEDIATELY when they confirm
+6. Share confirmation details from tool result
 
-3. {"tool":"get_therapist_availability","arguments":{"therapistId":"1","dateIso":"$today","durationMinutes":60}}
-   For: is [name] available?, [name]'s schedule, free times for [name].
-
-4. {"tool":"find_joint_availability","arguments":{"therapistIds":["1","2"],"dateIso":"$today","durationMinutes":60}}
-   For: find time when multiple therapists available.
-
-5. {"tool":"list_open_time_slots","arguments":{"dateIso":"$today","durationMinutes":60}}
-   For: general availability, when can I book?
-
-6. {"tool":"book_appointment","arguments":{"therapistId":"1","customerName":"John","treatment":"Massage","startIso":"$today T10:00","durationMinutes":60}}
-   For: book an appointment, confirm booking, complete booking.
-
-7. {"tool":"book_multi_appointment","arguments":{"customerName":"John","appointments":[{"therapistId":"1","treatment":"Massage","startIso":"$today T10:00","durationMinutes":60}]}}
-   For: book multiple therapists simultaneously.
-
-Flow:
-- Show therapists + specialities based on tools.
-- Ask for treatment, date, and time.
-- Verify availability with tools before booking.
-- Book only after confirming an available slot.
+Remember: Once customer confirms, call book_appointment tool - don't ask again!
         """.trimIndent()
+    }
+
+    fun generateTherapistMenu(shopId: Int = 1): String {
+        val employees = db.getEmployeesForShop(shopId)
+        if (employees.isEmpty()) {
+            return "No therapists available at the moment."
+        }
+        
+        val sb = StringBuilder()
+        sb.appendLine("=== MASSAGE MENU ===")
+        sb.appendLine()
+        
+        for (emp in employees) {
+            sb.appendLine("👩‍⚕️ ${emp.name}")
+            val services = db.getServicesForEmployee(emp.id)
+            if (services.isEmpty()) {
+                sb.appendLine("  • No services available")
+            } else {
+                for (svc in services) {
+                    sb.appendLine("  • ${svc.name} - ${svc.duration} min - ${svc.price.toInt()} kr")
+                }
+            }
+            sb.appendLine()
+        }
+        
+        sb.appendLine("To book, tell me:")
+        sb.appendLine("1. Therapist name")
+        sb.appendLine("2. Service you want")
+        sb.appendLine("3. Preferred date and time")
+        
+        return sb.toString()
+    }
+
+    private fun getWelcomeMessage(shopId: Int = 1): String {
+        val menu = generateTherapistMenu(shopId)
+        return "Welcome!\n\nI'm the booking assistant for our massage studio.\n\n$menu\nHow can I help you today?"
     }
 
     // Public helper functions for testing

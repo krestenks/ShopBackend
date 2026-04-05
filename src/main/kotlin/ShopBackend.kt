@@ -47,7 +47,7 @@ object ShopBackend {
             twilioAuthToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
             twilioFromNumber = System.getenv("TWILIO_FROM_NUMBER") ?: "",
             lmStudioUrl = System.getenv("LM_STUDIO_URL") ?: "http://localhost:1234/v1",
-            lmStudioModel = System.getenv("LM_MODEL") ?: "llama-3-groq-8b-tool-use"
+            lmStudioModel = System.getenv("LM_MODEL") ?: "essentialai/rnj-1"
         )
         val chatbotService = TwilioChatbotService(db, chatbotConfig)
         println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")

@@ -78,7 +78,8 @@ fun Route.chatTestRoutes(db: DataBase, chatbotService: TwilioChatbotService) {
                             function addMessage(text, isUser) {
                                 const div = document.createElement('div');
                                 div.className = 'message ' + (isUser ? 'user' : 'bot');
-                                div.textContent = text;
+                                // Convert newlines to <br/> tags for display
+                                div.innerHTML = text.replace(/\n/g, '<br/>');
                                 chatContainer.appendChild(div);
                                 chatContainer.scrollTop = chatContainer.scrollHeight;
                             }

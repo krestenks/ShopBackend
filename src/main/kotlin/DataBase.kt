@@ -1113,7 +1113,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return total
     }
 
-    fun getAvailableTimeSlots(employeeId: Int, shopId: Int, dateStr: String, duration: Int): List<String> {
+    fun getAvailableTimeSlots(employeeId: Int, shopId: Int, dateStr: String, duration: Int): Array<String> {
         println("getAvailableTimeSlots called with:")
         println("  employeeId = $employeeId")
         println("  shopId = $shopId")
@@ -1174,9 +1174,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         // Generate slots
-        val availableSlots = mutableListOf<String>()
-        var slot = workStart
         val slotFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        val result = ArrayList<String>()
+        var slot = workStart
 
         while (slot.plusMinutes(duration.toLong()) <= workEnd) {
             val slotEnd = slot.plusMinutes(duration.toLong())
@@ -1184,12 +1184,106 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 !(slotEnd <= apptStart || slot >= apptEnd)
             }
             if (!conflicts) {
-                availableSlots.add(slot.format(slotFormatter))
+                result.add(slot.format(slotFormatter))
             }
             slot = slot.plusMinutes(intervalMinutes.toLong())
         }
 
-        return availableSlots
+        return result.toTypedArray()
+    }
+
+    // Summarized slots to avoid returning large lists
+    fun getAvailableTimeSlotsSummary(employeeId: Int, shopId: Int, dateStr: String, duration: Int): String {
+        val slots = getAvailableTimeSlots(employeeId, shopId, dateStr, duration)
+        val count = slots.size
+        val firstSlot: String = if (count > 0) {
+            val s: String = slots[0]
+            s.replace(" ", "T")
+        } else "none"
+        val lastSlot: String = if (count > 0) {
+            val s: String = slots[count - 1]
+            s.replace(" ", "T")
+        } else "none"
+        val result = StringBuilder()
+        result.append(count.toString())
+        result.append(" slots from ")
+        result.append(firstSlot)
+        result.append(" to ")
+        result.append(lastSlot)
+        return result.toString()
+    }
+
+    // Find common available slots across multiple therapists
+    fun findJointAvailability(employeeIds: List<Int>, shopId: Int, dateStr: String, duration: Int): String {
+        if (employeeIds.isEmpty()) return "0 slots from none to none"
+        
+        // Get slots for first therapist as baseline
+        val firstSlots = getAvailableTimeSlots(employeeIds[0], shopId, dateStr, duration).toMutableSet()
+        
+        // Intersect with other therapists
+        for (i in 1 until employeeIds.size) {
+            val otherSlots = getAvailableTimeSlots(employeeIds[i], shopId, dateStr, duration).toSet()
+            firstSlots.retainAll(otherSlots)
+            if (firstSlots.isEmpty()) break
+        }
+        
+        val sortedSlots = firstSlots.sorted()
+        val count = sortedSlots.size
+        val first = if (count > 0) sortedSlots[0].replace(" ", "T") else "none"
+        val last = if (count > 0) sortedSlots[count - 1].replace(" ", "T") else "none"
+        return "$count slots from $first to $last"
+    }
+
+    // Complete JSON result for therapist availability (avoiding Kotlin/Java interop issues)
+    fun getTherapistAvailabilityResult(therapistId: Int, dateStr: String, duration: Int, shopId: Int): String {
+        val slots = getAvailableTimeSlots(therapistId, shopId, dateStr, duration)
+        val count = slots.size
+        val firstSlot = if (count > 0) {
+            val s = slots[0]
+            s.replace(" ", "T")
+        } else "none"
+        val lastSlot = if (count > 0) {
+            val s = slots[count - 1]
+            s.replace(" ", "T")
+        } else "none"
+        
+        val sb = StringBuilder()
+        sb.append("{\"therapistId\":\"")
+        sb.append(therapistId.toString())
+        sb.append("\",\"dateIso\":\"")
+        sb.append(dateStr)
+        sb.append("\",\"durationMinutes\":")
+        sb.append(duration.toString())
+        sb.append(",\"available\":\"")
+        sb.append(count.toString())
+        sb.append(" slots from ")
+        sb.append(firstSlot)
+        sb.append(" to ")
+        sb.append(lastSlot)
+        sb.append("\"}")
+        return sb.toString()
+    }
+
+    // Complete JSON result for joint availability
+    fun getJointAvailabilityResult(therapistIds: List<Int>, shopId: Int, dateStr: String, duration: Int): String {
+        val availability = findJointAvailability(therapistIds, shopId, dateStr, duration)
+        
+        val sb = StringBuilder()
+        sb.append("{\"therapistIds\":[")
+        for (i in therapistIds.indices) {
+            if (i > 0) sb.append(",")
+            sb.append("\"")
+            sb.append(therapistIds[i].toString())
+            sb.append("\"")
+        }
+        sb.append("],\"dateIso\":\"")
+        sb.append(dateStr)
+        sb.append("\",\"durationMinutes\":")
+        sb.append(duration.toString())
+        sb.append(",\"available\":\"")
+        sb.append(availability)
+        sb.append("\"}")
+        return sb.toString()
     }
 
 
