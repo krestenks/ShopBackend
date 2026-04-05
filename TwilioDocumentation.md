@@ -45,6 +45,7 @@ Set the following environment variables for the `ShopBackend` process:
 | `TWILIO_AUTH_TOKEN` | Yes | `xxxxxxxx` | REST API auth |
 | `TWILIO_FROM_NUMBER` | Yes | `+4512345678` | Caller ID for outbound voice calls |
 | `PUBLIC_BASE_URL` | Yes (voice) | `https://api.example.com` | Twilio must fetch TwiML from this URL |
+| `PUBLIC_BOOKING_URL` | No (legacy) | `https://api.example.com` | Public base URL for booking links (if PUBLIC_BASE_URL not set) |
 | `PORT` | No | `8080` | Server port |
 
 Notes:
@@ -52,6 +53,10 @@ Notes:
 - `PUBLIC_BASE_URL` **must be publicly reachable by Twilio**. If you run locally, use a tunnel like **ngrok** or **cloudflared**.
 - The backend will call Twilio's REST API and tells Twilio to fetch TwiML from:
   `PUBLIC_BASE_URL/api/twilio/voice/ready`
+
+- Booking links are generated using:
+  - `PUBLIC_BASE_URL` (preferred), otherwise
+  - `PUBLIC_BOOKING_URL` (legacy name)
 
 ---
 
