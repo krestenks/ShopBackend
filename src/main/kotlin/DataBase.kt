@@ -794,7 +794,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         stmt.setString(4, phone)
         stmt.executeUpdate()
         stmt.close()
-        connection.close()
+        // Do NOT close the shared DB connection here.
+        // Closing it will break all subsequent requests (e.g. /managers) with
+        // java.sql.SQLException: database connection closed
     }
 
     fun getManagerById(id: Int): Manager? {
