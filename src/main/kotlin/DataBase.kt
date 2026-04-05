@@ -223,6 +223,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             // Table already exists or other error - ignore
         }
 
+        // Migration: extend shop_voice_config schema when DB already exists
+        try {
+            connection.createStatement().use { stmt ->
+                stmt.execute("ALTER TABLE shop_voice_config ADD COLUMN operator_phone TEXT")
+                println("Migrated shop_voice_config: added operator_phone")
+            }
+        } catch (_: Exception) {
+            // Column already exists or table missing - ignore
+        }
+
         println("All tables ready.")
     }
 
