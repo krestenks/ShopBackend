@@ -188,9 +188,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // === DAO methods ===
 
     fun authenticateShop(username: String, password: String): Shop? {
-        val stmt = connection.prepareStatement("SELECT * FROM shops WHERE username = ?")
-        stmt.setString(1, username)
-        val rs = stmt.executeQuery()
+        // Some deployments may have a shops table without username/password_hash columns.
+        // In that case, shop login is simply unavailable (manager login still works).
+        val rs = try {
+            val stmt = connection.prepareStatement("SELECT * FROM shops WHERE username = ?")
+            stmt.setString(1, username)
+            stmt.executeQuery()
+        } catch (e: Exception) {
+            println("authenticateShop: shops login not available (${e.message})")
+            return null
+        }
 
         if (rs.next()) {
             val hash = rs.getString("password_hash")
@@ -208,7 +215,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         rs.close()
-        stmt.close()
         return null
     }
 

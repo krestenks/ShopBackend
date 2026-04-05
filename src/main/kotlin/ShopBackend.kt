@@ -74,7 +74,9 @@ object ShopBackend {
             routing {
                 route("/") { webAdmin.setupRoutes(this) }
                 route("/api") { customerApi.setupRoutes(this) }
-                route("/mobile") { mobileApi.setupRoutes(this) }
+                // MobileApi defines its own absolute paths like /api/mobile/...
+                // so we mount it at root to avoid /mobile/api/mobile/... double-prefix.
+                mobileApi.setupRoutes(this)
                 twilioRoutes(db, chatbotService)
                 twilioVoiceRoutes(db)
                 chatTestRoutes(db, chatbotService)
