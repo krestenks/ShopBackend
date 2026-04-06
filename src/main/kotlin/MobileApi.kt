@@ -37,6 +37,7 @@ data class CreateBookingRequest(
     val serviceIds: List<Int>,
     val appointmentTime: String,          // "yyyy-MM-dd HH:mm"
     val voiceCallId: Int? = null,         // optional: link booking to ongoing call
+    val totalDuration: Int = 0,           // pre-computed by client; used as fallback
 )
 
 @Serializable
@@ -606,9 +607,11 @@ class MobileApi(private val db: DataBase) {
                     val zoneId = java.time.ZoneId.systemDefault()
                     val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
-                    val totalDuration = serviceIds.mapNotNull { db.getServiceById(it)?.duration }.sum()
-                    if (totalDuration == 0) {
-                        call.respond(HttpStatusCode.BadRequest, "Invalid service durations")
+                    // Prefer DB-computed duration; fall back to client-sent value (handles 0-duration services)
+                    val dbDuration = serviceIds.mapNotNull { db.getServiceById(it)?.duration }.sum()
+                    val totalDuration = if (dbDuration > 0) dbDuration else body.totalDuration
+                    if (totalDuration <= 0) {
+                        call.respond(HttpStatusCode.BadRequest, "Could not determine service duration")
                         return@post
                     }
 
