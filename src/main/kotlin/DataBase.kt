@@ -1778,9 +1778,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val defaultWorkStart = date.atTime(8, 0)
         val workEnd = date.atTime(23, 55)
 
-        // Determine workStart depending on whether date is today
-        val now = LocalDateTime.now()
-        val workStart = if (date.isEqual(LocalDate.now())) {
+        // Determine workStart depending on whether date is today (using shop's local timezone)
+        val shopZoneForNow = java.time.ZoneId.of("Europe/Copenhagen")
+        val now = LocalDateTime.now(shopZoneForNow)
+        val workStart = if (date.isEqual(LocalDate.now(shopZoneForNow))) {
             // Round now up to next 10-minute mark
             val minute = now.minute
             val roundedMinute = ((minute + 9) / 10) * 10
@@ -1794,8 +1795,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         // Get all existing appointments for the employee on that day
         val appointments = mutableListOf<Pair<LocalDateTime, LocalDateTime>>()
-        val startOfDaySeconds = date.atStartOfDay().toEpochSecond(ZoneOffset.UTC)
-        val endOfDaySeconds = date.plusDays(1).atStartOfDay().toEpochSecond(ZoneOffset.UTC)
+        val shopZone = java.time.ZoneId.of("Europe/Copenhagen")
+        val startOfDaySeconds = date.atStartOfDay(shopZone).toEpochSecond()
+        val endOfDaySeconds = date.plusDays(1).atStartOfDay(shopZone).toEpochSecond()
 
         val startOfDay = startOfDaySeconds * 1000  // Convert to milliseconds
         val endOfDay = endOfDaySeconds * 1000      // Convert to milliseconds
@@ -1817,7 +1819,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 val startEpoch = rs.getLong("date_time")
                 val apptStart = Instant.ofEpochMilli(startEpoch)
-                    .atZone(ZoneId.systemDefault())
+                    .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
                     .toLocalDateTime()
                 val apptEnd = apptStart.plusMinutes(rs.getInt("duration").toLong())
                 println("  Loaded appointment: $apptStart to $apptEnd")

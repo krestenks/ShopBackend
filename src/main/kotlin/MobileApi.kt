@@ -614,7 +614,7 @@ class MobileApi(private val db: DataBase) {
                             return@post call.respond(HttpStatusCode.BadRequest, "Invalid date/time format")
                         }
 
-                    val zoneId = java.time.ZoneId.systemDefault()
+                    val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
                     val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
                     // Use batch SUM query — avoids individual getServiceById nulls
