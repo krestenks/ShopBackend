@@ -370,35 +370,16 @@ class MobileApi(private val db: DataBase) {
                         return@get
                     }
 
-                    val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
+                    // Shop-role: use their own shopId; manager-role: take from query param
+                    val shopId = if (loginInfo.role == "shop") loginInfo.shopId
+                                 else call.request.queryParameters["shop_id"]?.toIntOrNull()
+
                     if (shopId == null) {
                         call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
                         return@get
                     }
 
-                    if (loginInfo.role != "manager") {
-                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
-                        return@get
-                    }
-
-                    val employees = db.getEmployeesForShop(shopId)
-                    call.respond(employees)
-                }
-
-                get("/api/mobile/manager/employees") {
-                    val loginInfo = authenticateManager()
-                    if (loginInfo == null) {
-                        call.respond(HttpStatusCode.Unauthorized)
-                        return@get
-                    }
-
-                    val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
-                    if (shopId == null) {
-                        call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
-                        return@get
-                    }
-
-                    if (loginInfo.role != "manager") {
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
                         call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                         return@get
                     }
@@ -420,11 +401,7 @@ class MobileApi(private val db: DataBase) {
                         return@get
                     }
 
-                    if (loginInfo.role != "manager") {
-                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
-                        return@get
-                    }
-
+                    // Both roles can look up services for an employee
                     val services = db.getServicesForEmployee(employeeId)
                     call.respond(services)
                 }
@@ -437,7 +414,8 @@ class MobileApi(private val db: DataBase) {
                     }
 
                     val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
-                    val shopId = call.request.queryParameters["shop_id"]?.toIntOrNull()
+                    val shopId = if (loginInfo.role == "shop") loginInfo.shopId
+                                 else call.request.queryParameters["shop_id"]?.toIntOrNull()
                     val date = call.request.queryParameters["date"]
                     val duration = call.request.queryParameters["duration"]?.toIntOrNull()
 
@@ -446,7 +424,7 @@ class MobileApi(private val db: DataBase) {
                         return@get
                     }
 
-                    if (loginInfo.role != "manager") {
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
                         call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                         return@get
                     }
@@ -612,8 +590,8 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
 
-                    if (loginInfo.role != "manager") {
-                        call.respond(HttpStatusCode.Forbidden, "Not authorized")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                         return@post
                     }
 
