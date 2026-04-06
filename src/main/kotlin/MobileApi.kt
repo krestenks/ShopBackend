@@ -21,6 +21,24 @@ import java.time.format.DateTimeFormatter
 import kotlinx.serialization.*
 import twilio.TwilioVoiceCallService
 
+// ─── Request/response models used by call-log + blacklist endpoints ───────────
+
+@Serializable
+data class AddBlacklistRequest(val phone: String, val reason: String? = null)
+
+@Serializable
+data class CreateBookingRequest(
+    val shopId: Int,
+    val employeeId: Int,
+    val customerId: Int? = null,
+    val serviceIds: List<Int>,
+    val appointmentTime: String,          // "yyyy-MM-dd HH:mm"
+    val voiceCallId: Int? = null,         // optional: link booking to ongoing call
+)
+
+@Serializable
+data class CreateBookingResponse(val appointmentId: Int, val voiceCallId: Int?)
+
 @Serializable
 data class LoginRequest(val username: String, val password: String)
 @Serializable
@@ -381,8 +399,220 @@ class MobileApi(private val db: DataBase) {
                     call.respond(timeSlots)
                 }
 
+                // ─────────────────────────────────────────────────────────────
+                // Voice call log endpoints
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * GET /api/mobile/manager/shops/{shopId}/calls/active
+                 * Returns all active (ongoing) inbound calls for a shop.
+                 * The phone app polls this to show live incoming calls.
+                 */
+                get("/api/mobile/manager/shops/{shopId}/calls/active") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    call.respond(db.getActiveCallsForShop(shopId))
+                }
+
+                /**
+                 * GET /api/mobile/manager/shops/{shopId}/calls
+                 * Returns recent call history for a shop (default last 50).
+                 */
+                get("/api/mobile/manager/shops/{shopId}/calls") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 50
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    call.respond(db.getRecentCallsForShop(shopId, limit))
+                }
+
+                /**
+                 * GET /api/mobile/manager/calls/{callId}
+                 * Returns a single call record with its event timeline.
+                 */
+                get("/api/mobile/manager/calls/{callId}") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val callId = call.parameters["callId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing callId")
+
+                    val record = db.getCallById(callId)
+                        ?: return@get call.respond(HttpStatusCode.NotFound, "Call not found")
+
+                    if (!isAuthorizedForShop(loginInfo, record.shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    val events = db.getCallEvents(callId)
+                    call.respond(mapOf("call" to record, "events" to events))
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // Blacklist endpoints (data stored now; Android UI in step 2)
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * GET /api/mobile/manager/shops/{shopId}/blacklist
+                 */
+                get("/api/mobile/manager/shops/{shopId}/blacklist") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    call.respond(db.listBlacklist(shopId))
+                }
+
+                /**
+                 * POST /api/mobile/manager/shops/{shopId}/blacklist
+                 * Body: { "phone": "+4512345678", "reason": "optional" }
+                 */
+                post("/api/mobile/manager/shops/{shopId}/blacklist") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val body = runCatching { call.receive<AddBlacklistRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    if (body.phone.isBlank()) {
+                        return@post call.respond(HttpStatusCode.BadRequest, "phone is required")
+                    }
+
+                    val id = db.addBlacklistEntry(shopId, body.phone, body.reason)
+                    call.respond(HttpStatusCode.Created, mapOf("id" to id, "phone" to body.phone))
+                }
+
+                /**
+                 * DELETE /api/mobile/manager/shops/{shopId}/blacklist/{entryId}
+                 * Soft-removes (deactivates) the blacklist entry.
+                 */
+                delete("/api/mobile/manager/shops/{shopId}/blacklist/{entryId}") {
+                    val loginInfo = authenticateManager() ?: return@delete
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@delete call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val entryId = call.parameters["entryId"]?.toIntOrNull()
+                        ?: return@delete call.respond(HttpStatusCode.BadRequest, "Missing entryId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@delete
+                    }
+
+                    val removed = db.removeBlacklistEntryById(entryId)
+                    if (removed) call.respond(HttpStatusCode.NoContent)
+                    else call.respond(HttpStatusCode.NotFound, "Blacklist entry not found")
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // JSON booking create with optional call linkage
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * POST /api/mobile/manager/booking/create-json
+                 *
+                 * Accepts JSON body (see CreateBookingRequest).
+                 * If voiceCallId is provided, the created booking is atomically linked
+                 * to the ongoing call in voice_call.linked_booking_id.
+                 *
+                 * Operator use-case: operator creates a booking while still on the
+                 * phone with the customer; the booking shows up linked to the call log.
+                 */
+                post("/api/mobile/manager/booking/create-json") {
+                    val loginInfo = authenticateManager() ?: return@post
+
+                    val body = runCatching { call.receive<CreateBookingRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val shopId     = body.shopId
+                    val employeeId = body.employeeId
+                    val serviceIds = body.serviceIds
+                    val dateTimeStr = body.appointmentTime
+
+                    if (serviceIds.isEmpty() || dateTimeStr.isBlank()) {
+                        call.respond(HttpStatusCode.BadRequest, "Missing or invalid parameters")
+                        return@post
+                    }
+
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized")
+                        return@post
+                    }
+
+                    val customerId = body.customerId ?: 0
+
+                    val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                    val localDateTime = runCatching {
+                        java.time.LocalDateTime.parse(dateTimeStr, formatter)
+                    }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid date/time format")
+
+                    val zoneId = java.time.ZoneId.systemDefault()
+                    val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
+
+                    val totalDuration = serviceIds.mapNotNull { db.getServiceById(it)?.duration }.sum()
+                    if (totalDuration == 0) {
+                        call.respond(HttpStatusCode.BadRequest, "Invalid service durations")
+                        return@post
+                    }
+
+                    if (db.isAppointmentOverlapping(employeeId, dateTimeMillis, totalDuration)) {
+                        call.respond(HttpStatusCode.Conflict, "Time slot is already booked")
+                        return@post
+                    }
+
+                    val appointmentId = db.addAppointment(employeeId, shopId, customerId, dateTimeMillis, totalDuration)
+                    if (appointmentId == -1) {
+                        call.respond(HttpStatusCode.InternalServerError, "Failed to create appointment")
+                        return@post
+                    }
+                    db.addServicesToAppointment(appointmentId, serviceIds)
+
+                    // Link to ongoing call if callId provided
+                    val linkedCallId = body.voiceCallId
+                    if (linkedCallId != null && linkedCallId > 0) {
+                        db.linkBookingToCall(linkedCallId, appointmentId)
+                    }
+
+                    call.respond(
+                        HttpStatusCode.Created,
+                        CreateBookingResponse(appointmentId = appointmentId, voiceCallId = linkedCallId),
+                    )
+                }
 
             }
         }
+    }
+}
+
+// ─── Auth helper ──────────────────────────────────────────────────────────────
+
+private fun isAuthorizedForShop(loginInfo: LoginInfo, shopId: Int, db: DataBase): Boolean {
+    return when (loginInfo.role) {
+        "shop"    -> loginInfo.shopId == shopId
+        "manager" -> loginInfo.managerId != null && db.isManagerOfShop(loginInfo.managerId, shopId)
+        else      -> false
     }
 }

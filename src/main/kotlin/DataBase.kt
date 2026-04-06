@@ -69,6 +69,82 @@ data class ShopVoiceConfig(
     val operatorPhone: String? = null,
     val welcomeOpenMessage: String = "Hello and welcome. We are open.",
     val welcomeClosedMessage: String = "Hello and welcome. We are currently closed.",
+    val temporaryOperatorClosed: Boolean = false,
+    val temporaryOperatorClosedMessage: String = "Our phones are temporarily unavailable. Please try again in 30 minutes.",
+    val businessName: String? = null,
+)
+
+// ─── Voice call log ──────────────────────────────────────────────────────────
+
+/** Current state of a tracked inbound call (mirrors Phone flow spec state machine). */
+enum class VoiceCallState {
+    INCOMING_CALL,
+    REJECTED_BLACKLISTED,
+    IDENTIFY_CUSTOMER,
+    CHECK_OPENING_HOURS,
+    CHECK_TEMP_OPERATOR_CLOSURE,
+    UNKNOWN_CUSTOMER_ROUTE,
+    KNOWN_CUSTOMER_MENU,
+    KNOWN_CUSTOMER_SMS_BOOKING,
+    KNOWN_CUSTOMER_OPERATOR_ROUTE,
+    OPERATOR_BUSY,
+    OPERATOR_WHISPER,
+    BRIDGED_TO_OPERATOR,
+    CLOSED_MESSAGE,
+    TEMPORARY_CLOSED_MESSAGE,
+    TERMINATED,
+}
+
+enum class VoiceCallOutcome {
+    BLACKLIST_REJECTED,
+    CLOSED_HOURS,
+    TEMP_OPERATOR_CLOSED,
+    OPERATOR_BUSY,
+    SMS_SENT,
+    OPERATOR_BRIDGED,
+    OPERATOR_DECLINED,
+    INVALID_MENU_MAX_RETRIES,
+    SYSTEM_ERROR,
+    IN_PROGRESS,
+}
+
+@Serializable
+data class VoiceCallRecord(
+    val id: Int,
+    val shopId: Int,
+    val twilioCallSid: String,
+    val fromPhone: String,
+    val toPhone: String,
+    val customerType: String,          // "unknown" | "known"
+    val customerId: Int?,
+    val state: String,
+    val outcome: String,
+    val isActive: Boolean,
+    val startedAt: Long,
+    val endedAt: Long?,
+    val linkedBookingId: Int?,
+    val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
+)
+
+@Serializable
+data class VoiceCallEvent(
+    val id: Int,
+    val callId: Int,
+    val state: String,
+    val note: String?,
+    val createdAt: Long,
+)
+
+// ─── Blacklist ───────────────────────────────────────────────────────────────
+
+@Serializable
+data class BlacklistEntry(
+    val id: Int,
+    val shopId: Int,
+    val phoneE164: String,
+    val reason: String?,
+    val createdAt: Long,
+    val active: Boolean,
 )
 
 @Serializable
@@ -206,6 +282,45 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 closed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (shop_id, day_of_week)
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS phone_blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id INTEGER NOT NULL,
+                phone_e164 TEXT NOT NULL,
+                reason TEXT,
+                created_at INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(shop_id, phone_e164)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS voice_call (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id INTEGER NOT NULL,
+                twilio_call_sid TEXT NOT NULL UNIQUE,
+                from_phone TEXT NOT NULL,
+                to_phone TEXT NOT NULL,
+                customer_type TEXT NOT NULL DEFAULT 'unknown',
+                customer_id INTEGER,
+                state TEXT NOT NULL DEFAULT 'INCOMING_CALL',
+                outcome TEXT NOT NULL DEFAULT 'IN_PROGRESS',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                linked_booking_id INTEGER,
+                operator_phone TEXT
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS voice_call_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                note TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(call_id) REFERENCES voice_call(id)
+            );
             """
         )
 
@@ -223,14 +338,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             // Table already exists or other error - ignore
         }
 
-        // Migration: extend shop_voice_config schema when DB already exists
-        try {
-            connection.createStatement().use { stmt ->
-                stmt.execute("ALTER TABLE shop_voice_config ADD COLUMN operator_phone TEXT")
-                println("Migrated shop_voice_config: added operator_phone")
-            }
-        } catch (_: Exception) {
-            // Column already exists or table missing - ignore
+        // Migrations: extend existing tables with new columns
+        listOf(
+            "ALTER TABLE shop_voice_config ADD COLUMN operator_phone TEXT",
+            "ALTER TABLE shop_voice_config ADD COLUMN temporary_operator_closed INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE shop_voice_config ADD COLUMN temporary_operator_closed_message TEXT",
+            "ALTER TABLE shop_voice_config ADD COLUMN business_name TEXT",
+            "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
+        ).forEach { sql ->
+            try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
 
         println("All tables ready.")
@@ -239,7 +355,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // === Shop voice config ===
 
     fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
-        val sql = "SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message FROM shop_voice_config WHERE shop_id = ?"
+        val sql = """
+            SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message,
+                   temporary_operator_closed, temporary_operator_closed_message, business_name
+            FROM shop_voice_config WHERE shop_id = ?
+        """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
@@ -250,6 +370,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     operatorPhone = rs.getString("operator_phone"),
                     welcomeOpenMessage = rs.getString("welcome_open_message") ?: ShopVoiceConfig(shopId).welcomeOpenMessage,
                     welcomeClosedMessage = rs.getString("welcome_closed_message") ?: ShopVoiceConfig(shopId).welcomeClosedMessage,
+                    temporaryOperatorClosed = rs.getInt("temporary_operator_closed") != 0,
+                    temporaryOperatorClosedMessage = rs.getString("temporary_operator_closed_message")
+                        ?: ShopVoiceConfig(shopId).temporaryOperatorClosedMessage,
+                    businessName = rs.getString("business_name"),
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -259,13 +383,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
         val sql = """
-            INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message,
+                welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message, business_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 twilio_number = excluded.twilio_number,
                 operator_phone = excluded.operator_phone,
                 welcome_open_message = excluded.welcome_open_message,
-                welcome_closed_message = excluded.welcome_closed_message
+                welcome_closed_message = excluded.welcome_closed_message,
+                temporary_operator_closed = excluded.temporary_operator_closed,
+                temporary_operator_closed_message = excluded.temporary_operator_closed_message,
+                business_name = excluded.business_name
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -274,8 +402,282 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(3, config.operatorPhone)
             stmt.setString(4, config.welcomeOpenMessage)
             stmt.setString(5, config.welcomeClosedMessage)
+            stmt.setInt(6, if (config.temporaryOperatorClosed) 1 else 0)
+            stmt.setString(7, config.temporaryOperatorClosedMessage)
+            stmt.setString(8, config.businessName)
             stmt.executeUpdate()
         }
+    }
+
+    // =========================================================================
+    // Phone blacklist
+    // =========================================================================
+
+    fun isPhoneBlacklisted(shopId: Int, phone: String): Boolean {
+        val sql = "SELECT 1 FROM phone_blacklist WHERE shop_id = ? AND phone_e164 = ? AND active = 1 LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone.trim())
+            val rs = stmt.executeQuery()
+            return rs.next()
+        }
+    }
+
+    fun addBlacklistEntry(shopId: Int, phone: String, reason: String?): Int {
+        val sql = """
+            INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(shop_id, phone_e164) DO UPDATE SET active = 1, reason = excluded.reason, created_at = excluded.created_at
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone.trim())
+            stmt.setString(3, reason)
+            stmt.setLong(4, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+        connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            return if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    fun removeBlacklistEntry(shopId: Int, phone: String): Boolean {
+        val sql = "UPDATE phone_blacklist SET active = 0 WHERE shop_id = ? AND phone_e164 = ?"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone.trim())
+            return stmt.executeUpdate() > 0
+        }
+    }
+
+    fun removeBlacklistEntryById(entryId: Int): Boolean {
+        val sql = "UPDATE phone_blacklist SET active = 0 WHERE id = ?"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, entryId)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
+    fun listBlacklist(shopId: Int): List<BlacklistEntry> {
+        val sql = "SELECT id, shop_id, phone_e164, reason, created_at, active FROM phone_blacklist WHERE shop_id = ? AND active = 1 ORDER BY created_at DESC"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<BlacklistEntry>()
+            while (rs.next()) {
+                result += BlacklistEntry(
+                    id = rs.getInt("id"),
+                    shopId = rs.getInt("shop_id"),
+                    phoneE164 = rs.getString("phone_e164"),
+                    reason = rs.getString("reason"),
+                    createdAt = rs.getLong("created_at"),
+                    active = rs.getInt("active") != 0,
+                )
+            }
+            return result
+        }
+    }
+
+    // =========================================================================
+    // Voice call log
+    // =========================================================================
+
+    /**
+     * Returns true if there is already an active call in an operator-active state
+     * for the given operator phone number (across ALL shops).
+     *
+     * The check is scoped by operator_phone so a shared operator can't be double-booked
+     * from two different shops simultaneously.
+     */
+    fun isOperatorBusy(operatorPhone: String): Boolean {
+        val sql = """
+            SELECT 1 FROM voice_call
+            WHERE operator_phone = ?
+              AND is_active = 1
+              AND state IN ('OPERATOR_WHISPER', 'BRIDGED_TO_OPERATOR')
+            LIMIT 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, operatorPhone.trim())
+            val rs = stmt.executeQuery()
+            return rs.next()
+        }
+    }
+
+    /**
+     * Set or update the operator_phone for an existing call record.
+     * Called just before entering the operator-whisper/bridge path.
+     */
+    fun setCallOperatorPhone(callId: Int, operatorPhone: String) {
+        connection.prepareStatement("UPDATE voice_call SET operator_phone = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, operatorPhone.trim())
+            stmt.setInt(2, callId)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Insert a new call log row immediately when the inbound call arrives. Returns the new row ID. */
+    fun createInboundCallLog(shopId: Int, twilioCallSid: String, fromPhone: String, toPhone: String): Int {
+        val sql = """
+            INSERT INTO voice_call (shop_id, twilio_call_sid, from_phone, to_phone, state, outcome, is_active, started_at)
+            VALUES (?, ?, ?, ?, 'INCOMING_CALL', 'IN_PROGRESS', 1, ?)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, twilioCallSid)
+            stmt.setString(3, fromPhone)
+            stmt.setString(4, toPhone)
+            stmt.setLong(5, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+        connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            return if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    fun updateCallState(callId: Int, state: VoiceCallState, note: String? = null) {
+        connection.prepareStatement("UPDATE voice_call SET state = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, state.name)
+            stmt.setInt(2, callId)
+            stmt.executeUpdate()
+        }
+        appendCallEvent(callId, state.name, note)
+    }
+
+    fun updateCallCustomer(callId: Int, customerId: Int?, customerType: String) {
+        connection.prepareStatement("UPDATE voice_call SET customer_id = ?, customer_type = ? WHERE id = ?").use { stmt ->
+            if (customerId != null) stmt.setInt(1, customerId) else stmt.setNull(1, java.sql.Types.INTEGER)
+            stmt.setString(2, customerType)
+            stmt.setInt(3, callId)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun terminateCall(callId: Int, outcome: VoiceCallOutcome) {
+        val now = System.currentTimeMillis()
+        connection.prepareStatement(
+            "UPDATE voice_call SET is_active = 0, ended_at = ?, state = 'TERMINATED', outcome = ? WHERE id = ?"
+        ).use { stmt ->
+            stmt.setLong(1, now)
+            stmt.setString(2, outcome.name)
+            stmt.setInt(3, callId)
+            stmt.executeUpdate()
+        }
+        appendCallEvent(callId, VoiceCallState.TERMINATED.name, outcome.name)
+    }
+
+    fun linkBookingToCall(callId: Int, bookingId: Int) {
+        connection.prepareStatement("UPDATE voice_call SET linked_booking_id = ? WHERE id = ?").use { stmt ->
+            stmt.setInt(1, bookingId)
+            stmt.setInt(2, callId)
+            stmt.executeUpdate()
+        }
+        appendCallEvent(callId, "BOOKING_LINKED", "booking_id=$bookingId")
+    }
+
+    fun appendCallEvent(callId: Int, state: String, note: String? = null) {
+        connection.prepareStatement(
+            "INSERT INTO voice_call_event (call_id, state, note, created_at) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setInt(1, callId)
+            stmt.setString(2, state)
+            stmt.setString(3, note)
+            stmt.setLong(4, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+    }
+
+    fun getActiveCallsForShop(shopId: Int): List<VoiceCallRecord> {
+        val sql = """
+            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
+                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
+            FROM voice_call WHERE shop_id = ? AND is_active = 1 ORDER BY started_at DESC
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            return buildCallRecordList(stmt.executeQuery())
+        }
+    }
+
+    fun getRecentCallsForShop(shopId: Int, limit: Int = 50): List<VoiceCallRecord> {
+        val sql = """
+            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
+                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
+            FROM voice_call WHERE shop_id = ? ORDER BY started_at DESC LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, limit)
+            return buildCallRecordList(stmt.executeQuery())
+        }
+    }
+
+    fun getCallById(callId: Int): VoiceCallRecord? {
+        val sql = """
+            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
+                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
+            FROM voice_call WHERE id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, callId)
+            return buildCallRecordList(stmt.executeQuery()).firstOrNull()
+        }
+    }
+
+    fun getCallByTwilioSid(twilioCallSid: String): VoiceCallRecord? {
+        val sql = """
+            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
+                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
+            FROM voice_call WHERE twilio_call_sid = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, twilioCallSid)
+            return buildCallRecordList(stmt.executeQuery()).firstOrNull()
+        }
+    }
+
+    fun getCallEvents(callId: Int): List<VoiceCallEvent> {
+        val sql = "SELECT id, call_id, state, note, created_at FROM voice_call_event WHERE call_id = ? ORDER BY created_at ASC"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, callId)
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<VoiceCallEvent>()
+            while (rs.next()) {
+                result += VoiceCallEvent(
+                    id = rs.getInt("id"),
+                    callId = rs.getInt("call_id"),
+                    state = rs.getString("state"),
+                    note = rs.getString("note"),
+                    createdAt = rs.getLong("created_at"),
+                )
+            }
+            return result
+        }
+    }
+
+    private fun buildCallRecordList(rs: java.sql.ResultSet): List<VoiceCallRecord> {
+        val result = mutableListOf<VoiceCallRecord>()
+        while (rs.next()) {
+            result += VoiceCallRecord(
+                id = rs.getInt("id"),
+                shopId = rs.getInt("shop_id"),
+                twilioCallSid = rs.getString("twilio_call_sid"),
+                fromPhone = rs.getString("from_phone"),
+                toPhone = rs.getString("to_phone"),
+                customerType = rs.getString("customer_type"),
+                customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                state = rs.getString("state"),
+                outcome = rs.getString("outcome"),
+                isActive = rs.getInt("is_active") != 0,
+                startedAt = rs.getLong("started_at"),
+                endedAt = rs.getLong("ended_at").takeIf { !rs.wasNull() },
+                linkedBookingId = rs.getInt("linked_booking_id").takeIf { !rs.wasNull() },
+                operatorPhone = rs.getString("operator_phone"),
+            )
+        }
+        return result
     }
 
     // === Shop opening hours ===

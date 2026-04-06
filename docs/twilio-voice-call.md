@@ -1,109 +1,188 @@
-# Twilio Voice Call ("Ready for you")
-
-This backend supports triggering an outbound Twilio voice call to a customer for an appointment. The call plays a Text-to-Speech (TTS) message telling the customer they can come to the door.
+# Twilio Voice — Inbound call flow + call log + blacklist
 
 ## Overview
 
-1. **Shop app** calls the backend endpoint:
-   `POST /api/mobile/manager/appointments/{appointmentId}/call-customer`
-2. Backend starts a Twilio outbound call via Twilio REST API (`Calls.json`).
-3. Twilio requests TwiML from:
-   `GET/POST /api/twilio/voice/ready?msg=...`
-4. Backend responds with TwiML containing `<Say>`.
+All inbound calls to a shop's Twilio number are routed according to the **Phone flow spec**
+(`Phone flow.txt`).  Every call is **immediately persisted** to the database on first webhook
+hit, so the ShopManager Android app can see live calls in real time and operators can create
+bookings linked to an ongoing call.
+
+---
+
+## Inbound call state machine
+
+```
+IncomingCall
+  → (blacklisted)            RejectedBlacklisted → Terminated
+  → (unknown customer)
+      outside hours          ClosedMessage → Terminated
+      inside hours + temp-closed   TemporaryClosedMessage → Terminated
+      inside hours + open    OperatorWhisper → BridgedToOperator / Terminated
+  → (known customer)         KnownCustomerMenu (up to 3 DTMF attempts)
+      digit 1                KnownCustomerSmsBooking → Terminated
+      digit 2 + outside hours     ClosedMessage → Terminated
+      digit 2 + temp-closed  TemporaryClosedMessage → Terminated
+      digit 2 + open         OperatorWhisper → BridgedToOperator / Terminated
+      no input × 3           Terminated
+```
+
+### Operator whisper
+
+Before a call is bridged to the operator:
+- Customer hears **ringing** (`answerOnBridge="true"`).
+- Operator hears a private whisper:
+  - *New customer*: "Incoming call for {businessName}. New customer. Intake interview required before treatment. Press 1 to accept."
+  - *Existing customer*: "Incoming call for {businessName}. Existing customer. Standard treatment flow. Press 1 to accept."
+- Operator must press `1` to accept; otherwise caller hears "No operator available."
+
+---
+
+## Backend webhooks (Twilio Console → Phone Number → Voice)
+
+| Purpose | Method | URL |
+|---------|--------|-----|
+| Inbound call entry | POST | `https://{PUBLIC_BASE_URL}/api/twilio/voice/welcome` |
+| Status callback (optional) | POST | `https://{PUBLIC_BASE_URL}/api/twilio/voice/status` |
+
+All other endpoints (`/menu`, `/operator-whisper`, `/operator-accept`, `/dial-status`) are
+called internally by Twilio as part of the flow; they do not need to be manually configured.
+
+---
 
 ## Required environment variables
 
-Backend (`ShopBackend`):
+```
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
+TWILIO_FROM_NUMBER     # E.164, used as SMS sender fallback
+PUBLIC_BASE_URL        # e.g. https://api.example.com — must be reachable by Twilio
+```
 
-- `TWILIO_ACCOUNT_SID`
-- `TWILIO_AUTH_TOKEN`
-- `TWILIO_FROM_NUMBER` (E.164 format, e.g. `+4512345678`)
-- `PUBLIC_BASE_URL` (publicly reachable base URL of this backend, e.g. `https://api.example.com`)
+---
 
-Notes:
+## Shop voice config (WebAdmin → Shops → Edit)
 
-- Twilio must be able to reach `PUBLIC_BASE_URL/api/twilio/voice/ready`.
-- For local testing you typically need a tunnel (ngrok, cloudflared, etc.).
+| Field | Description |
+|-------|-------------|
+| Twilio number (E.164) | Routes inbound calls to the correct shop |
+| Operator phone (E.164) | Target for press-2 / unknown-caller transfer |
+| Business name | Spoken in operator whisper |
+| Welcome message (OPEN) | Played to known customers when open |
+| Welcome message (CLOSED) | Played when outside opening hours |
+| Temporary operator closed | Boolean toggle |
+| Temporary operator closed message | Defaults to "Our phones are temporarily unavailable. Please try again in 30 minutes." |
 
-## Backend endpoints
+---
 
-### 1) Trigger a call (JWT protected)
+## Call log (DB: `voice_call` + `voice_call_event`)
+
+### `voice_call` table
+
+| Column | Notes |
+|--------|-------|
+| `id` | Internal PK |
+| `shop_id` | |
+| `twilio_call_sid` | Unique Twilio call SID |
+| `from_phone` | Caller E.164 |
+| `to_phone` | Shop Twilio number |
+| `customer_type` | `unknown` / `known` |
+| `customer_id` | nullable FK to `customers` |
+| `state` | Current state machine state |
+| `outcome` | Terminal outcome enum |
+| `is_active` | 1 while call is in progress |
+| `started_at` | Epoch ms — set on first webhook hit |
+| `ended_at` | Epoch ms — set on termination |
+| `linked_booking_id` | nullable FK to `appointments` |
+
+The row is **inserted immediately** at the start of `/api/twilio/voice/welcome`, before any
+routing logic runs.  This means the app can display the incoming caller in real time.
+
+### `voice_call_event` table
+
+Timeline of every state transition: `call_id`, `state`, `note`, `created_at`.
+
+---
+
+## Manager API endpoints (JWT protected)
+
+### Active calls (live call lookup)
+
+```
+GET /api/mobile/manager/shops/{shopId}/calls/active
+```
+Returns all calls with `is_active = 1` for the shop.  Poll this to show live incoming calls.
+
+### Call history
+
+```
+GET /api/mobile/manager/shops/{shopId}/calls?limit=50
+```
+
+### Single call detail + event timeline
+
+```
+GET /api/mobile/manager/calls/{callId}
+```
+Response:
+```json
+{ "call": { ... }, "events": [ { "state": "...", "note": "...", "createdAt": 0 } ] }
+```
+
+---
+
+## Booking linked to an ongoing call
+
+Use `POST /api/mobile/manager/booking/create-json` (JSON body) instead of the form-based
+`/booking/create` endpoint.  Pass `voiceCallId` to atomically link the booking to the call.
+
+```json
+{
+  "shopId": 1,
+  "employeeId": 3,
+  "customerId": 42,
+  "serviceIds": [1, 2],
+  "appointmentTime": "2026-04-10 14:00",
+  "voiceCallId": 17
+}
+```
+
+Response:
+```json
+{ "appointmentId": 99, "voiceCallId": 17 }
+```
+
+The `voice_call.linked_booking_id` field is updated atomically; an event
+`BOOKING_LINKED booking_id=99` is appended to `voice_call_event`.
+
+---
+
+## Phone blacklist (DB: `phone_blacklist`)
+
+Blacklisted callers are **silently rejected** (`<Reject/>`) at webhook entry.
+
+### API (JWT protected)
+
+```
+GET    /api/mobile/manager/shops/{shopId}/blacklist
+POST   /api/mobile/manager/shops/{shopId}/blacklist       { "phone": "+4512345678", "reason": "..." }
+DELETE /api/mobile/manager/shops/{shopId}/blacklist/{id}
+```
+
+Android blacklisting UI will be wired up in **step two**.
+
+---
+
+## Outbound call (existing — unchanged)
 
 `POST /api/mobile/manager/appointments/{appointmentId}/call-customer`
 
-Headers:
+Triggers an outbound Twilio call to the customer tied to an appointment.
+TwiML is served from `GET/POST /api/twilio/voice/ready?msg=...`.
 
-- `Authorization: Bearer <jwt>`
+---
 
-Body (JSON, optional):
+## Notes
 
-```json
-{ "message": "Hello. We are ready for you now. Please come to the door." }
-```
-
-Response (JSON):
-
-```json
-{ "success": true, "status": 201, "twilio": "{...Twilio JSON...}" }
-```
-
-### 2) TwiML (public)
-
-`GET /api/twilio/voice/ready?msg=...`
-
-Returns:
-
-```xml
-<Response>
-  <Say voice="alice">Hello ...</Say>
-</Response>
-```
-
-## Incoming call: press 1 to receive booking link by SMS
-
-This backend also supports an IVR flow on incoming calls to the shop’s Twilio number:
-
-1. Caller rings the shop’s Twilio number.
-2. Twilio hits our webhook `/api/twilio/voice/welcome`.
-3. Backend returns TwiML with:
-   - `<Say>` welcome message (open/closed)
-   - `<Gather>` menu:
-     - Press 1: receive a booking link by SMS
-     - Press 2: forward to operator (only when open)
-4. If caller presses 1 or 2, Twilio posts to `/api/twilio/voice/menu`.
-5. If caller pressed 1: backend sends an SMS with booking link.
-6. If caller pressed 2 (and shop is open): backend responds with `<Dial>` to the shop’s operator phone.
-
-### Required setup in WebAdmin
-
-For each shop, go to **Shops → Edit** and set:
-
-- **Shop Twilio number (E.164)** (used to route incoming calls to the correct shop)
-- **Operator phone (E.164)** (used for press-2 call forwarding)
-- **Welcome message (OPEN)**
-- **Welcome message (CLOSED)**
-- **Opening hours** (used to decide open vs closed)
-
-### Twilio Console configuration
-
-In Twilio Console → Phone Numbers → (your number) → **Voice & Fax**:
-
-- **A call comes in**: Webhook
-  - Method: **POST**
-  - URL: `https://<PUBLIC_BASE_URL>/api/twilio/voice/welcome`
-
-### Notes
-
-- The SMS is sent from the shop’s configured Twilio number if present; otherwise it falls back to env `TWILIO_FROM_NUMBER`.
-- The caller’s phone number is taken from Twilio’s `From` parameter.
-
-## Android app (ShopManager)
-
-The ShopManager Android app adds a **Call customer** button on each appointment card. Tapping it opens a dialog where the staff can edit the TTS message and then trigger the backend call.
-
-Files changed:
-
-- `app/src/main/java/com/example/shopmanager/ApiService.kt`
-- `app/src/main/java/com/example/shopmanager/AppointmentAdapter.kt`
-- `app/src/main/java/com/example/shopmanager/ShopScheduleActivity.kt`
-- `app/src/main/res/layout/appointment_item.xml`
+- Twilio `X-Twilio-Signature` validation is not yet implemented; consider adding for production.
+- For local testing use a tunnel (ngrok, cloudflared, etc.) and set `PUBLIC_BASE_URL` accordingly.
+- The SMS is sent from the shop's configured Twilio number if present; otherwise falls back to `TWILIO_FROM_NUMBER`.

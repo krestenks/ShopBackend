@@ -1,0 +1,479 @@
+Here is an implementation-ready version for your coding agent.
+
+---
+
+# Twilio inbound call flow specification
+
+## Purpose
+
+Handle inbound customer calls with routing based on:
+
+* blacklist status
+* known vs unknown caller
+* opening hours
+* temporary operator phone closure
+* DTMF selection for known customers
+* operator whisper before bridging operator calls
+
+---
+
+# Definitions
+
+## Caller types
+
+* **Blacklisted caller**: caller number exists in blacklist
+* **Known customer**: caller number matches an existing customer
+* **Unknown customer**: caller number does not match an existing customer
+
+## Business configuration
+
+Each shop/business must provide:
+
+* `businessName`
+* `openingHours`
+* `closedWelcomeMessage`
+* `temporaryOperatorClosed` boolean
+* optional `temporaryOperatorClosedMessage`
+* operator phone number
+* SMS booking link template or booking URL
+
+## Messages
+
+### Temporary operator closed message
+
+Default:
+`Our phones are temporarily unavailable. Please try again in 30 minutes.`
+
+### Closed welcome message
+
+Loaded from shop config.
+
+### Known customer menu
+
+Example:
+`Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.`
+
+---
+
+# High-level decision flow
+
+## On inbound call
+
+1. Read caller phone number
+2. Resolve shop/business context
+3. Check blacklist
+4. Determine whether caller is known or unknown
+5. Evaluate opening hours
+6. Evaluate temporary operator closure
+7. Route according to rules below
+
+---
+
+# Routing rules
+
+## Rule 1: Blacklisted caller
+
+If caller is blacklisted:
+
+* immediately terminate the call
+
+## Rule 2: Unknown caller
+
+If caller is unknown:
+
+### Within opening hours
+
+* If `temporaryOperatorClosed == true`:
+
+  * play temporary operator closed message
+  * terminate call
+
+* Else:
+
+  * transfer to operator
+  * before bridging, play operator whisper to operator only
+  * require operator to press `1` to accept
+  * if operator accepts, bridge the call
+  * if operator does not accept, fail according to fallback policy
+
+### Outside opening hours
+
+* do not offer SMS booking
+* play `closedWelcomeMessage`
+* terminate call
+
+## Rule 3: Known caller
+
+If caller is known:
+
+* send caller to DTMF voice menu
+
+Menu choices:
+
+* `1` = send booking link by SMS
+* `2` = book by phone with operator
+
+Retry policy:
+
+* repeat menu up to 3 total attempts
+* each attempt waits 5 seconds for input
+* if no valid input after 3 attempts, terminate call
+
+### If known caller presses 1
+
+* send booking link by SMS
+* play confirmation message
+* terminate call
+
+### If known caller presses 2
+
+#### Within opening hours
+
+* If `temporaryOperatorClosed == true`:
+
+  * play temporary operator closed message
+  * terminate call
+
+* Else:
+
+  * transfer to operator
+  * before bridging, play operator whisper to operator only
+  * require operator to press `1` to accept
+  * if operator accepts, bridge the call
+  * if operator does not accept, fail according to fallback policy
+
+#### Outside opening hours
+
+* play `closedWelcomeMessage`
+* terminate call
+
+---
+
+# Operator whisper requirements
+
+## General
+
+The whisper must:
+
+* play only to the operator
+* not be heard by the customer
+* be played before the customer is bridged
+* require operator acceptance with DTMF `1`
+
+The customer should hear ringing while the operator whisper is played.
+
+## Whisper for unknown caller
+
+Example:
+`Incoming call for {businessName}. New customer. Intake interview required before treatment. Press 1 to accept.`
+
+## Whisper for known caller
+
+Example:
+`Incoming call for {businessName}. Existing customer. Standard treatment flow. Press 1 to accept.`
+
+## Minimum whisper payload
+
+The whisper must include:
+
+* business name
+* customer type: `new` or `existing`
+* action hint:
+
+  * `intake required`
+  * `standard treatment flow`
+
+---
+
+# Fallback policy
+
+## Operator does not accept
+
+If operator does not press `1`, or the operator leg fails:
+
+* recommended behavior:
+
+  * play `No operator is currently available. Please try again later.`
+  * terminate call
+
+This can be changed later if you want queueing, voicemail, or retry.
+
+---
+
+# State machine
+
+## States
+
+* `IncomingCall`
+* `RejectedBlacklisted`
+* `IdentifyCustomer`
+* `CheckOpeningHours`
+* `CheckTemporaryOperatorClosure`
+* `UnknownCustomerRoute`
+* `KnownCustomerMenu`
+* `KnownCustomerSmsBooking`
+* `KnownCustomerOperatorRoute`
+* `OperatorWhisper`
+* `BridgedToOperator`
+* `ClosedMessage`
+* `TemporaryClosedMessage`
+* `Terminated`
+
+## Transitions
+
+### IncomingCall
+
+* if blacklisted -> `RejectedBlacklisted`
+* else -> `IdentifyCustomer`
+
+### IdentifyCustomer
+
+* if known -> `KnownCustomerMenu`
+* if unknown -> `CheckOpeningHours` for unknown route
+
+### Unknown route
+
+* if outside opening hours -> `ClosedMessage`
+* if inside opening hours -> `CheckTemporaryOperatorClosure`
+* if temporary operator closed -> `TemporaryClosedMessage`
+* else -> `OperatorWhisper`
+
+### Known menu
+
+* if digit `1` -> `KnownCustomerSmsBooking`
+* if digit `2` -> `CheckOpeningHours` for operator route
+* if invalid/no input and attempts < 3 -> repeat `KnownCustomerMenu`
+* if invalid/no input and attempts >= 3 -> `Terminated`
+
+### Known operator route
+
+* if outside opening hours -> `ClosedMessage`
+* if inside opening hours and temporary closed -> `TemporaryClosedMessage`
+* if inside opening hours and not temporary closed -> `OperatorWhisper`
+
+### OperatorWhisper
+
+* if operator accepts -> `BridgedToOperator`
+* else -> `Terminated`
+
+### ClosedMessage
+
+* play closed message -> `Terminated`
+
+### TemporaryClosedMessage
+
+* play temporary closed message -> `Terminated`
+
+---
+
+# Pseudocode
+
+```text
+onIncomingCall(call):
+  callerNumber = call.from
+  business = resolveBusiness(call)
+  config = loadShopConfig(business)
+
+  if isBlacklisted(callerNumber, business):
+    hangup()
+    return
+
+  customer = findCustomerByPhone(callerNumber, business)
+  isKnownCustomer = customer != null
+  isWithinOpeningHours = checkOpeningHours(config.openingHours, now())
+  isTemporaryOperatorClosed = config.temporaryOperatorClosed
+
+  if !isKnownCustomer:
+    if !isWithinOpeningHours:
+      play(config.closedWelcomeMessage)
+      hangup()
+      return
+
+    if isTemporaryOperatorClosed:
+      play(config.temporaryOperatorClosedMessage ?? "Our phones are temporarily unavailable. Please try again in 30 minutes.")
+      hangup()
+      return
+
+    transferToOperatorWithWhisper(
+      operatorNumber = config.operatorPhoneNumber,
+      whisperType = "new",
+      businessName = config.businessName
+    )
+    return
+
+  attempts = 0
+  while attempts < 3:
+    digit = gatherDigit(
+      prompt = "Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.",
+      timeoutSeconds = 5
+    )
+
+    if digit == "1":
+      sendBookingSms(to = callerNumber, business = business)
+      play("We have sent you a booking link by SMS.")
+      hangup()
+      return
+
+    if digit == "2":
+      if !isWithinOpeningHours:
+        play(config.closedWelcomeMessage)
+        hangup()
+        return
+
+      if isTemporaryOperatorClosed:
+        play(config.temporaryOperatorClosedMessage ?? "Our phones are temporarily unavailable. Please try again in 30 minutes.")
+        hangup()
+        return
+
+      transferToOperatorWithWhisper(
+        operatorNumber = config.operatorPhoneNumber,
+        whisperType = "existing",
+        businessName = config.businessName
+      )
+      return
+
+    attempts += 1
+
+  hangup()
+```
+
+---
+
+# Twilio behavior requirements
+
+## For customer menu
+
+Use DTMF gather with:
+
+* `numDigits = 1`
+* timeout = 5 seconds
+* max attempts = 3
+
+## For operator connection
+
+Use operator whisper before bridge:
+
+* operator hears whisper
+* customer does not hear whisper
+* customer hears ringing
+* operator must press `1` to accept
+* only then bridge the customer
+
+---
+
+# Suggested data contract for backend
+
+## Shop config
+
+```json
+{
+  "businessName": "Clinic A",
+  "openingHours": {
+    "monday": [{"start": "08:00", "end": "16:00"}],
+    "tuesday": [{"start": "08:00", "end": "16:00"}]
+  },
+  "closedWelcomeMessage": "We are currently closed. Please call again during opening hours.",
+  "temporaryOperatorClosed": false,
+  "temporaryOperatorClosedMessage": "Our phones are temporarily unavailable. Please try again in 30 minutes.",
+  "operatorPhoneNumber": "+4512345678",
+  "bookingSmsLink": "https://example.com/book/clinic-a"
+}
+```
+
+## Whisper context object
+
+```json
+{
+  "businessName": "Clinic A",
+  "customerType": "new",
+  "actionHint": "intake required"
+}
+```
+
+or
+
+```json
+{
+  "businessName": "Clinic A",
+  "customerType": "existing",
+  "actionHint": "standard treatment flow"
+}
+```
+
+---
+
+# Edge-case rules
+
+## Invalid DTMF
+
+* treat invalid digit the same as no input for retry counting
+
+## SMS sending failure
+
+Recommended:
+
+* play `We are currently unable to send the booking link by SMS. Please try again later.`
+* terminate call
+
+## Missing config
+
+If business config cannot be loaded:
+
+* play generic failure message
+* terminate call
+
+## Operator unavailable
+
+If operator leg fails or is not accepted:
+
+* play fallback unavailable message
+* terminate call
+
+---
+
+# Recommended endpoint structure
+
+```text
+POST /voice/incoming
+POST /voice/menu
+POST /voice/menu/handle
+POST /voice/operator/whisper
+POST /voice/operator/whisper/handle
+POST /sms/send-booking-link
+```
+
+---
+
+# Minimal acceptance criteria
+
+1. Blacklisted callers are disconnected immediately.
+2. Unknown callers never receive SMS booking.
+3. Unknown callers outside opening hours hear the closed message.
+4. Temporary operator closure overrides operator routing even during opening hours.
+5. Known callers get a 2-option DTMF menu.
+6. Menu retries exactly 3 times with 5-second wait per attempt.
+7. Option 1 sends SMS and ends call.
+8. Option 2 routes to operator only when allowed.
+9. Operator hears whisper before bridge.
+10. Whisper differs for new vs existing customer.
+11. Operator must accept before customer is connected.
+
+---
+
+# Short implementation summary for the agent
+
+Build a Twilio inbound voice flow that:
+
+* rejects blacklisted numbers
+* routes unknown callers to operator only during opening hours and only if operator phone is not temporarily closed
+* plays closed message for unknown callers outside hours
+* gives known callers a 2-option DTMF menu
+* retries menu up to 3 times with 5-second timeout
+* sends SMS booking link for option 1
+* routes to operator for option 2 if allowed
+* uses operator whisper with accept-before-bridge
+* includes temporary operator closure override with a “try again in 30 minutes” message
+
+---
+
+I can also turn this into a C#-oriented technical spec with controller methods, request models, and TwiML response responsibilities.

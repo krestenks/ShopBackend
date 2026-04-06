@@ -1,6 +1,8 @@
 package twilio
 
 import DataBase
+import VoiceCallOutcome
+import VoiceCallState
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -9,14 +11,26 @@ import io.ktor.server.routing.*
 import PublicBaseUrl
 
 /**
- * Twilio Voice endpoints.
+ * Twilio Voice endpoints — implements the Phone flow spec.
  *
- * - /api/twilio/voice/ready : TwiML that reads out a message.
- * - /api/twilio/voice/welcome : Incoming call webhook (TTS + gather)
- * - /api/twilio/voice/menu : Handle keypad input (press 1 => send booking link by SMS)
+ * Inbound call state machine:
+ *   IncomingCall
+ *     → (blacklisted)          RejectedBlacklisted → Terminated
+ *     → (known customer)       KnownCustomerMenu (DTMF, up to 3 attempts)
+ *         digit 1              → KnownCustomerSmsBooking → Terminated
+ *         digit 2 + open       → OperatorWhisper → BridgedToOperator / Terminated
+ *         digit 2 + closed     → ClosedMessage → Terminated
+ *         digit 2 + tempClosed → TemporaryClosedMessage → Terminated
+ *         no input × 3         → Terminated
+ *     → (unknown customer)
+ *         + open + !tempClosed → OperatorWhisper → BridgedToOperator / Terminated
+ *         + open + tempClosed  → TemporaryClosedMessage → Terminated
+ *         + closed             → ClosedMessage → Terminated
+ *
+ * Operator whisper: customer hears ringing via answerOnBridge="true";
+ * operator hears whisper and must press 1 to accept.
  */
 fun Route.twilioVoiceRoutes(db: DataBase) {
-    // db kept to mirror other twilio routes and to allow future lookups/logging.
 
     val smsService = TwilioSmsService(
         accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
@@ -27,7 +41,6 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         """<?xml version="1.0" encoding="UTF-8"?><Response>$xmlInsideResponse</Response>"""
 
     fun isShopOpenNow(shopId: Int): Boolean {
-        // Uses system timezone (server) for now. If we need per-shop timezone later, we can add it.
         val now = java.time.ZonedDateTime.now()
         val dow = now.dayOfWeek.value // 1=Mon..7=Sun
         db.ensureDefaultShopOpeningHours(shopId)
@@ -37,29 +50,21 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         return minutes in row.openMinute until row.closeMinute
     }
 
-    /**
-     * Twilio will request this URL when the outbound call is connected.
-     * We return TwiML with a TTS message.
-     *
-     * Security note: Twilio signature validation is not implemented here.
-     * Consider validating X-Twilio-Signature in production.
-     */
+    // ── Outbound "ready" TwiML (unchanged) ───────────────────────────────────
+
     route("/api/twilio/voice/ready") {
         get {
             val message = call.request.queryParameters["msg"]?.take(400)
                 ?: "Hello. You can come to the door now."
-
             call.respondText(
                 twiml("<Say voice=\"alice\">${escapeForXml(message)}</Say>"),
                 ContentType.Text.Xml,
             )
         }
         post {
-            // Twilio sometimes POSTs when configured for webhooks.
             val params = call.receiveParameters()
             val message = (params["msg"] ?: call.request.queryParameters["msg"])?.take(400)
                 ?: "Hello. You can come to the door now."
-
             call.respondText(
                 twiml("<Say voice=\"alice\">${escapeForXml(message)}</Say>"),
                 ContentType.Text.Xml,
@@ -67,153 +72,397 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         }
     }
 
-    /**
-     * Incoming call webhook.
-     *
-     * Twilio will POST this endpoint when a call comes in.
-     * We speak a welcome message (open/closed) and offer keypad menu.
-     */
-    route("/api/twilio/voice/welcome") {
-        post {
-            val params = call.receiveParameters()
-            val to = params["To"] ?: ""
+    // ── Inbound call entry: /api/twilio/voice/welcome ────────────────────────
 
-            val shopId = db.findShopIdByTwilioNumber(to) ?: 1
-            val voice = db.getShopVoiceConfig(shopId)
+    suspend fun handleWelcome(call: ApplicationCall) {
+        val params = try { call.receiveParameters() } catch (_: Exception) { Parameters.Empty }
+        val to   = (params["To"]       ?: call.request.queryParameters["To"]       ?: "").trim()
+        val from = (params["From"]     ?: call.request.queryParameters["From"]     ?: "").trim()
+        val sid  = (params["CallSid"]  ?: call.request.queryParameters["CallSid"]  ?: "unknown-${System.currentTimeMillis()}").trim()
 
-            val open = isShopOpenNow(shopId)
-            val welcome = if (open) voice.welcomeOpenMessage else voice.welcomeClosedMessage
+        val shopId = db.findShopIdByTwilioNumber(to) ?: 1
+        val voice  = db.getShopVoiceConfig(shopId)
+        val base   = PublicBaseUrl.fromCall(call)
 
-            val gatherAction = "${PublicBaseUrl.fromCall(call)}/api/twilio/voice/menu"
-            val xml = """
-                <Say voice="alice">${escapeForXml(welcome)}</Say>
-                <Gather numDigits="1" action="${escapeForXml(gatherAction)}" method="POST">
-                  <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
-                </Gather>
-                <Say voice="alice">Goodbye.</Say>
-            """.trimIndent()
+        // ── Persist call immediately so app can see it ────────────────────────
+        val callId = db.createInboundCallLog(shopId, sid, from, to)
+        db.updateCallState(callId, VoiceCallState.INCOMING_CALL)
 
-            call.respondText(twiml(xml), ContentType.Text.Xml)
+        // ── 1. Blacklist check ────────────────────────────────────────────────
+        if (from.isNotBlank() && db.isPhoneBlacklisted(shopId, from)) {
+            db.updateCallState(callId, VoiceCallState.REJECTED_BLACKLISTED, "caller=$from")
+            db.terminateCall(callId, VoiceCallOutcome.BLACKLIST_REJECTED)
+            call.respondText(twiml("<Reject/>"), ContentType.Text.Xml)
+            return
         }
-        get {
-            // convenience for manual browser testing
-            val to = call.request.queryParameters["To"] ?: ""
-            val shopId = db.findShopIdByTwilioNumber(to) ?: 1
-            val voice = db.getShopVoiceConfig(shopId)
-            val open = isShopOpenNow(shopId)
-            val welcome = if (open) voice.welcomeOpenMessage else voice.welcomeClosedMessage
 
-            val gatherAction = "${PublicBaseUrl.fromCall(call)}/api/twilio/voice/menu"
+        // ── 2. Identify customer ─────────────────────────────────────────────
+        db.updateCallState(callId, VoiceCallState.IDENTIFY_CUSTOMER)
+        val customerId: Int? = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
+        val isKnownCustomer = customerId != null
+
+        db.updateCallCustomer(callId, customerId, if (isKnownCustomer) "known" else "unknown")
+
+        val isOpen      = isShopOpenNow(shopId)
+        val tempClosed  = voice.temporaryOperatorClosed
+        val bizName     = voice.businessName ?: "the shop"
+
+        if (!isKnownCustomer) {
+            // ── Unknown caller ────────────────────────────────────────────────
+            db.updateCallState(callId, VoiceCallState.UNKNOWN_CUSTOMER_ROUTE)
+
+            if (!isOpen) {
+                db.updateCallState(callId, VoiceCallState.CLOSED_MESSAGE)
+                db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
+                    ContentType.Text.Xml,
+                )
+                return
+            }
+
+            if (tempClosed) {
+                db.updateCallState(callId, VoiceCallState.TEMPORARY_CLOSED_MESSAGE)
+                db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
+                    ContentType.Text.Xml,
+                )
+                return
+            }
+
+            // Transfer to operator with whisper
+            val operator = voice.operatorPhone?.trim().orEmpty()
+            val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
+                ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
+            if (operator.isBlank()) {
+                db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">Sorry, call forwarding is not available.</Say>"),
+                    ContentType.Text.Xml,
+                )
+                return
+            }
+            // ── Operator busy check (operator-phone scoped, cross-shop) ──────
+            if (db.isOperatorBusy(operator)) {
+                db.updateCallState(callId, VoiceCallState.OPERATOR_BUSY, "operator=$operator")
+                db.terminateCall(callId, VoiceCallOutcome.OPERATOR_BUSY)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
+                    ContentType.Text.Xml,
+                )
+                return
+            }
+            db.setCallOperatorPhone(callId, operator)
+            db.updateCallState(callId, VoiceCallState.OPERATOR_WHISPER)
+            val callerId = fromNumber.takeIf { it.isNotBlank() }
+            val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
+                    "?callId=$callId&customerType=new&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
+            val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
             val xml = """
-                <Say voice="alice">${escapeForXml(welcome)}</Say>
-                <Gather numDigits="1" action="${escapeForXml(gatherAction)}" method="POST">
-                  <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to talk to the operator.</Say>
-                </Gather>
-                <Say voice="alice">Goodbye.</Say>
+                <Say voice="alice">Please hold while we connect you.</Say>
+                <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
+                  <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
+                </Dial>
             """.trimIndent()
-
             call.respondText(twiml(xml), ContentType.Text.Xml)
+            return
         }
+
+        // ── Known caller: show DTMF menu ──────────────────────────────────────
+        db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_MENU)
+        val menuAction = "$base/api/twilio/voice/menu?callId=$callId&attempt=1&isOpen=${isOpen}&tempClosed=${tempClosed}&shopId=$shopId"
+        val welcomeMsg = if (isOpen) voice.welcomeOpenMessage else voice.welcomeClosedMessage
+
+        val xml = """
+            <Say voice="alice">${escapeForXml(welcomeMsg)}</Say>
+            <Gather numDigits="1" timeout="5" action="${escapeForXml(menuAction)}" method="POST">
+              <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+            </Gather>
+            <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
+        """.trimIndent()
+        call.respondText(twiml(xml), ContentType.Text.Xml)
     }
 
-    /**
-     * Handles keypad input from /welcome <Gather>.
-     *
-     * If Digits==1: generate a booking link for that shop and SMS it to the caller.
-     */
+    route("/api/twilio/voice/welcome") {
+        post { handleWelcome(call) }
+        get  { handleWelcome(call) }
+    }
+    route("/api/twilio/voice/welcome/") {
+        post { handleWelcome(call) }
+    }
+
+    // ── Menu handler ─────────────────────────────────────────────────────────
+
     route("/api/twilio/voice/menu") {
         post {
-            val params = call.receiveParameters()
-            val digits = params["Digits"]?.trim()
-            val from = params["From"]?.trim().orEmpty()
-            val to = params["To"]?.trim().orEmpty()
+            val params  = call.receiveParameters()
+            val digits  = (params["Digits"] ?: call.request.queryParameters["Digits"])?.trim()
+            val from    = (params["From"]   ?: call.request.queryParameters["From"]   ?: "").trim()
+            val to      = (params["To"]     ?: call.request.queryParameters["To"]     ?: "").trim()
+            val callId  = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val attempt = call.request.queryParameters["attempt"]?.toIntOrNull() ?: 1
+            val isOpen  = call.request.queryParameters["isOpen"]?.toBooleanStrictOrNull() ?: true
+            val tempClosed = call.request.queryParameters["tempClosed"]?.toBooleanStrictOrNull() ?: false
+            val shopId  = call.request.queryParameters["shopId"]?.toIntOrNull()
+                ?: (db.findShopIdByTwilioNumber(to) ?: 1)
 
-            val shopId = db.findShopIdByTwilioNumber(to) ?: 1
-            val voice = db.getShopVoiceConfig(shopId)
+            val voice    = db.getShopVoiceConfig(shopId)
+            val bizName  = voice.businessName ?: "the shop"
+            val base     = PublicBaseUrl.fromCall(call)
             val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
                 ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
 
-            if (from.isBlank()) {
-                call.respondText(
-                    twiml("<Say voice=\"alice\">Sorry, we could not read your number.</Say>"),
-                    ContentType.Text.Xml
-                )
-                return@post
-            }
-
-            if (digits == "2") {
-                val operator = voice.operatorPhone?.trim().orEmpty()
-                if (!isShopOpenNow(shopId)) {
-                    call.respondText(
-                        twiml("<Say voice=\"alice\">Sorry, we are currently closed.</Say>"),
-                        ContentType.Text.Xml
-                    )
-                    return@post
-                }
-                if (operator.isBlank()) {
-                    call.respondText(
-                        twiml("<Say voice=\"alice\">Sorry, call forwarding is not available.</Say>"),
-                        ContentType.Text.Xml
-                    )
-                    return@post
-                }
-
-                // Safe default: show shop number as callerId to the operator.
-                val callerId = fromNumber
-                val xml = """
-                    <Say voice="alice">Please wait while we connect you.</Say>
-                    <Dial callerId="${escapeForXml(callerId)}"><Number>${escapeForXml(operator)}</Number></Dial>
+            fun menuAgain(nextAttempt: Int): String {
+                val menuAction = "$base/api/twilio/voice/menu" +
+                        "?callId=$callId&attempt=$nextAttempt&isOpen=$isOpen&tempClosed=$tempClosed&shopId=$shopId"
+                return """
+                    <Gather numDigits="1" timeout="5" action="${escapeForXml(menuAction)}" method="POST">
+                      <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+                    </Gather>
+                    <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
                 """.trimIndent()
-                call.respondText(twiml(xml), ContentType.Text.Xml)
-                return@post
             }
 
-            if (digits != "1") {
-                call.respondText(
-                    twiml("<Say voice=\"alice\">Sorry, I did not understand.</Say>"),
-                    ContentType.Text.Xml
-                )
-                return@post
+            when (digits) {
+                "1" -> {
+                    // SMS booking link
+                    if (callId > 0) db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_SMS_BOOKING)
+                    if (from.isBlank()) {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SYSTEM_ERROR)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">Sorry, we could not read your number.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    val customerId = db.ensureCustomerByPhone(from)
+                    val token      = db.generateBookingToken(customerId, shopId, from)
+                    val bookingUrl = "$base/api/book?token=$token"
+                    val sms = smsService.sendSms(
+                        fromNumberE164 = fromNumber,
+                        toNumberE164   = from,
+                        bodyText       = "Booking link: $bookingUrl",
+                    )
+                    if (!sms.success) {
+                        println("[TwilioSMS] Failed: status=${sms.status} body=${sms.body}")
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SYSTEM_ERROR)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">Sorry, we could not send the SMS right now. Please try again later.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SMS_SENT)
+                    call.respondText(
+                        twiml("<Say voice=\"alice\">We have sent you a booking link by SMS. Goodbye.</Say>"),
+                        ContentType.Text.Xml,
+                    )
+                }
+
+                "2" -> {
+                    if (callId > 0) db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_OPERATOR_ROUTE)
+                    if (!isOpen) {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    if (tempClosed) {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    val operator = voice.operatorPhone?.trim().orEmpty()
+                    if (operator.isBlank()) {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">Sorry, call forwarding is not available.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    // ── Operator busy check (operator-phone scoped, cross-shop) ──
+                    if (db.isOperatorBusy(operator)) {
+                        if (callId > 0) {
+                            db.updateCallState(callId, VoiceCallState.OPERATOR_BUSY, "operator=$operator")
+                            db.terminateCall(callId, VoiceCallOutcome.OPERATOR_BUSY)
+                        }
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    // Bridge with whisper
+                    if (callId > 0) {
+                        db.setCallOperatorPhone(callId, operator)
+                        db.updateCallState(callId, VoiceCallState.OPERATOR_WHISPER)
+                    }
+                    val callerId = fromNumber.takeIf { it.isNotBlank() }
+                    val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
+                            "?callId=$callId&customerType=existing&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
+                    val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
+                    val xml = """
+                        <Say voice="alice">Please hold while we connect you to the operator.</Say>
+                        <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
+                          <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
+                        </Dial>
+                    """.trimIndent()
+                    call.respondText(twiml(xml), ContentType.Text.Xml)
+                }
+
+                else -> {
+                    // No / invalid input
+                    if (attempt >= 3) {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.INVALID_MENU_MAX_RETRIES)
+                        call.respondText(
+                            twiml("<Say voice=\"alice\">We did not receive a valid selection. Goodbye.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                    } else {
+                        call.respondText(twiml(menuAgain(attempt + 1)), ContentType.Text.Xml)
+                    }
+                }
             }
-
-            // Ensure customer and generate token
-            val customerId = db.ensureCustomerByPhone(from)
-            val token = db.generateBookingToken(customerId, shopId, from)
-            val bookingUrl = "${PublicBaseUrl.fromCall(call)}/api/book?token=$token"
-
-            val smsText = "Booking link: $bookingUrl"
-            val sms = smsService.sendSms(
-                fromNumberE164 = fromNumber,
-                toNumberE164 = from,
-                bodyText = smsText,
-            )
-
-            if (!sms.success) {
-                println("[TwilioSMS] Failed: status=${sms.status} body=${sms.body}")
-                call.respondText(
-                    twiml("<Say voice=\"alice\">Sorry, we could not send the SMS right now.</Say>"),
-                    ContentType.Text.Xml
-                )
-                return@post
-            }
-
-            call.respondText(
-                twiml("<Say voice=\"alice\">We have sent you a booking link by SMS. Goodbye.</Say>"),
-                ContentType.Text.Xml
-            )
         }
     }
+
+    // ── Operator whisper: played only to operator before bridge ──────────────
+
+    route("/api/twilio/voice/operator-whisper") {
+        post { handleOperatorWhisper(call) }
+        get  { handleOperatorWhisper(call) }
+    }
+
+    // ── Operator accept: operator must press 1 to accept ─────────────────────
+
+    route("/api/twilio/voice/operator-accept") {
+        post {
+            val params       = call.receiveParameters()
+            val digits       = (params["Digits"] ?: call.request.queryParameters["Digits"])?.trim()
+            val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val base         = PublicBaseUrl.fromCall(call)
+
+            if (digits == "1") {
+                // Accepted: return empty TwiML so Twilio bridges the call
+                if (callId > 0) db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR)
+                call.respondText(twiml(""), ContentType.Text.Xml)
+            } else {
+                if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">No operator is currently available. Please try again later.</Say>"),
+                    ContentType.Text.Xml,
+                )
+            }
+        }
+        get {
+            // Support Twilio occasionally using GET
+            val digits  = call.request.queryParameters["Digits"]?.trim()
+            val callId  = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            if (digits == "1") {
+                if (callId > 0) db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR)
+                call.respondText(twiml(""), ContentType.Text.Xml)
+            } else {
+                if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
+                call.respondText(
+                    twiml("<Say voice=\"alice\">No operator is currently available. Please try again later.</Say>"),
+                    ContentType.Text.Xml,
+                )
+            }
+        }
+    }
+
+    // ── Dial status callback: closes call log when <Dial> completes ──────────
+
+    route("/api/twilio/voice/dial-status") {
+        post {
+            val params   = call.receiveParameters()
+            val dialStatus  = params["DialCallStatus"]?.trim() ?: "unknown"
+            val callId   = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            if (callId > 0) {
+                val outcome = when (dialStatus) {
+                    "completed"  -> VoiceCallOutcome.OPERATOR_BRIDGED
+                    "no-answer",
+                    "busy",
+                    "failed",
+                    "canceled"   -> VoiceCallOutcome.OPERATOR_DECLINED
+                    else         -> VoiceCallOutcome.OPERATOR_DECLINED
+                }
+                db.terminateCall(callId, outcome)
+            }
+            // Twilio requires a valid TwiML response even for the action callback
+            call.respondText(twiml("<Say voice=\"alice\">Goodbye.</Say>"), ContentType.Text.Xml)
+        }
+    }
+
+    // ── Twilio status callback (optional): close stale call rows ─────────────
+    // Configure in Twilio Console → Phone Number → Voice → Status Callback URL
+
+    route("/api/twilio/voice/status") {
+        post {
+            val params      = call.receiveParameters()
+            val callSid     = params["CallSid"]?.trim() ?: return@post call.respond(HttpStatusCode.OK)
+            val callStatus  = params["CallStatus"]?.trim() ?: ""
+            val terminalStatuses = setOf("completed", "busy", "no-answer", "failed", "canceled")
+            if (callStatus in terminalStatuses) {
+                val record = db.getCallByTwilioSid(callSid)
+                if (record != null && record.isActive) {
+                    db.terminateCall(record.id, VoiceCallOutcome.OPERATOR_BRIDGED)
+                }
+            }
+            call.respond(HttpStatusCode.NoContent)
+        }
+    }
+}
+
+// ── Operator whisper logic (shared between POST and GET) ─────────────────────
+
+private suspend fun handleOperatorWhisper(call: ApplicationCall) {
+    val params       = try { call.receiveParameters() } catch (_: Exception) { Parameters.Empty }
+    val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+    val customerType = call.request.queryParameters["customerType"] ?: "new"
+    val bizName      = call.request.queryParameters["bizName"]
+        ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
+        ?: "the shop"
+
+    val base = PublicBaseUrl.fromCall(call)
+
+    val customerLabel = when (customerType) {
+        "existing" -> "Existing customer. Standard treatment flow."
+        else       -> "New customer. Intake interview required before treatment."
+    }
+
+    val whisperText = "Incoming call for ${escapeForXml(bizName)}. $customerLabel Press 1 to accept."
+    val acceptAction = "$base/api/twilio/voice/operator-accept?callId=$callId"
+
+    val xml = """
+        <Gather numDigits="1" timeout="10" action="${escapeForXml(acceptAction)}" method="POST">
+          <Say voice="alice">$whisperText</Say>
+        </Gather>
+        <Say voice="alice">No response received. The call will be disconnected.</Say>
+    """.trimIndent()
+
+    call.respondText(
+        """<?xml version="1.0" encoding="UTF-8"?><Response>$xml</Response>""",
+        ContentType.Text.Xml,
+    )
 }
 
 internal fun escapeForXml(input: String): String {
     return buildString {
         for (c in input) {
             when (c) {
-                '&' -> append("&amp;")
-                '<' -> append("&lt;")
-                '>' -> append("&gt;")
-                '"' -> append("&quot;")
-                '\'' -> append("&apos;")
+                '&'  -> append("&amp;")
+                '<'  -> append("&lt;")
+                '>'  -> append("&gt;")
+                '"'  -> append("&quot;")
+                '\''  -> append("&apos;")
                 else -> append(c)
             }
         }
