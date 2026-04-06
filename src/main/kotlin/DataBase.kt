@@ -1765,6 +1765,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return total
     }
 
+    fun deleteAppointment(id: Int): Boolean {
+        connection.prepareStatement("DELETE FROM appointment_services WHERE appointment_id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            stmt.executeUpdate()
+        }
+        connection.prepareStatement("DELETE FROM appointments WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
     fun getAvailableTimeSlots(employeeId: Int, shopId: Int, dateStr: String, duration: Int): Array<String> {
         println("getAvailableTimeSlots called with:")
         println("  employeeId = $employeeId")

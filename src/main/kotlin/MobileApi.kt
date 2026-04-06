@@ -38,6 +38,7 @@ data class CreateBookingRequest(
     val appointmentTime: String,          // "yyyy-MM-dd HH:mm"
     val voiceCallId: Int? = null,         // optional: link booking to ongoing call
     val totalDuration: Int = 0,           // pre-computed by client; used as fallback
+    val customerPhone: String? = null,    // caller's phone — auto-creates customer row if provided
 )
 
 @Serializable
@@ -148,6 +149,28 @@ class MobileApi(private val db: DataBase) {
             }
 
             authenticate("jwt") {
+
+                delete("/api/mobile/manager/appointments/{appointmentId}") {
+                    val loginInfo = authenticateManager() ?: return@delete
+                    val appointmentId = call.parameters["appointmentId"]?.toIntOrNull()
+                        ?: return@delete call.respond(HttpStatusCode.BadRequest, "Missing appointmentId")
+
+                    val appt = db.getAppointmentById(appointmentId)
+                        ?: return@delete call.respond(HttpStatusCode.NotFound, "Appointment not found")
+
+                    if (!isAuthorizedForShop(loginInfo, appt.shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@delete
+                    }
+
+                    val deleted = db.deleteAppointment(appointmentId)
+                    if (deleted) {
+                        println("[appointments] Deleted appointment $appointmentId")
+                        call.respond(HttpStatusCode.NoContent)
+                    } else {
+                        call.respond(HttpStatusCode.NotFound, "Appointment not found")
+                    }
+                }
 
                 get("/api/mobile/manager/appointments") {
                     var shopId: Int? = null
@@ -603,7 +626,16 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
 
-                    val customerId = body.customerId ?: 0
+                    // Resolve customer: explicit id > phone lookup/create > 0 (walk-in)
+                    val customerId: Int = when {
+                        body.customerId != null && body.customerId > 0 -> body.customerId
+                        !body.customerPhone.isNullOrBlank() -> {
+                            val cid = db.ensureCustomerByPhone(body.customerPhone)
+                            println("[create-json] resolved customerPhone=${body.customerPhone} -> customerId=$cid")
+                            cid
+                        }
+                        else -> 0
+                    }
 
                     val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
                     val localDateTime = runCatching {
