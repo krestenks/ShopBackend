@@ -110,29 +110,32 @@ class MobileApi(private val db: DataBase) {
 
                 println("[MobileApi/login] Attempt username='$username'")
 
-                val manager = db.authenticateManager(username, password)
-                if (manager != null) {
-                    val token = generateToken(manager.id, role = "manager")
-                    println("[MobileApi/login] OK: manager id=${manager.id} name='${manager.name}'")
-                    call.respond(LoginResponse(
-                        token = token,
-                        managerId = manager.id,
-                        role = "manager",
-                        userId = manager.id,
-                    ))
+                // ── 1. Dedicated app_account table (preferred) ───────────────
+                val appAccount = db.authenticateAppAccount(username, password)
+                if (appAccount != null) {
+                    val (refType, refId) = appAccount
+                    val role = if (refType == "shop") "shop" else "manager"
+                    val token = generateToken(refId, role = role)
+                    println("[MobileApi/login] OK via app_account: $role id=$refId")
+                    call.respond(LoginResponse(token = token, managerId = refId, role = role, userId = refId))
                     return@post
                 }
 
+                // ── 2. Fallback: manager table (backwards compat) ────────────
+                val manager = db.authenticateManager(username, password)
+                if (manager != null) {
+                    val token = generateToken(manager.id, role = "manager")
+                    println("[MobileApi/login] OK via managers table: id=${manager.id} name='${manager.name}'")
+                    call.respond(LoginResponse(token = token, managerId = manager.id, role = "manager", userId = manager.id))
+                    return@post
+                }
+
+                // ── 3. Fallback: shop table (legacy, rarely used) ────────────
                 val shop = db.authenticateShop(username, password)
                 if (shop != null) {
                     val token = generateToken(shop.id, role = "shop")
-                    println("[MobileApi/login] OK: shop id=${shop.id} name='${shop.name}'")
-                    call.respond(LoginResponse(
-                        token = token,
-                        managerId = shop.id,
-                        role = "shop",
-                        userId = shop.id,
-                    ))
+                    println("[MobileApi/login] OK via shops table: id=${shop.id} name='${shop.name}'")
+                    call.respond(LoginResponse(token = token, managerId = shop.id, role = "shop", userId = shop.id))
                     return@post
                 }
 

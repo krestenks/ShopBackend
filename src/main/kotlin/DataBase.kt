@@ -349,6 +349,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
 
+        // Dedicated mobile app accounts (separate from web-admin login)
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS app_account (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref_type     TEXT NOT NULL,          -- 'manager' | 'shop'
+                ref_id       INTEGER NOT NULL,
+                username     TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                active       INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(ref_type, ref_id)
+            )
+        """.trimIndent()) }
+
         println("All tables ready.")
     }
 
@@ -1901,6 +1914,106 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         sb.append(lastSlot)
         sb.append("\"}")
         return sb.toString()
+    }
+
+    // =========================================================================
+    // Mobile app accounts  (app_account table)
+    // =========================================================================
+
+    /**
+     * Create or overwrite the mobile app login for a manager.
+     * Used from WebAdmin "App login" controls.
+     */
+    fun setManagerAppAccount(managerId: Int, username: String, password: String) {
+        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        val sql = """
+            INSERT INTO app_account (ref_type, ref_id, username, password_hash, active)
+            VALUES ('manager', ?, ?, ?, 1)
+            ON CONFLICT(ref_type, ref_id) DO UPDATE SET
+                username = excluded.username,
+                password_hash = excluded.password_hash,
+                active = 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.setString(2, username.trim())
+            stmt.setString(3, hash)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Create or overwrite the mobile app login for a shop.
+     */
+    fun setShopAppAccount(shopId: Int, username: String, password: String) {
+        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        val sql = """
+            INSERT INTO app_account (ref_type, ref_id, username, password_hash, active)
+            VALUES ('shop', ?, ?, ?, 1)
+            ON CONFLICT(ref_type, ref_id) DO UPDATE SET
+                username = excluded.username,
+                password_hash = excluded.password_hash,
+                active = 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, username.trim())
+            stmt.setString(3, hash)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Returns the stored username for a manager's app account, or null if not set. */
+    fun getManagerAppAccountUsername(managerId: Int): String? {
+        val sql = "SELECT username FROM app_account WHERE ref_type='manager' AND ref_id=? AND active=1 LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("username") else null
+        }
+    }
+
+    /** Returns the stored username for a shop's app account, or null if not set. */
+    fun getShopAppAccountUsername(shopId: Int): String? {
+        val sql = "SELECT username FROM app_account WHERE ref_type='shop' AND ref_id=? AND active=1 LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("username") else null
+        }
+    }
+
+    fun removeManagerAppAccount(managerId: Int) {
+        connection.prepareStatement("UPDATE app_account SET active=0 WHERE ref_type='manager' AND ref_id=?").use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun removeShopAppAccount(shopId: Int) {
+        connection.prepareStatement("UPDATE app_account SET active=0 WHERE ref_type='shop' AND ref_id=?").use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Authenticate against the dedicated app_account table.
+     * Returns Pair(refType, refId) on success, null on failure.
+     */
+    fun authenticateAppAccount(username: String, password: String): Pair<String, Int>? {
+        val sql = "SELECT ref_type, ref_id, password_hash FROM app_account WHERE username=? AND active=1 LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, username.trim())
+            val rs = stmt.executeQuery()
+            if (rs.next()) {
+                val hash = rs.getString("password_hash")
+                if (BCrypt.checkpw(password, hash)) {
+                    return Pair(rs.getString("ref_type"), rs.getInt("ref_id"))
+                }
+            }
+        }
+        return null
     }
 
     // Complete JSON result for joint availability

@@ -281,8 +281,44 @@ class WebAdmin(private val db: DataBase) {
 
                             submitInput { value = "Save Changes" }
                         }
+
+                        hr()
+                        h3 { +"📱 Mobile App Login" }
+                        val appUser = db.getManagerAppAccountUsername(manager_id!!)
+                        if (appUser != null) { p { +"App username: "; b { +appUser } } }
+                        else { p { em { +"No app login set yet." } } }
+                        form(action = "/managers/app-login", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = manager_id.toString() }
+                            textInput { name = "app_username"; value = appUser ?: ""; placeholder = "App username" }
+                            +" "
+                            passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
+                            +" "
+                            submitInput { value = "Save App Login" }
+                        }
+                        if (appUser != null) {
+                            form(action = "/managers/app-login/remove", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = manager_id.toString() }
+                                submitInput { value = "Remove App Login" }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/managers/app-login") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                val u = params["app_username"]?.trim().orEmpty()
+                val p = params["app_password"].orEmpty()
+                if (id != null && u.isNotBlank() && p.isNotBlank()) db.setManagerAppAccount(id, u, p)
+                call.respondRedirect("/managers/edit?id=$id")
+            }
+
+            post("/managers/app-login/remove") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                if (id != null) db.removeManagerAppAccount(id)
+                call.respondRedirect("/managers/edit?id=$id")
             }
 
             // POST route: update manager in DB
@@ -523,8 +559,44 @@ class WebAdmin(private val db: DataBase) {
                             br()
                             submitInput { value = "Save Changes" }
                         }
+
+                        hr()
+                        h3 { +"📱 Mobile App Login (in-shop use)" }
+                        val shopAppUser = db.getShopAppAccountUsername(id)
+                        if (shopAppUser != null) { p { +"App username: "; b { +shopAppUser } } }
+                        else { p { em { +"No in-shop app login set yet." } } }
+                        form(action = "/shops/app-login", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = id.toString() }
+                            textInput { name = "app_username"; value = shopAppUser ?: ""; placeholder = "App username" }
+                            +" "
+                            passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
+                            +" "
+                            submitInput { value = "Save App Login" }
+                        }
+                        if (shopAppUser != null) {
+                            form(action = "/shops/app-login/remove", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput { value = "Remove App Login" }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/shops/app-login") {
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull()
+                val u = params["app_username"]?.trim().orEmpty()
+                val p = params["app_password"].orEmpty()
+                if (sid != null && u.isNotBlank() && p.isNotBlank()) db.setShopAppAccount(sid, u, p)
+                call.respondRedirect("/shops/edit?id=$sid")
+            }
+
+            post("/shops/app-login/remove") {
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull()
+                if (sid != null) db.removeShopAppAccount(sid)
+                call.respondRedirect("/shops/edit?id=$sid")
             }
 
             post("/shops/edit") {
