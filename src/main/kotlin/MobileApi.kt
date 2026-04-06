@@ -27,6 +27,9 @@ import twilio.TwilioVoiceCallService
 data class AddBlacklistRequest(val phone: String, val reason: String? = null)
 
 @Serializable
+data class CallDetailResponse(val call: VoiceCallRecord, val events: List<VoiceCallEvent>)
+
+@Serializable
 data class CreateBookingRequest(
     val shopId: Int,
     val employeeId: Int,
@@ -510,7 +513,7 @@ class MobileApi(private val db: DataBase) {
                     }
 
                     val events = db.getCallEvents(callId)
-                    call.respond(mapOf("call" to record, "events" to events))
+                    call.respond(CallDetailResponse(record, events))
                 }
 
                 // ─────────────────────────────────────────────────────────────
