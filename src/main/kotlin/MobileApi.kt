@@ -557,8 +557,8 @@ class MobileApi(private val db: DataBase) {
                         return@post call.respond(HttpStatusCode.BadRequest, "phone is required")
                     }
 
-                    val id = db.addBlacklistEntry(shopId, body.phone, body.reason)
-                    call.respond(HttpStatusCode.Created, mapOf("id" to id, "phone" to body.phone))
+                    db.addBlacklistEntry(shopId, body.phone, body.reason)
+                    call.respond(HttpStatusCode.Created)
                 }
 
                 /**
