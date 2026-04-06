@@ -578,20 +578,27 @@ class MobileApi(private val db: DataBase) {
                 post("/api/mobile/manager/booking/create-json") {
                     val loginInfo = authenticateManager() ?: return@post
 
-                    val body = runCatching { call.receive<CreateBookingRequest>() }.getOrNull()
-                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+                    val rawBody = runCatching { call.receive<CreateBookingRequest>() }.getOrElse { ex ->
+                        println("[create-json] Body deserialization FAILED: ${ex.message}")
+                        null
+                    } ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
 
+                    val body = rawBody
                     val shopId     = body.shopId
                     val employeeId = body.employeeId
                     val serviceIds = body.serviceIds
                     val dateTimeStr = body.appointmentTime
 
+                    println("[create-json] Received: shopId=$shopId employeeId=$employeeId serviceIds=$serviceIds dateTime='$dateTimeStr' clientTotalDuration=${body.totalDuration}")
+
                     if (serviceIds.isEmpty() || dateTimeStr.isBlank()) {
+                        println("[create-json] 400: serviceIds empty or dateTimeStr blank")
                         call.respond(HttpStatusCode.BadRequest, "Missing or invalid parameters")
                         return@post
                     }
 
                     if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        println("[create-json] 403: not authorized for shopId=$shopId")
                         call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                         return@post
                     }
@@ -602,18 +609,24 @@ class MobileApi(private val db: DataBase) {
                     val localDateTime = runCatching {
                         java.time.LocalDateTime.parse(dateTimeStr, formatter)
                     }.getOrNull()
-                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid date/time format")
+                        ?: run {
+                            println("[create-json] 400: invalid date/time format '$dateTimeStr'")
+                            return@post call.respond(HttpStatusCode.BadRequest, "Invalid date/time format")
+                        }
 
                     val zoneId = java.time.ZoneId.systemDefault()
                     val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
-                    // Prefer DB-computed duration; fall back to client-sent value (handles 0-duration services)
-                    val dbDuration = serviceIds.mapNotNull { db.getServiceById(it)?.duration }.sum()
+                    // Use batch SUM query — avoids individual getServiceById nulls
+                    val dbDuration = db.getTotalDurationForServices(serviceIds)
+                    println("[create-json] dbDuration=$dbDuration clientTotalDuration=${body.totalDuration}")
                     val totalDuration = if (dbDuration > 0) dbDuration else body.totalDuration
                     if (totalDuration <= 0) {
-                        call.respond(HttpStatusCode.BadRequest, "Could not determine service duration")
+                        println("[create-json] 400: cannot determine duration. serviceIds=$serviceIds dbDuration=$dbDuration clientTotalDuration=${body.totalDuration}")
+                        call.respond(HttpStatusCode.BadRequest, "Could not determine service duration for serviceIds=$serviceIds")
                         return@post
                     }
+                    println("[create-json] using totalDuration=$totalDuration")
 
                     if (db.isAppointmentOverlapping(employeeId, dateTimeMillis, totalDuration)) {
                         call.respond(HttpStatusCode.Conflict, "Time slot is already booked")
