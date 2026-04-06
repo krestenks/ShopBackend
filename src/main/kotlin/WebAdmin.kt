@@ -111,7 +111,8 @@ class WebAdmin(private val db: DataBase) {
                             tr {
                                 th { +"Shop" }
                                 th { +"Shop Twilio #" }
-                                th { +"Operator #" }
+                                th { +"Manager (operator)" }
+                                th { +"Business name" }
                                 th { +"Welcome (open/closed)" }
                                 th { +"Opening hours" }
                                 th { +"Actions" }
@@ -123,7 +124,11 @@ class WebAdmin(private val db: DataBase) {
                                 tr {
                                     td { +s.name }
                                     td { +(vc.twilioNumber ?: "(missing)") }
-                                    td { +(vc.operatorPhone ?: "(missing)") }
+                                    td {
+                                        val managerPhone = db.getManagerPhoneForShop(s.id)
+                                        +(managerPhone ?: "(no manager)")
+                                    }
+                                    td { +(vc.businessName ?: "(not set)") }
                                     td {
                                         val ok = vc.welcomeOpenMessage.isNotBlank() && vc.welcomeClosedMessage.isNotBlank()
                                         +(if (ok) "OK" else "Missing")
@@ -445,10 +450,13 @@ class WebAdmin(private val db: DataBase) {
 
                             label { +"Operator phone (E.164) for call forwarding:" }
                             br()
+                            p { em { +"Operator: derived automatically from the shop's assigned manager phone." } }
+                            // business_name
+                            label { +"Business name (spoken in whisper)" }
                             textInput {
-                                name = "operator_phone"
-                                value = voiceConfig.operatorPhone ?: ""
-                                placeholder = "+4512345678"
+                                name = "business_name"
+                                value = voiceConfig.businessName ?: ""
+                                placeholder = "My Salon"
                             }
                             br(); br()
 
@@ -530,11 +538,14 @@ class WebAdmin(private val db: DataBase) {
                 if (id != null) {
                     db.updateShop(id, name, address, directions, managerId)
 
-                    // Voice config
+                    // Voice config — operator_phone removed; operator comes from manager phone
                     val voice = ShopVoiceConfig(
                         shopId = id,
                         twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
-                        operatorPhone = params["operator_phone"]?.trim()?.takeIf { it.isNotBlank() },
+                        businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },
+                        temporaryOperatorClosed = params["temporary_operator_closed"] == "on",
+                        temporaryOperatorClosedMessage = params["temporary_operator_closed_message"]?.trim().orEmpty()
+                            .ifBlank { ShopVoiceConfig(id).temporaryOperatorClosedMessage },
                         welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
                     )

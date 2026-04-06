@@ -131,10 +131,11 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 return
             }
 
-            // Transfer to operator with whisper
-            val operator = voice.operatorPhone?.trim().orEmpty()
+            // Transfer to operator with whisper — operator = shop manager's phone
+            val operator = db.getManagerPhoneForShop(shopId)?.trim().orEmpty()
             val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
                 ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
+            println("[VoiceRoutes/welcome] resolvedOperator='$operator' shopId=$shopId")
             if (operator.isBlank()) {
                 db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
                 call.respondText(
@@ -282,7 +283,9 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         )
                         return@post
                     }
-                    val operator = voice.operatorPhone?.trim().orEmpty()
+                    // Operator = shop manager's phone number
+                    val operator = db.getManagerPhoneForShop(shopId)?.trim().orEmpty()
+                    println("[VoiceRoutes/menu digit=2] resolvedOperator='$operator' shopId=$shopId")
                     if (operator.isBlank()) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
                         call.respondText(
@@ -474,7 +477,7 @@ private suspend fun handleOperatorWhisper(call: ApplicationCall) {
 
     val customerLabel = when (customerType) {
         "existing" -> "Existing customer. Standard treatment flow."
-        else       -> "New customer. Intake interview required before treatment."
+        else       -> "New customer. Please ask customer information."
     }
 
     val whisperText = "Incoming call for ${escapeForXml(bizName)}. $customerLabel Press 1 to accept."

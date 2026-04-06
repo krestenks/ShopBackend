@@ -740,6 +740,25 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
+     * Returns the phone number of the manager assigned to the given shop.
+     * Used as the operator contact number for call routing.
+     */
+    fun getManagerPhoneForShop(shopId: Int): String? {
+        val sql = """
+            SELECT m.phone
+            FROM shops s
+            JOIN managers m ON m.id = s.manager_id
+            WHERE s.id = ?
+            LIMIT 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("phone")?.trim()?.takeIf { it.isNotBlank() } else null
+        }
+    }
+
+    /**
      * Map an incoming Twilio call/SMS `To` number to a shop.
      *
      * We match against the per-shop configured Twilio number in [shop_voice_config].
