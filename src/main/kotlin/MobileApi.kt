@@ -42,7 +42,20 @@ data class CreateBookingResponse(val appointmentId: Int, val voiceCallId: Int?)
 @Serializable
 data class LoginRequest(val username: String, val password: String)
 @Serializable
-data class LoginResponse(val token: String, val managerId: Int)
+data class LoginResponse(
+    val token: String,
+    val managerId: Int,   // kept for backwards compat
+    val role: String,     // "manager" | "shop"
+    val userId: Int,      // the DB id that matched (managerId or shopId depending on role)
+)
+@Serializable
+data class MeResponse(
+    val role: String,
+    val userId: Int,
+    val managerId: Int?,
+    val shopId: Int?,
+    val username: String?,
+)
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?)
 
 suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginInfo? {
@@ -92,23 +105,38 @@ class MobileApi(private val db: DataBase) {
 
             post("/api/mobile/login") {
                 val loginRequest = call.receive<LoginRequest>()
-                val username = loginRequest.username
+                val username = loginRequest.username.trim()
                 val password = loginRequest.password
+
+                println("[MobileApi/login] Attempt username='$username'")
 
                 val manager = db.authenticateManager(username, password)
                 if (manager != null) {
                     val token = generateToken(manager.id, role = "manager")
-                    call.respond(LoginResponse(token, manager.id))
+                    println("[MobileApi/login] OK: manager id=${manager.id} name='${manager.name}'")
+                    call.respond(LoginResponse(
+                        token = token,
+                        managerId = manager.id,
+                        role = "manager",
+                        userId = manager.id,
+                    ))
                     return@post
                 }
 
                 val shop = db.authenticateShop(username, password)
                 if (shop != null) {
                     val token = generateToken(shop.id, role = "shop")
-                    call.respond(LoginResponse(token, shop.id))
+                    println("[MobileApi/login] OK: shop id=${shop.id} name='${shop.name}'")
+                    call.respond(LoginResponse(
+                        token = token,
+                        managerId = shop.id,
+                        role = "shop",
+                        userId = shop.id,
+                    ))
                     return@post
                 }
 
+                println("[MobileApi/login] FAIL: no match for username='$username'")
                 call.respond(HttpStatusCode.Unauthorized, "Invalid credentials")
             }
 
@@ -276,6 +304,28 @@ class MobileApi(private val db: DataBase) {
                     call.respond(HttpStatusCode.Created, mapOf("appointment_id" to appointmentId))
                 }
 
+
+                get("/api/mobile/me") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val (username, shopId) = when (loginInfo.role) {
+                        "manager" -> {
+                            val mgr = loginInfo.managerId?.let { db.getManagerById(it) }
+                            Pair(mgr?.username, null)
+                        }
+                        "shop" -> {
+                            val shop = loginInfo.shopId?.let { db.getShopById(it) }
+                            Pair(shop?.name, loginInfo.shopId)
+                        }
+                        else -> Pair(null, null)
+                    }
+                    call.respond(MeResponse(
+                        role = loginInfo.role,
+                        userId = loginInfo.managerId ?: loginInfo.shopId ?: -1,
+                        managerId = loginInfo.managerId,
+                        shopId = loginInfo.shopId,
+                        username = username,
+                    ))
+                }
 
                 get("/api/mobile/manager/shops") {
                     val loginInfo = authenticateManager()  // This returns an object with role, managerId, shopId
