@@ -159,12 +159,16 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
                     "?callId=$callId&customerType=new&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
             val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
+            println("[VoiceRoutes/welcome] DIAL callId=$callId shop=$shopId" +
+                " operator='$operator' callerId='$callerId'" +
+                " whisperUrl=$whisperUrl dialAction=$dialAction")
             val xml = """
                 <Say voice="alice">Please hold while we connect you.</Say>
                 <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
                   <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
                 </Dial>
             """.trimIndent()
+            println("[VoiceRoutes/welcome] TwiML sent:\n${twiml(xml)}")
             call.respondText(twiml(xml), ContentType.Text.Xml)
             return
         }
@@ -308,12 +312,16 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
                             "?callId=$callId&customerType=existing&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
                     val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
+                    println("[VoiceRoutes/menu digit=2] DIAL callId=$callId shop=$shopId" +
+                        " operator='$operator' callerId='$callerId'" +
+                        " whisperUrl=$whisperUrl dialAction=$dialAction")
                     val xml = """
                         <Say voice="alice">Please hold while we connect you to the operator.</Say>
                         <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
                           <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
                         </Dial>
                     """.trimIndent()
+                    println("[VoiceRoutes/menu digit=2] TwiML sent:\n${twiml(xml)}")
                     call.respondText(twiml(xml), ContentType.Text.Xml)
                 }
 
@@ -382,9 +390,18 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
     route("/api/twilio/voice/dial-status") {
         post {
-            val params   = call.receiveParameters()
+            val params      = call.receiveParameters()
             val dialStatus  = params["DialCallStatus"]?.trim() ?: "unknown"
-            val callId   = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val callId      = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val dialSid     = params["DialCallSid"]?.trim() ?: ""
+            val dialTo      = params["To"]?.trim() ?: ""
+            val callSid     = params["CallSid"]?.trim() ?: ""
+            println("[VoiceRoutes/dial-status] callId=$callId DialCallStatus=$dialStatus" +
+                " DialCallSid=$dialSid To=$dialTo CallSid=$callSid")
+            // Log all params for full diagnostic
+            params.entries().forEach { (k, vals) ->
+                println("  param  $k=${vals.joinToString()}")
+            }
             if (callId > 0) {
                 val outcome = when (dialStatus) {
                     "completed"  -> VoiceCallOutcome.OPERATOR_BRIDGED
@@ -396,7 +413,29 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 }
                 db.terminateCall(callId, outcome)
             }
-            // Twilio requires a valid TwiML response even for the action callback
+            // Return meaningful spoken message based on outcome
+            val responseXml = when (dialStatus) {
+                "completed" -> "<Say voice=\"alice\">Thank you. Goodbye.</Say>"
+                "no-answer" -> "<Say voice=\"alice\">The operator did not answer. Please try again in a few minutes.</Say>"
+                "busy"      -> "<Say voice=\"alice\">The operator is currently busy. Please try again in a few minutes.</Say>"
+                "failed"    -> "<Say voice=\"alice\">Sorry, we could not reach the operator. Please try again later.</Say>"
+                "canceled"  -> "<Say voice=\"alice\">The call was cancelled. Goodbye.</Say>"
+                else        -> "<Say voice=\"alice\">Goodbye.</Say>"
+            }
+            call.respondText(twiml(responseXml), ContentType.Text.Xml)
+        }
+        get {
+            // Twilio sometimes hits action URLs as GET
+            val dialStatus  = call.request.queryParameters["DialCallStatus"]?.trim() ?: "unknown"
+            val callId      = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            println("[VoiceRoutes/dial-status GET] callId=$callId DialCallStatus=$dialStatus")
+            if (callId > 0) {
+                val outcome = when (dialStatus) {
+                    "completed"  -> VoiceCallOutcome.OPERATOR_BRIDGED
+                    else         -> VoiceCallOutcome.OPERATOR_DECLINED
+                }
+                db.terminateCall(callId, outcome)
+            }
             call.respondText(twiml("<Say voice=\"alice\">Goodbye.</Say>"), ContentType.Text.Xml)
         }
     }
