@@ -69,7 +69,20 @@ class WebAdmin(private val db: DataBase) {
             }
 
             intercept(ApplicationCallPipeline.Plugins) {
-                if (call.request.path() != "/login" && call.sessions.get<AdminSession>() == null) {
+                val path = call.request.path()
+
+                // Public customer booking endpoints must NOT require admin login.
+                // Otherwise booking links sent by SMS (/api/book?token=...) redirect to /login.
+                val isPublic = path == "/login"
+                        || path.startsWith("/api/book")
+                        || path.startsWith("/api/booking/")
+                        || path.startsWith("/api/shops")
+                        || path.startsWith("/api/employees")
+                        || path.startsWith("/api/services")
+                        || path.startsWith("/api/timeslots")
+                        || path.startsWith("/static/")
+
+                if (!isPublic && call.sessions.get<AdminSession>() == null) {
                     call.respondRedirect("/login")
                     finish()
                 }
