@@ -61,6 +61,9 @@ data class MeResponse(
     val shopId: Int?,
     val username: String?,
 )
+
+@Serializable
+data class CallCustomerResponse(val success: Boolean, val status: Int, val twilio: String)
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?)
 
 suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginInfo? {
@@ -260,13 +263,12 @@ class MobileApi(private val db: DataBase) {
                     println("[TwilioVoice] Calling customer $toPhone for appointment $appointmentId (shop ${appointment.shopId})")
                     val result = voiceService.callCustomer(toPhoneE164 = toPhone, message = message, appointmentId = appointmentId)
 
-                    call.respond(
-                        mapOf(
-                            "success" to result.success,
-                            "status" to result.status,
-                            "twilio" to result.body,
-                        )
-                    )
+                    // Use a typed DTO. Map<String, Any> cannot be serialized by kotlinx.serialization.
+                    call.respond(CallCustomerResponse(
+                        success = result.success,
+                        status = result.status,
+                        twilio = result.body,
+                    ))
                 }
 
                 post("/api/mobile/manager/booking/create") {
