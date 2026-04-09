@@ -31,3 +31,6 @@ bin/
 .DS_Store
 build/*
 .gradle
+
+# Secrets (never commit)
+.env
