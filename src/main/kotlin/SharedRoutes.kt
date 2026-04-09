@@ -222,7 +222,9 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             call.respond(HttpStatusCode.BadRequest, "Invalid date/time format.")
             return@post
         }
-        val zoneId = java.time.ZoneId.systemDefault()
+        // IMPORTANT: server runs in UTC on Upsun, but booking times are in local shop time.
+        // Use explicit timezone to avoid +2h offset in the mobile app.
+        val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
         val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
         // Calculate total duration of selected services
