@@ -164,7 +164,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 " operator='$operator' callerId='$callerId'" +
                 " whisperUrl=$whisperUrl dialAction=$dialAction")
             val xml = """
-                <Say voice="alice">Please hold while we connect you.</Say>
+                <Say voice="Polly.Amy-Neural" language="en-GB">Please hold while we connect you.</Say>
                 <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
                   <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
                 </Dial>
@@ -180,9 +180,9 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         val welcomeMsg = if (isOpen) voice.welcomeOpenMessage else voice.welcomeClosedMessage
 
         val xml = """
-            <Say voice="alice">${escapeForXml(welcomeMsg)}</Say>
-            <Gather numDigits="1" timeout="5" action="${escapeForXml(menuAction)}" method="POST">
-              <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+            <Say voice="Polly.Amy-Neural" language="en-GB">${escapeForXml(welcomeMsg)}</Say>
+            <Gather numDigits="1" timeout="15" action="${escapeForXml(menuAction)}" method="POST">
+              <Say voice="Polly.Amy-Neural" language="en-GB">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
             </Gather>
             <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
         """.trimIndent()
@@ -222,8 +222,8 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 val menuAction = "$base/api/twilio/voice/menu" +
                         "?callId=$callId&attempt=$nextAttempt&isOpen=$isOpen&tempClosed=$tempClosed&shopId=$shopId"
                 return """
-                    <Gather numDigits="1" timeout="5" action="${escapeForXml(menuAction)}" method="POST">
-                      <Say voice="alice">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+                    <Gather numDigits="1" timeout="15" action="${escapeForXml(menuAction)}" method="POST">
+                      <Say voice="Polly.Amy-Neural" language="en-GB">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
                     </Gather>
                     <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
                 """.trimIndent()
@@ -319,7 +319,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         " operator='$operator' callerId='$callerId'" +
                         " whisperUrl=$whisperUrl dialAction=$dialAction")
                     val xml = """
-                        <Say voice="alice">Please hold while we connect you to the operator.</Say>
+                        <Say voice="Polly.Amy-Neural" language="en-GB">Please hold while we connect you to the operator.</Say>
                         <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
                           <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
                         </Dial>
@@ -484,10 +484,10 @@ private suspend fun handleOperatorWhisper(call: ApplicationCall) {
     val acceptAction = "$base/api/twilio/voice/operator-accept?callId=$callId"
 
     val xml = """
-        <Gather numDigits="1" timeout="10" action="${escapeForXml(acceptAction)}" method="POST">
-          <Say voice="alice">$whisperText</Say>
+        <Gather numDigits="1" timeout="15" action="${escapeForXml(acceptAction)}" method="POST">
+          <Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say>
         </Gather>
-        <Say voice="alice">No response received. The call will be disconnected.</Say>
+        <Say voice="Polly.Amy-Neural" language="en-GB">No response received. The call will be disconnected.</Say>
     """.trimIndent()
 
     call.respondText(
