@@ -106,6 +106,7 @@ enum class VoiceCallOutcome {
     INVALID_MENU_MAX_RETRIES,
     SYSTEM_ERROR,
     IN_PROGRESS,
+    STALE,
 }
 
 @Serializable
@@ -568,7 +569,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    fun terminateCall(callId: Int, outcome: VoiceCallOutcome) {
+    fun terminateCall(callId: Int, outcome: VoiceCallOutcome, note: String? = null) {
         val now = System.currentTimeMillis()
         connection.prepareStatement(
             "UPDATE voice_call SET is_active = 0, ended_at = ?, state = 'TERMINATED', outcome = ? WHERE id = ?"
@@ -578,7 +579,41 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(3, callId)
             stmt.executeUpdate()
         }
-        appendCallEvent(callId, VoiceCallState.TERMINATED.name, outcome.name)
+        appendCallEvent(callId, VoiceCallState.TERMINATED.name, note ?: outcome.name)
+    }
+
+    /**
+     * Terminates active calls that may be stuck as `is_active=1`.
+     *
+     * Used as a robustness measure on backend startup, on new inbound call, and in scheduled cleanup.
+     */
+    fun terminateActiveCalls(
+        shopId: Int? = null,
+        olderThanMs: Long? = null,
+        outcome: VoiceCallOutcome = VoiceCallOutcome.STALE,
+        note: String? = null,
+    ): Int {
+        val now = System.currentTimeMillis()
+        val cutoff = olderThanMs?.let { now - it }
+
+        val sql = buildString {
+            append("SELECT id FROM voice_call WHERE is_active = 1")
+            if (shopId != null) append(" AND shop_id = ?")
+            if (cutoff != null) append(" AND started_at < ?")
+        }
+
+        val ids = mutableListOf<Int>()
+        connection.prepareStatement(sql).use { stmt ->
+            var idx = 1
+            if (shopId != null) stmt.setInt(idx++, shopId)
+            if (cutoff != null) stmt.setLong(idx++, cutoff)
+            val rs = stmt.executeQuery()
+            while (rs.next()) ids += rs.getInt("id")
+        }
+
+        if (ids.isEmpty()) return 0
+        ids.forEach { id -> terminateCall(id, outcome, note = note) }
+        return ids.size
     }
 
     fun linkBookingToCall(callId: Int, bookingId: Int) {

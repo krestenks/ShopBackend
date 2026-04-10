@@ -84,6 +84,19 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         val voice  = db.getShopVoiceConfig(shopId)
         val base   = PublicBaseUrl.fromCall(call)
 
+        // Robustness: if Twilio callbacks were missed, we may have stuck active calls.
+        // Clear anything older than 30 minutes for this shop before creating a new call record.
+        runCatching {
+            val terminated = db.terminateActiveCalls(
+                shopId = shopId,
+                olderThanMs = 30 * 60 * 1000L,
+                note = "new_inbound_call_cleanup",
+            )
+            if (terminated > 0) println("[VoiceRoutes/welcome] terminated $terminated stale active calls for shopId=$shopId")
+        }.onFailure { e ->
+            println("[VoiceRoutes/welcome] cleanup error: ${e.message}")
+        }
+
         // ── Persist call immediately so app can see it ────────────────────────
         val callId = db.createInboundCallLog(shopId, sid, from, to)
         db.updateCallState(callId, VoiceCallState.INCOMING_CALL)

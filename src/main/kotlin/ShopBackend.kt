@@ -35,6 +35,18 @@ object ShopBackend {
         val db = if (!dbPath.isNullOrBlank()) DataBase(dbPath) else DataBase()
         println("Database initialized.")
 
+        // Defensive cleanup: terminate any stale active calls from a previous run.
+        // We use a threshold to avoid killing truly ongoing calls during a restart.
+        runCatching {
+            val terminated = db.terminateActiveCalls(
+                olderThanMs = 30 * 60 * 1000L,
+                note = "startup_cleanup",
+            )
+            if (terminated > 0) println("Startup cleanup: terminated $terminated stale active calls")
+        }.onFailure { e ->
+            println("Startup cleanup error: ${e.message}")
+        }
+
         // Demo hash
         val hash = BCrypt.hashpw("1234", BCrypt.gensalt(12))
         println("Generated bcrypt hash: $hash")
@@ -109,6 +121,13 @@ object ShopBackend {
         executor.scheduleAtFixedRate({
             try {
                 db.deleteOldBookingTokens()
+
+                // Also clear stuck active calls (e.g. if Twilio status callbacks were missed).
+                val terminated = db.terminateActiveCalls(
+                    olderThanMs = 30 * 60 * 1000L,
+                    note = "scheduled_cleanup",
+                )
+                if (terminated > 0) println("Cleanup: terminated $terminated stale active calls")
             } catch (e: Exception) {
                 println("Error during cleanup: ${e.message}")
             }

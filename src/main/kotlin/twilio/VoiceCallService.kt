@@ -49,6 +49,10 @@ class TwilioVoiceCallService(
             }
         }
 
+        // Status callback lets us reliably mark calls inactive when Twilio considers them finished.
+        // Twilio will POST CallSid + CallStatus etc.
+        val statusCallbackUrl = publicBaseUrl.trimEnd('/') + "/api/twilio/voice/status"
+
         // Basic Auth: AccountSID:AuthToken
         val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
 
@@ -60,6 +64,9 @@ class TwilioVoiceCallService(
                     "To" to toPhoneE164,
                     "From" to fromNumber,
                     "Url" to callbackUrl,
+                    "StatusCallback" to statusCallbackUrl,
+                    "StatusCallbackMethod" to "POST",
+                    "StatusCallbackEvent" to "initiated ringing answered completed",
                 ).formUrlEncode()
             )
         }
