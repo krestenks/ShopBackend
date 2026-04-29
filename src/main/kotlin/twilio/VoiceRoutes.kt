@@ -40,6 +40,13 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
     fun twiml(xmlInsideResponse: String): String =
         """<?xml version="1.0" encoding="UTF-8"?><Response>$xmlInsideResponse</Response>"""
 
+    // Customers often need a moment after answering before audio starts.
+    // Twilio recommendation: add a short pause before the first <Say> to avoid clipping.
+    val customerTtsLeadInPause = "<Pause length=\"3\"/>"
+
+    // Use this for TwiML that is played to the *customer* (not operator whisper/accept).
+    fun customerTwiml(xmlInsideResponse: String): String = twiml(customerTtsLeadInPause + xmlInsideResponse)
+
     fun isShopOpenNow(shopId: Int): Boolean {
         val now = java.time.ZonedDateTime.now()
         val dow = now.dayOfWeek.value // 1=Mon..7=Sun
@@ -56,8 +63,15 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         get {
             val message = call.request.queryParameters["msg"]?.take(400)
                 ?: "Hello. You can come to the door now."
+
+            val msgEsc = escapeForXml(message)
+            val say = "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">$msgEsc</Say>"
+            val xml = customerTtsLeadInPause +
+                    say + "<Pause length=\"2\"/>" +
+                    say + "<Pause length=\"2\"/>" +
+                    say + "<Hangup/>"
             call.respondText(
-                twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(message)}</Say>"),
+                twiml(xml),
                 ContentType.Text.Xml,
             )
         }
@@ -65,8 +79,15 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val params = call.receiveParameters()
             val message = (params["msg"] ?: call.request.queryParameters["msg"])?.take(400)
                 ?: "Hello. You can come to the door now."
+
+            val msgEsc = escapeForXml(message)
+            val say = "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">$msgEsc</Say>"
+            val xml = customerTtsLeadInPause +
+                    say + "<Pause length=\"2\"/>" +
+                    say + "<Pause length=\"2\"/>" +
+                    say + "<Hangup/>"
             call.respondText(
-                twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(message)}</Say>"),
+                twiml(xml),
                 ContentType.Text.Xml,
             )
         }
@@ -128,7 +149,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 db.updateCallState(callId, VoiceCallState.CLOSED_MESSAGE)
                 db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
                 call.respondText(
-                    twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
+                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
                     ContentType.Text.Xml,
                 )
                 return
@@ -138,7 +159,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 db.updateCallState(callId, VoiceCallState.TEMPORARY_CLOSED_MESSAGE)
                 db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
                 call.respondText(
-                    twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
+                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
                     ContentType.Text.Xml,
                 )
                 return
@@ -152,7 +173,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             if (operator.isBlank()) {
                 db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
                 call.respondText(
-                    twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, call forwarding is not available.</Say>"),
+                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, call forwarding is not available.</Say>"),
                     ContentType.Text.Xml,
                 )
                 return
@@ -162,7 +183,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 db.updateCallState(callId, VoiceCallState.OPERATOR_BUSY, "operator=$operator")
                 db.terminateCall(callId, VoiceCallOutcome.OPERATOR_BUSY)
                 call.respondText(
-                    twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
+                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
                     ContentType.Text.Xml,
                 )
                 return
@@ -183,7 +204,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 </Dial>
             """.trimIndent()
             println("[VoiceRoutes/welcome] TwiML sent:\n${twiml(xml)}")
-            call.respondText(twiml(xml), ContentType.Text.Xml)
+            call.respondText(customerTwiml(xml), ContentType.Text.Xml)
             return
         }
 
@@ -199,7 +220,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             </Gather>
             <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
         """.trimIndent()
-        call.respondText(twiml(xml), ContentType.Text.Xml)
+        call.respondText(customerTwiml(xml), ContentType.Text.Xml)
     }
 
     route("/api/twilio/voice/welcome") {
@@ -249,7 +270,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     if (from.isBlank()) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SYSTEM_ERROR)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not read your number.</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not read your number.</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
@@ -266,14 +287,14 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         println("[TwilioSMS] Failed: status=${sms.status} body=${sms.body}")
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SYSTEM_ERROR)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not send the SMS right now. Please try again later.</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not send the SMS right now. Please try again later.</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
                     }
                     if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SMS_SENT)
                     call.respondText(
-                        twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">We have sent you a booking link by SMS. Goodbye.</Say>"),
+                        customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">We have sent you a booking link by SMS. Goodbye.</Say>"),
                         ContentType.Text.Xml,
                     )
                 }
@@ -283,7 +304,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     if (!isOpen) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
@@ -291,7 +312,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     if (tempClosed) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
@@ -302,7 +323,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     if (operator.isBlank()) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, call forwarding is not available.</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, call forwarding is not available.</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
@@ -314,7 +335,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                             db.terminateCall(callId, VoiceCallOutcome.OPERATOR_BUSY)
                         }
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post
@@ -338,7 +359,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         </Dial>
                     """.trimIndent()
                     println("[VoiceRoutes/menu digit=2] TwiML sent:\n${twiml(xml)}")
-                    call.respondText(twiml(xml), ContentType.Text.Xml)
+                    call.respondText(customerTwiml(xml), ContentType.Text.Xml)
                 }
 
                 else -> {
@@ -346,11 +367,11 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                     if (attempt >= 3) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.INVALID_MENU_MAX_RETRIES)
                         call.respondText(
-                            twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">We did not receive a valid selection. Goodbye.</Say>"),
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">We did not receive a valid selection. Goodbye.</Say>"),
                             ContentType.Text.Xml,
                         )
                     } else {
-                        call.respondText(twiml(menuAgain(attempt + 1)), ContentType.Text.Xml)
+                        call.respondText(customerTwiml(menuAgain(attempt + 1)), ContentType.Text.Xml)
                     }
                 }
             }
@@ -371,7 +392,6 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val params       = call.receiveParameters()
             val digits       = (params["Digits"] ?: call.request.queryParameters["Digits"])?.trim()
             val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
-            val base         = PublicBaseUrl.fromCall(call)
 
             if (digits == "1") {
                 // Accepted: return empty TwiML so Twilio bridges the call
@@ -438,7 +458,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 "canceled"  -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The call was cancelled. Goodbye.</Say>"
                 else        -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"
             }
-            call.respondText(twiml(responseXml), ContentType.Text.Xml)
+            call.respondText(customerTwiml(responseXml), ContentType.Text.Xml)
         }
         get {
             // Twilio sometimes hits action URLs as GET
@@ -452,7 +472,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 }
                 db.terminateCall(callId, outcome)
             }
-            call.respondText(twiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"), ContentType.Text.Xml)
+            call.respondText(customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"), ContentType.Text.Xml)
         }
     }
 
@@ -479,7 +499,6 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 // ── Operator whisper logic (shared between POST and GET) ─────────────────────
 
 private suspend fun handleOperatorWhisper(call: ApplicationCall) {
-    val params       = try { call.receiveParameters() } catch (_: Exception) { Parameters.Empty }
     val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
     val customerType = call.request.queryParameters["customerType"] ?: "new"
     val bizName      = call.request.queryParameters["bizName"]
