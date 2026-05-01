@@ -18,6 +18,92 @@ class WebAdmin(private val db: DataBase) {
 
     data class AdminSession(val username: String)
 
+    private data class NavItem(val href: String, val label: String, val icon: String)
+
+    private fun HTML.adminPage(
+        call: ApplicationCall,
+        titleText: String,
+        subtitle: String? = null,
+        activePath: String? = null,
+        bodyContent: FlowContent.() -> Unit,
+    ) {
+        head {
+            meta { charset = "utf-8" }
+            meta {
+                name = "viewport"
+                content = "width=device-width, initial-scale=1"
+            }
+            title { +titleText }
+            link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+        }
+        body {
+            div("layout") {
+                div("sidebar") {
+                    div("brand") {
+                        div {
+                            div("brand-title") { +"ShopManager" }
+                            div("brand-sub") { +"Admin" }
+                        }
+                    }
+
+                    val nav = listOf(
+                        NavItem("/", "Dashboard", "🏠"),
+                        NavItem("/shops", "Shops", "🏪"),
+                        NavItem("/employees", "Employees", "👥"),
+                        NavItem("/services", "Services", "🧾"),
+                        NavItem("/managers", "Managers", "🧑‍💼"),
+                        NavItem("/appointments", "Appointments", "📅"),
+                        NavItem("/twilio/setup", "Twilio setup", "📞"),
+                        NavItem("/test-booking-link", "Booking link", "🔗"),
+                    )
+
+                    div("nav") {
+                        for (item in nav) {
+                            a(href = item.href, classes = if (activePath == item.href) "active" else null) {
+                                span { +item.icon }
+                                span { +item.label }
+                            }
+                        }
+                        div("spacer") {}
+                        a(href = "/logout") {
+                            span { +"🚪" }
+                            span { +"Logout" }
+                        }
+                    }
+                }
+
+                div("main") {
+                    div("page-header") {
+                        div {
+                            h1("page-title") { +titleText }
+                            if (!subtitle.isNullOrBlank()) {
+                                p("page-subtitle") { +subtitle }
+                            }
+                        }
+                    }
+                    bodyContent()
+                }
+            }
+        }
+    }
+
+    private suspend fun ApplicationCall.respondAdminPage(
+        titleText: String,
+        subtitle: String? = null,
+        activePath: String? = null,
+        bodyContent: FlowContent.() -> Unit,
+    ) {
+        respondHtml {
+            adminPage(
+                call = this@respondAdminPage,
+                titleText = titleText,
+                subtitle = subtitle,
+                activePath = activePath,
+                bodyContent = bodyContent,
+            )
+        }
+    }
+
     fun setupRoutes(routing: Route) {
         routing {
             static("/static") {
@@ -28,14 +114,29 @@ class WebAdmin(private val db: DataBase) {
 
             get("/login") {
                 call.respondHtml {
+                    head {
+                        meta { charset = "utf-8" }
+                        meta {
+                            name = "viewport"
+                            content = "width=device-width, initial-scale=1"
+                        }
+                        title { +"Admin Login" }
+                        link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+                    }
                     body {
-                        h2 { +"Admin Login" }
-                        form(action = "/login", method = FormMethod.post) {
-                            textInput { name = "username"; placeholder = "Username" }
-                            br()
-                            passwordInput { name = "password"; placeholder = "Password" }
-                            br()
-                            submitInput { value = "Login" }
+                        div("center") {
+                            div("card") {
+                                h2 { +"Admin Login" }
+                                p("hint") { +"Sign in to manage shops, staff and services." }
+                                form(action = "/login", method = FormMethod.post) {
+                                    label { +"Username" }
+                                    textInput { name = "username"; placeholder = "admin" }
+                                    label { +"Password" }
+                                    passwordInput { name = "password"; placeholder = "••••" }
+                                    br()
+                                    submitInput(classes = "btn primary") { value = "Login" }
+                                }
+                            }
                         }
                     }
                 }
@@ -55,9 +156,23 @@ class WebAdmin(private val db: DataBase) {
                     call.respondRedirect("/")
                 } else {
                     call.respondHtml {
+                        head {
+                            meta { charset = "utf-8" }
+                            meta {
+                                name = "viewport"
+                                content = "width=device-width, initial-scale=1"
+                            }
+                            title { +"Admin Login" }
+                            link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+                        }
                         body {
-                            h3 { +"Invalid credentials." }
-                            a("/login") { +"Try again" }
+                            div("center") {
+                                div("card") {
+                                    h2 { +"Admin Login" }
+                                    p("hint") { +"Invalid credentials." }
+                                    a(href = "/login", classes = "btn") { +"Try again" }
+                                }
+                            }
                         }
                     }
                 }
@@ -89,11 +204,19 @@ class WebAdmin(private val db: DataBase) {
             }
 
             get("/") {
-                call.respondHtml {
-                    body {
-                        header()
-                        h1 { +"ShopManager Admin" }
-                        p { +"Use the interface to manage managers." }
+                call.respondAdminPage(
+                    titleText = "Dashboard",
+                    subtitle = "Manage shops, staff and services",
+                    activePath = "/",
+                ) {
+                    div("panel") {
+                        p { +"Use the navigation to manage your data." }
+                        ul {
+                            li { +"Shops: address, manager, voice config and opening hours" }
+                            li { +"Employees: assign shop + services" }
+                            li { +"Services: prices and duration" }
+                            li { +"Managers: admin + app logins" }
+                        }
                     }
                 }
             }
@@ -103,10 +226,12 @@ class WebAdmin(private val db: DataBase) {
                 val baseUrl = PublicBaseUrl.fromCall(call).trimEnd('/')
                 val voiceWebhook = "$baseUrl/api/twilio/voice/welcome"
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Twilio setup (no Studio)" }
+                call.respondAdminPage(
+                    titleText = "Twilio setup",
+                    subtitle = "Configure your Twilio number webhooks",
+                    activePath = "/twilio/setup",
+                ) {
+                    div("panel") {
                         p {
                             +"For each shop Twilio number, configure in Twilio Console: Phone Numbers → (number) → Voice & Fax → 'A call comes in' → Webhook (POST)."
                         }
@@ -114,40 +239,49 @@ class WebAdmin(private val db: DataBase) {
                             +"Webhook URL to paste: "
                             code { +voiceWebhook }
                         }
-                        p {
-                            +"(This endpoint returns TwiML that plays the welcome message, and supports: press 1 = SMS booking link, press 2 = forward to operator when open.)"
+                        p("hint") {
+                            +"This endpoint returns TwiML that plays the welcome message (press 1 = SMS booking link, press 2 = forward to operator when open)."
                         }
+                    }
 
+                    div("panel") {
                         h3 { +"Shop readiness" }
                         table {
-                            style = "border-collapse: collapse; width: 100%;"
-                            tr {
-                                th { +"Shop" }
-                                th { +"Shop Twilio #" }
-                                th { +"Manager (operator)" }
-                                th { +"Business name" }
-                                th { +"Welcome (open/closed)" }
-                                th { +"Opening hours" }
-                                th { +"Actions" }
-                            }
-                            for (s in shops) {
-                                val vc = db.getShopVoiceConfig(s.id)
-                                db.ensureDefaultShopOpeningHours(s.id)
-                                val ohCount = db.getShopOpeningHours(s.id).size
+                            thead {
                                 tr {
-                                    td { +s.name }
-                                    td { +(vc.twilioNumber ?: "(missing)") }
-                                    td {
-                                        val managerPhone = db.getManagerPhoneForShop(s.id)
-                                        +(managerPhone ?: "(no manager)")
+                                    th { +"Shop" }
+                                    th { +"Shop Twilio #" }
+                                    th { +"Manager (operator)" }
+                                    th { +"Business name" }
+                                    th { +"Welcome" }
+                                    th { +"Opening hours" }
+                                    th { +"Actions" }
+                                }
+                            }
+                            tbody {
+                                for (s in shops) {
+                                    val vc = db.getShopVoiceConfig(s.id)
+                                    db.ensureDefaultShopOpeningHours(s.id)
+                                    val ohCount = db.getShopOpeningHours(s.id).size
+                                    val welcomeOk = vc.welcomeOpenMessage.isNotBlank() && vc.welcomeClosedMessage.isNotBlank()
+                                    tr {
+                                        td { +s.name }
+                                        td { +(vc.twilioNumber ?: "(missing)") }
+                                        td {
+                                            val managerPhone = db.getManagerPhoneForShop(s.id)
+                                            +(managerPhone ?: "(no manager)")
+                                        }
+                                        td { +(vc.businessName ?: "(not set)") }
+                                        td {
+                                            span("badge ${if (welcomeOk) "ok" else "warn"}") {
+                                                +(if (welcomeOk) "OK" else "Missing")
+                                            }
+                                        }
+                                        td { +"$ohCount/7" }
+                                        td {
+                                            a(href = "/shops/edit?id=${s.id}", classes = "btn") { +"Edit shop" }
+                                        }
                                     }
-                                    td { +(vc.businessName ?: "(not set)") }
-                                    td {
-                                        val ok = vc.welcomeOpenMessage.isNotBlank() && vc.welcomeClosedMessage.isNotBlank()
-                                        +(if (ok) "OK" else "Missing")
-                                    }
-                                    td { +"$ohCount/7" }
-                                    td { a(href = "/shops/edit?id=${s.id}") { +"Edit shop" } }
                                 }
                             }
                         }
@@ -157,63 +291,69 @@ class WebAdmin(private val db: DataBase) {
 
             get("/managers") {
                 val managers = db.getAllManagers()
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Managers" }
-                        table {
-                            style = "border-collapse: collapse; width: 100%; text-align: center;"
-                            thead {
-                                tr {
-                                    th { +"ID" }
-                                    th { +"Name" }
-                                    th { +"Phone" }
-                                    th { +"Username" }
-                                    th { +"Actions" }
-                                }
-                            }
-                            tbody {
-                                for (manager in managers) {
+                call.respondAdminPage(
+                    titleText = "Managers",
+                    subtitle = "Admin users and mobile app credentials",
+                    activePath = "/managers",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All managers" }
+                            table {
+                                thead {
                                     tr {
-                                        td { +manager.id.toString() }
-                                        td { +manager.name }
-                                        td { +manager.phone.toString() }
-                                        td { +manager.username }
-                                        td {
-                                            a(href = "/managers/edit?id=${manager.id}") { +"[Edit]" }
-                                            +" "
-                                            a(href = "/managers/delete?id=${manager.id}") { +"[Delete]" }
+                                        th { +"ID" }
+                                        th { +"Name" }
+                                        th { +"Phone" }
+                                        th { +"Username" }
+                                        th { +"Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for (manager in managers) {
+                                        tr {
+                                            td { +manager.id.toString() }
+                                            td { +manager.name }
+                                            td { +manager.phone.toString() }
+                                            td { +manager.username }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/managers/edit?id=${manager.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/managers/delete?id=${manager.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete manager ${manager.name}?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        br()
-                        a(href = "/managers/add") { +"Add New Manager" }
-                    }
-                }
-            }
 
+                        div("panel") {
+                            h3 { +"Add new manager" }
+                            form(action = "/managers/add", method = FormMethod.post) {
+                                label { +"Full name" }
+                                textInput { name = "name"; placeholder = "Jane Doe" }
 
-            get("/managers/add") {
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Add New Manager" }
-                        form(action = "/managers/add", method = FormMethod.post) {
-                            textInput { name = "name"; placeholder = "Full Name" }
-                            br()
-                            textInput { name = "username"; placeholder = "Username" }
-                            br()
-                            passwordInput { name = "password"; placeholder = "Password" }
-                            br()
-                            textInput { name = "phone"; placeholder = "Phone (optional)" }
-                            br()
-                            submitInput { value = "Add Manager" }
+                                label { +"Username" }
+                                textInput { name = "username"; placeholder = "manager01" }
+
+                                label { +"Password" }
+                                passwordInput { name = "password"; placeholder = "Password" }
+
+                                label { +"Phone (optional)" }
+                                textInput { name = "phone"; placeholder = "+45 12 34 56 78" }
+
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add manager" }
+                            }
                         }
                     }
                 }
             }
+
 
             post("/managers/add") {
                 val params = call.receiveParameters()
@@ -223,13 +363,7 @@ class WebAdmin(private val db: DataBase) {
                 val phone = params["phone"]
 
                 db.addManager(name, username, password, phone)
-                call.respondHtml {
-                    body {
-                        header()
-                        h3 { +"Manager added." }
-                        a("/") { +"Back to home" }
-                    }
-                }
+                call.respondRedirect("/managers")
             }
 
             get("/managers/edit") {
@@ -243,75 +377,66 @@ class WebAdmin(private val db: DataBase) {
                     call.respondRedirect("/managers")
                     return@get
                 }
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Edit Manager" }
-                        form(action = "/managers/edit", method = FormMethod.post) {
-                            hiddenInput { name = "id"; value = manager.id.toString() }
+                call.respondAdminPage(
+                    titleText = "Edit manager",
+                    subtitle = manager.name,
+                    activePath = "/managers",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Details" }
+                            form(action = "/managers/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = manager.id.toString() }
 
-                            label {
-                                htmlFor = "name"
-                                +"Full name:"
-                            }
-                            br()
-                            textInput {
-                                name = "name"
-                                id = "name"
-                                value = manager.name
-                                placeholder = "Manager's full name"
-                            }
-                            br()
-                            br()
+                                label { +"Full name" }
+                                textInput {
+                                    name = "name"
+                                    id = "name"
+                                    value = manager.name
+                                    placeholder = "Manager's full name"
+                                }
 
-                            label {
-                                htmlFor = "phone"
-                                +"Phone number:"
-                            }
-                            br()
-                            textInput {
-                                name = "phone"
-                                id = "phone"
-                                value = manager.phone.toString()
-                                placeholder = "e.g., +45 1234 5678"
-                            }
-                            br()
-                            br()
+                                label { +"Phone number" }
+                                textInput {
+                                    name = "phone"
+                                    id = "phone"
+                                    value = manager.phone.toString()
+                                    placeholder = "e.g., +45 1234 5678"
+                                }
 
-                            label {
-                                htmlFor = "username"
-                                +"Username (for login):"
-                            }
-                            br()
-                            textInput {
-                                name = "username"
-                                id = "username"
-                                value = manager.username
-                                placeholder = "e.g., manager01"
-                            }
-                            br()
-                            br()
+                                label { +"Username (for login)" }
+                                textInput {
+                                    name = "username"
+                                    id = "username"
+                                    value = manager.username
+                                    placeholder = "e.g., manager01"
+                                }
 
-                            submitInput { value = "Save Changes" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save changes" }
+                            }
                         }
 
-                        hr()
-                        h3 { +"📱 Mobile App Login" }
-                        val appUser = db.getManagerAppAccountUsername(manager_id!!)
-                        if (appUser != null) { p { +"App username: "; b { +appUser } } }
-                        else { p { em { +"No app login set yet." } } }
-                        form(action = "/managers/app-login", method = FormMethod.post) {
-                            hiddenInput { name = "id"; value = manager_id.toString() }
-                            textInput { name = "app_username"; value = appUser ?: ""; placeholder = "App username" }
-                            +" "
-                            passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
-                            +" "
-                            submitInput { value = "Save App Login" }
-                        }
-                        if (appUser != null) {
-                            form(action = "/managers/app-login/remove", method = FormMethod.post) {
+                        div("panel") {
+                            h3 { +"📱 Mobile App Login" }
+                            val appUser = db.getManagerAppAccountUsername(manager_id!!)
+                            if (appUser != null) { p { +"App username: "; b { +appUser } } }
+                            else { p { em { +"No app login set yet." } } }
+                            form(action = "/managers/app-login", method = FormMethod.post) {
                                 hiddenInput { name = "id"; value = manager_id.toString() }
-                                submitInput { value = "Remove App Login" }
+                                label { +"App username" }
+                                textInput { name = "app_username"; value = appUser ?: ""; placeholder = "App username" }
+                                label { +"New password" }
+                                passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save App Login" }
+                            }
+                            if (appUser != null) {
+                                form(action = "/managers/app-login/remove", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = manager_id.toString() }
+                                    br()
+                                    submitInput(classes = "btn danger") { value = "Remove App Login" }
+                                }
                             }
                         }
                     }
@@ -362,63 +487,81 @@ class WebAdmin(private val db: DataBase) {
                 val shops = db.getAllShops()
                 val managers = db.getAllManagers().associateBy { it.id }
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Shops Overview" }
+                call.respondAdminPage(
+                    titleText = "Shops",
+                    subtitle = "Shop details, managers, employees and voice config",
+                    activePath = "/shops",
+                ) {
+                    div("panel") {
+                        div("actions") {
+                            a(href = "/shops/add", classes = "btn primary") { +"Add new shop" }
+                        }
                         table {
-                            style = "border-collapse: collapse; width: 100%;"
-                            tr {
-                                th { +"ID" }
-                                th { +"Name" }
-                                th { +"Address" }
-                                th { +"Manager" }
-                                th { +"Employees" }
-                                th { +"Actions" }
-                            }
-                            for (shop in shops) {
-                                val shopEmployees = db.getEmployeesForShop(shop.id)
+                            thead {
                                 tr {
-                                    td { +shop.id.toString() }
-                                    td { +shop.name }
-                                    td { +(shop.address ?: "") }
-                                    td {
-                                        val mgr = shop.managerId?.let { managers[it] }
-                                        +(mgr?.name ?: "Unassigned")
-                                    }
-                                    td {
-                                        ul {
-                                            shopEmployees.forEach {
-                                                li { +"${it.name} (${it.phone ?: "-"})" }
+                                    th { +"ID" }
+                                    th { +"Name" }
+                                    th { +"Address" }
+                                    th { +"Manager" }
+                                    th { +"Employees" }
+                                    th { +"Actions" }
+                                }
+                            }
+                            tbody {
+                                for (shop in shops) {
+                                    val shopEmployees = db.getEmployeesForShop(shop.id)
+                                    tr {
+                                        td { +shop.id.toString() }
+                                        td { +shop.name }
+                                        td { +(shop.address ?: "") }
+                                        td {
+                                            val mgr = shop.managerId?.let { managers[it] }
+                                            +(mgr?.name ?: "Unassigned")
+                                        }
+                                        td {
+                                            if (shopEmployees.isEmpty()) {
+                                                span("badge") { +"No employees" }
+                                            } else {
+                                                ul {
+                                                    shopEmployees.forEach {
+                                                        li { +"${it.name} (${it.phone ?: "-"})" }
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                    td {
-                                        a(href = "/shops/edit?id=${shop.id}") { +"Edit" }; +" "
-                                        a(href = "/shops/delete?id=${shop.id}") { +"Delete" }
+                                        td {
+                                            div("actions") {
+                                                a(href = "/shops/edit?id=${shop.id}", classes = "btn") { +"Edit" }
+                                                a(href = "/shops/delete?id=${shop.id}", classes = "btn danger") {
+                                                    onClick = "return confirm('Delete shop ${shop.name}?')"
+                                                    +"Delete"
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                        br()
-                        a(href = "/shops/add") { +"Add New Shop" }
                     }
                 }
             }
 
             get("/shops/add") {
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Add New Shop" }
+                call.respondAdminPage(
+                    titleText = "Add shop",
+                    subtitle = "Create a new shop",
+                    activePath = "/shops",
+                ) {
+                    div("panel") {
                         form(action = "/shops/add", method = FormMethod.post) {
+                            label { +"Shop name" }
                             textInput { name = "name"; placeholder = "Shop Name" }
-                            br()
+                            label { +"Address" }
                             textInput { name = "address"; placeholder = "Address" }
-                            br()
+                            label { +"Directions" }
                             textArea { name = "directions"; placeholder = "Directions" }
                             br()
-                            submitInput { value = "Add Shop" }
+                            submitInput(classes = "btn primary") { value = "Add shop" }
                         }
                     }
                 }
@@ -460,10 +603,12 @@ class WebAdmin(private val db: DataBase) {
                     return "%02d:%02d".format(h, m)
                 }
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Edit Shop" }
+                call.respondAdminPage(
+                    titleText = "Edit shop",
+                    subtitle = shop.name,
+                    activePath = "/shops",
+                ) {
+                    div("panel") {
                         form(action = "/shops/edit", method = FormMethod.post) {
                             hiddenInput { name = "id"; value = shop.id.toString() }
                             textInput { name = "name"; value = shop.name }
@@ -530,7 +675,6 @@ class WebAdmin(private val db: DataBase) {
                             h3 { +"Opening hours" }
 
                             table {
-                                style = "border-collapse: collapse;"
                                 fun row(dow: Int, labelText: String) {
                                     val row = openingHours[dow]
                                     tr {
@@ -570,7 +714,7 @@ class WebAdmin(private val db: DataBase) {
                             }
 
                             br()
-                            submitInput { value = "Save Changes" }
+                            submitInput(classes = "btn primary") { value = "Save Changes" }
                         }
 
                         hr()
@@ -584,12 +728,12 @@ class WebAdmin(private val db: DataBase) {
                             +" "
                             passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
                             +" "
-                            submitInput { value = "Save App Login" }
+                            submitInput(classes = "btn primary") { value = "Save App Login" }
                         }
                         if (shopAppUser != null) {
                             form(action = "/shops/app-login/remove", method = FormMethod.post) {
                                 hiddenInput { name = "id"; value = id.toString() }
-                                submitInput { value = "Remove App Login" }
+                                submitInput(classes = "btn danger") { value = "Remove App Login" }
                             }
                         }
                     }
@@ -674,80 +818,79 @@ class WebAdmin(private val db: DataBase) {
                 val shopsById = shops.associateBy { it.id }
                 val employeeServicesMap = employees.associateWith { emp -> db.getServicesForEmployee(emp.id) }
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Employees" }
-                        table {
-                            style = "border-collapse: collapse; width: 100%;"
-                            thead {
-                                tr {
-                                    listOf("ID", "Name", "Phone", "Shop", "Services", "Actions").forEach {
-                                        th {
-                                            style = "border: 1px solid #ccc; padding: 8px;"
-                                            +it
+                call.respondAdminPage(
+                    titleText = "Employees",
+                    subtitle = "Assign employees to a shop and services",
+                    activePath = "/employees",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All employees" }
+                            table {
+                                thead {
+                                    tr {
+                                        listOf("ID", "Name", "Phone", "Shop", "Services", "Actions").forEach {
+                                            th { +it }
                                         }
                                     }
                                 }
-                            }
-                            tbody {
-                                for (emp in employees) {
-                                    tr {
-                                        td { style = "border: 1px solid #ccc; padding: 8px;"; +emp.id.toString() }
-                                        td { style = "border: 1px solid #ccc; padding: 8px;"; +emp.name }
-                                        td { style = "border: 1px solid #ccc; padding: 8px;"; +(emp.phone ?: "") }
+                                tbody {
+                                    for (emp in employees) {
+                                        tr {
+                                            td { +emp.id.toString() }
+                                            td { +emp.name }
+                                            td { +(emp.phone ?: "") }
 
-                                        // Shop
-                                        td {
-                                            style = "border: 1px solid #ccc; padding: 8px;"
-                                            val shopId = employeeShopMap[emp]
-                                            val shopName = shopId?.let { shopsById[it]?.name } ?: "None"
-                                            +shopName
-                                        }
+                                            // Shop
+                                            td {
+                                                val shopId = employeeShopMap[emp]
+                                                val shopName = shopId?.let { shopsById[it]?.name } ?: "None"
+                                                +shopName
+                                            }
 
-                                        // Services
-                                        td {
-                                            style = "border: 1px solid #ccc; padding: 8px;"
-                                            val empServices = employeeServicesMap[emp].orEmpty()
-                                            if (empServices.isEmpty()) {
-                                                +"–"
-                                            } else {
-                                                ul {
-                                                    for (srv in empServices) {
-                                                        li { +"${srv.name} (${srv.price} kr)" }
+                                            // Services
+                                            td {
+                                                val empServices = employeeServicesMap[emp].orEmpty()
+                                                if (empServices.isEmpty()) {
+                                                    span("badge") { +"No services" }
+                                                } else {
+                                                    ul {
+                                                        for (srv in empServices.take(4)) {
+                                                            li { +"${srv.name} (${srv.price} kr)" }
+                                                        }
+                                                        if (empServices.size > 4) {
+                                                            li { span("badge") { +"+${empServices.size - 4} more" } }
+                                                        }
                                                     }
                                                 }
                                             }
-                                        }
 
-                                        // Actions
-                                        td {
-                                            style = "border: 1px solid #ccc; padding: 8px;"
-                                            a(href = "/employees/edit?id=${emp.id}") { +"Edit" }
-                                            +" | "
-                                            a(href = "/employees/delete?id=${emp.id}") { +"Delete" }
+                                            // Actions
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/employees/edit?id=${emp.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/employees/delete?id=${emp.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete employee ${emp.name}?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        br()
-                        a(href = "/employees/add") { +"Add New Employee" }
-                    }
-                }
-            }
 
-            get("/employees/add") {
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Add New Employee" }
-                        form(action = "/employees/add", method = FormMethod.post) {
-                            textInput { name = "name"; placeholder = "Full Name" }
-                            br()
-                            textInput { name = "phone"; placeholder = "Phone (optional)" }
-                            br()
-                            submitInput { value = "Add Employee" }
+                        div("panel") {
+                            h3 { +"Add new employee" }
+                            form(action = "/employees/add", method = FormMethod.post) {
+                                label { +"Full name" }
+                                textInput { name = "name"; placeholder = "Full Name" }
+                                label { +"Phone (optional)" }
+                                textInput { name = "phone"; placeholder = "+45 12 34 56 78" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add employee" }
+                            }
                         }
                     }
                 }
@@ -786,38 +929,97 @@ class WebAdmin(private val db: DataBase) {
                 val shops = db.getAllShops()
                 val currentShopId = db.getShopIdForEmployee(id)
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Edit Employee" }
-                        form(action = "/employees/edit", method = FormMethod.post) {
-                            hiddenInput { name = "id"; value = employee.id.toString() }
-                            h5 { +"Name: " }
-                            textInput {
-                                name = "name"
-                                value = employee.name
+                val allServices = db.getAllServices()
+                val employeeServices = db.getServicesForEmployee(id).associateBy { it.id }
+
+                call.respondAdminPage(
+                    titleText = "Edit employee",
+                    subtitle = employee.name,
+                    activePath = "/employees",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Details" }
+                            form(action = "/employees/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = employee.id.toString() }
+                                label { +"Name" }
+                                textInput {
+                                    name = "name"
+                                    value = employee.name
+                                }
+                                label { +"Phone" }
+                                textInput {
+                                    name = "phone"
+                                    value = employee.phone ?: ""
+                                }
+                                label { +"Shop" }
+                                select {
+                                    name = "shopId"
+                                    option { value = ""; +"-- No Shop --" }
+                                    for (shop in shops) {
+                                        option {
+                                            value = shop.id.toString()
+                                            if (shop.id == currentShopId) selected = true
+                                            +shop.name
+                                        }
+                                    }
+                                }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save changes" }
                             }
-                            br()
-                            h5 { +"Phone: " }
-                            textInput {
-                                name = "phone"
-                                value = employee.phone ?: ""
+                        }
+
+                        div("panel") {
+                            h3 { +"Services" }
+                            p("hint") { +"Assign services this employee can perform." }
+
+                            // Assign
+                            form(action = "/employees/services/assign", method = FormMethod.post) {
+                                hiddenInput { name = "employee_id"; value = employee.id.toString() }
+                                label { +"Add service" }
+                                select {
+                                    name = "service_id"
+                                    for (svc in allServices) {
+                                        option {
+                                            value = svc.id.toString()
+                                            +"${svc.name} (${svc.price} kr)"
+                                        }
+                                    }
+                                }
+                                br()
+                                submitInput(classes = "btn") { value = "Assign" }
                             }
-                            br()
-                            h5 { +"Shop: " }
-                            select {
-                                name = "shopId"
-                                option { value = ""; +"-- No Shop --" }
-                                for (shop in shops) {
-                                    option {
-                                        value = shop.id.toString()
-                                        if (shop.id == currentShopId) selected = true
-                                        +shop.name
+
+                            hr()
+                            if (employeeServices.isEmpty()) {
+                                span("badge") { +"No services assigned" }
+                            } else {
+                                table {
+                                    thead {
+                                        tr {
+                                            th { +"Service" }
+                                            th { +"Price" }
+                                            th { +"Actions" }
+                                        }
+                                    }
+                                    tbody {
+                                        for (svc in employeeServices.values) {
+                                            tr {
+                                                td { +svc.name }
+                                                td { +"${svc.price} kr" }
+                                                td {
+                                                    div("actions") {
+                                                        a(
+                                                            href = "/employees/services/unassign?employee_id=${employee.id}&service_id=${svc.id}",
+                                                            classes = "btn danger",
+                                                        ) { +"Unassign" }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            br()
-                            submitInput { value = "Save Changes" }
                         }
                     }
                 }
@@ -843,71 +1045,89 @@ class WebAdmin(private val db: DataBase) {
                 call.respondRedirect("/employees")
             }
 
+            // Service assignment (moved from /assign-services page)
+            post("/employees/services/assign") {
+                val params = call.receiveParameters()
+                val empId = params["employee_id"]?.toIntOrNull()
+                val svcId = params["service_id"]?.toIntOrNull()
+                if (empId != null && svcId != null) {
+                    db.assignServiceToEmployee(empId, svcId)
+                }
+                call.respondRedirect("/employees/edit?id=$empId")
+            }
+
+            get("/employees/services/unassign") {
+                val empId = call.request.queryParameters["employee_id"]?.toIntOrNull()
+                val svcId = call.request.queryParameters["service_id"]?.toIntOrNull()
+                if (empId != null && svcId != null) {
+                    db.removeServiceFromEmployee(empId, svcId)
+                }
+                call.respondRedirect("/employees/edit?id=$empId")
+            }
+
             // Services
             get("/services") {
                 val services = db.getAllServices()
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Services" }
-                        table {
-                            style = "border-collapse: collapse; width: 100%; text-align: center;"
-                            thead {
-                                tr {
-                                    th { +"ID" }
-                                    th { +"Name" }
-                                    th { +"Price (kr)" }
-                                    th { +"Duration (min)" }
-                                    th { +"Actions" }
-                                }
-                            }
-                            tbody {
-                                for (service in services) {
+                call.respondAdminPage(
+                    titleText = "Services",
+                    subtitle = "Manage service catalog (price + duration)",
+                    activePath = "/services",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All services" }
+                            table {
+                                thead {
                                     tr {
-                                        td { +service.id.toString() }
-                                        td { +service.name }
-                                        td { +"${"%.2f".format(service.price)}" }
-                                        td { +service.duration.toString() }
-                                        td {
-                                            a(href = "/services/edit?id=${service.id}") { +"[Edit]" }
-                                            +" "
-                                            a(href = "/services/delete?id=${service.id}") { +"[Delete]" }
+                                        th { +"ID" }
+                                        th { +"Name" }
+                                        th { +"Price" }
+                                        th { +"Duration" }
+                                        th { +"Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for (service in services) {
+                                        tr {
+                                            td { +service.id.toString() }
+                                            td { +service.name }
+                                            td { +"${"%.2f".format(service.price)} kr" }
+                                            td { +"${service.duration} min" }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/services/edit?id=${service.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/services/delete?id=${service.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete service ${service.name}?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        br()
-                        a(href = "/services/add") { +"Add New Service" }
-                    }
-                }
-            }
 
-
-            get("/services/add") {
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Add New Service" }
-                        form(action = "/services/add", method = FormMethod.post) {
-                            h5 { +"Name" }
-                            textInput { name = "name"; placeholder = "Service Name" }
-                            br()
-                            h5 { +"Price" }
-                            numberInput {
-                                name = "price"
-                                placeholder = "Price"
-                                step = "0.01"
+                        div("panel") {
+                            h3 { +"Add new service" }
+                            form(action = "/services/add", method = FormMethod.post) {
+                                label { +"Name" }
+                                textInput { name = "name"; placeholder = "Service Name" }
+                                label { +"Price (kr)" }
+                                numberInput {
+                                    name = "price"
+                                    placeholder = "Price"
+                                    step = "0.01"
+                                }
+                                label { +"Duration (minutes)" }
+                                numberInput {
+                                    name = "duration"
+                                    placeholder = "Duration"
+                                    step = "5"
+                                }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add service" }
                             }
-                            br()
-                            h5 { +"Duration" }
-                            numberInput {
-                                name = "duration"
-                                placeholder = "Duration"
-                                step = "5"
-                            }
-                            br()
-                            submitInput { value = "Add Service" }
                         }
                     }
                 }
@@ -942,26 +1162,30 @@ class WebAdmin(private val db: DataBase) {
                     call.respondRedirect("/services")
                     return@get
                 }
-                call.respondHtml {
-                    body {
-                        header()
-                        h2 { +"Edit Service" }
+                call.respondAdminPage(
+                    titleText = "Edit service",
+                    subtitle = service.name,
+                    activePath = "/services",
+                ) {
+                    div("panel") {
                         form(action = "/services/edit", method = FormMethod.post) {
                             hiddenInput { name = "id"; value = service.id.toString() }
+                            label { +"Name" }
                             textInput { name = "name"; value = service.name }
-                            br()
+                            label { +"Price (kr)" }
                             numberInput {
                                 name = "price"
                                 value = "%.2f".format(service.price)
                                 step = "0.01"
                             }
-                            br()
+                            label { +"Duration (min)" }
                             numberInput {
                                 name = "duration"
                                 value = "%d".format(service.duration)
                                 step = "1"
                             }
-                            submitInput { value = "Save Changes" }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Save changes" }
                         }
                     }
                 }
@@ -985,42 +1209,58 @@ class WebAdmin(private val db: DataBase) {
                 val services = db.getAllServices()
                 val assignments = db.getAllEmployeeServiceRelations()
 
-                call.respondHtml {
-                    body {
-                        header()
-                        h3 { +"Assign New Service" }
+                call.respondAdminPage(
+                    titleText = "Assign services",
+                    subtitle = "(Deprecated) Use Employees → Edit to manage assignments.",
+                    activePath = "/employees",
+                ) {
+                    div("panel") {
+                        p("hint") { +"This page is kept for backward compatibility. Please use Employees → Edit." }
+                        div("actions") {
+                            a(href = "/employees", classes = "btn primary") { +"Go to Employees" }
+                        }
+                    }
+
+                    // Still show something useful here for now
+                    div("panel") {
+                        h3 { +"Quick assign" }
                         form(action = "/assign-services/add", method = FormMethod.post) {
+                            label { +"Employee" }
                             select {
                                 name = "employeeId"
                                 for (emp in employees) {
                                     option { value = emp.id.toString(); +emp.name }
                                 }
                             }
-                            +" "
+                            label { +"Service" }
                             select {
                                 name = "serviceId"
                                 for (svc in services) {
                                     option { value = svc.id.toString(); +svc.name }
                                 }
                             }
-                            +" "
-                            submitInput { value = "Assign" }
+                            br()
+                            submitInput(classes = "btn") { value = "Assign" }
                         }
 
-                        h3 { +"Current Assignments" }
-                        ul {
-                            val grouped = assignments.groupBy { it.first }
-
-                            for ((employee, services) in grouped) {
-                                div {
-                                    style = "margin-bottom: 20px; padding: 10px; border-bottom: 1px solid #ccc;"
+                        hr()
+                        h3 { +"Current assignments" }
+                        val grouped = assignments.groupBy { it.first }
+                        if (grouped.isEmpty()) {
+                            span("badge") { +"No assignments" }
+                        } else {
+                            for ((employee, svcs) in grouped) {
+                                div("panel") {
                                     h3 { +"${employee.name} (${employee.phone})" }
                                     ul {
-                                        for ((_, service) in services) {
+                                        for ((_, service) in svcs) {
                                             li {
                                                 +"${service.name} (${service.price} kr)"
                                                 +" "
-                                                a(href = "/unassign-service?employee_id=${employee.id}&service_id=${service.id}") { +"[Unassign]" }
+                                                a(
+                                                    href = "/unassign-service?employee_id=${employee.id}&service_id=${service.id}",
+                                                    classes = "btn danger",
+                                                ) { +"Unassign" }
                                             }
                                         }
                                     }
@@ -1057,46 +1297,49 @@ class WebAdmin(private val db: DataBase) {
                 val employees = db.getAllEmployees().associateBy { it.id }
                 val shops = db.getAllShops().associateBy { it.id }
 
-                call.respondHtml {
-                    head { title("Appointments") }
-                    body {
-                        header()
-                        h2 { +"Appointments" }
+                call.respondAdminPage(
+                    titleText = "Appointments",
+                    subtitle = "Read-only overview (bookings are created via public booking flow)",
+                    activePath = "/appointments",
+                ) {
+                    div("panel") {
                         table {
-                            style = "border-collapse: collapse; width: 100%; text-align: center;"
-                            tr {
-                                th { +"ID" }
-                                th { +"Employee" }
-                                th { +"Shop" }
-                                th { +"Date/Time" }
-                                th { +"Duration (min)" }
-                                th { +"Price (DKK)" }
-                                th { +"Services" }
-                            }
-                            for (appt in appointments) {
-                                val services = db.getServicesForAppointment(appt.id)
+                            thead {
                                 tr {
-                                    td { +"${appt.id}" }
-                                    td { +employees[appt.employeeId]?.name.orEmpty() }
-                                    td { +shops[appt.shopId]?.name.orEmpty() }
-                                    td { +java.time.Instant.ofEpochMilli(appt.dateTime).toString() }
-                                    td { +"${appt.duration}" }
-                                    td { +"${"%.2f".format(appt.price)}" }
-                                    td {
-                                        ul {
-                                            services.forEach { s ->
-                                                li { +"${s.name} (${s.price} DKK)" }
+                                    th { +"ID" }
+                                    th { +"Employee" }
+                                    th { +"Shop" }
+                                    th { +"Date/Time" }
+                                    th { +"Duration" }
+                                    th { +"Price" }
+                                    th { +"Services" }
+                                }
+                            }
+                            tbody {
+                                for (appt in appointments) {
+                                    val services = db.getServicesForAppointment(appt.id)
+                                    tr {
+                                        td { +"${appt.id}" }
+                                        td { +employees[appt.employeeId]?.name.orEmpty() }
+                                        td { +shops[appt.shopId]?.name.orEmpty() }
+                                        td { +java.time.Instant.ofEpochMilli(appt.dateTime).toString() }
+                                        td { +"${appt.duration} min" }
+                                        td { +"${"%.2f".format(appt.price)} DKK" }
+                                        td {
+                                            if (services.isEmpty()) {
+                                                span("badge") { +"–" }
+                                            } else {
+                                                ul {
+                                                    services.forEach { s ->
+                                                        li { +"${s.name} (${s.price} DKK)" }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        br()
-                        val bookingToken = db.generateBookingToken( 0, -1, "12345678")
-                        val baseUrl = PublicBaseUrl.fromCall(call)
-                        val fullUrl = "$baseUrl/api/book?token=$bookingToken"
-                        a(href = fullUrl) { +"Add New Appointment" }
                     }
                 }
             }
@@ -1120,41 +1363,62 @@ class WebAdmin(private val db: DataBase) {
 
 
             get("/test-booking-link") {
-                val shops = db.getAllShops() // Replace with your actual method to get shops
+                val shops = db.getAllShops()
 
-                val optionsHtml = shops.joinToString("\n") { shop ->
-                    """<option value="${shop.id}">${shop.name}</option>"""
+                call.respondAdminPage(
+                    titleText = "Booking link tools",
+                    subtitle = "Generate a booking link (or SMS text) for a phone number",
+                    activePath = "/test-booking-link",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Generate booking link" }
+                            form(action = "/test-booking-link", method = FormMethod.post) {
+                                label { +"Shop" }
+                                select {
+                                    id = "shopSelect"
+                                    name = "shop_id"
+                                    required = true
+                                    for (s in shops) {
+                                        option { value = s.id.toString(); +s.name }
+                                    }
+                                }
+                                label { +"Phone" }
+                                textInput {
+                                    name = "phone"
+                                    required = true
+                                    placeholder = "+45 12 34 56 78"
+                                }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Generate link" }
+                            }
+                        }
+
+                        div("panel") {
+                            h3 { +"Generate SMS text" }
+                            p("hint") { +"Uses /api/booking/create to generate the message body." }
+                            form(action = "/api/booking/create", method = FormMethod.post) {
+                                label { +"Shop" }
+                                select {
+                                    id = "shopSelect2"
+                                    name = "shop_id"
+                                    required = true
+                                    for (s in shops) {
+                                        option { value = s.id.toString(); +s.name }
+                                    }
+                                }
+                                label { +"Phone" }
+                                textInput {
+                                    name = "phone"
+                                    required = true
+                                    placeholder = "+45 12 34 56 78"
+                                }
+                                br()
+                                submitInput(classes = "btn") { value = "Generate SMS text" }
+                            }
+                        }
+                    }
                 }
-
-                call.respondText(
-                    """
-        <html>
-          <body>
-            <form action="/test-booking-link" method="post">
-              <label for="shopSelect">Shop:</label>
-              <select id="shopSelect" name="shop_id" required>
-                $optionsHtml
-              </select>
-              <br/>
-              Phone: <input name="phone" type="text" required />
-              <br/>
-              <button type="submit">Generate Link</button>
-            </form>
-            <br>
-            <form action="/api/booking/create" method="post">
-              <label for="shopSelect2">Shop:</label>
-              <select id="shopSelect2" name="shop_id" required>
-                $optionsHtml
-              </select>
-              <br/>
-              Phone: <input name="phone" type="text" required />
-              <br/>
-              <button type="submit">Generate SMS text</button>
-            </form>
-          </body>
-        </html>
-        """.trimIndent(), ContentType.Text.Html
-                )
             }
 
             post("/test-booking-link") {
@@ -1182,19 +1446,5 @@ class WebAdmin(private val db: DataBase) {
         }
     }
 
-    fun FlowContent.header() {
-        div {
-            link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
-            a(href = "/") { +"Home" }; +" | "
-            a(href = "/managers") { +"Managers" }; +" | "
-            a(href = "/shops") { +"Shops" }; +" | "
-            a(href = "/twilio/setup") { +"Twilio setup" }; +" | "
-            a(href = "/employees") { +"Employees" }; +" | "
-            a(href = "/services") { +"Services" }; +" | "
-            a(href = "/assign-services") { +"Assign Services" }; +" | "
-            a(href = "/appointments") { +"Appointments" }; +" | "
-            a(href = "/test-booking-link") { +"Booking link" }; +" | "
-            a(href = "/logout") { +"Logout" }
-        }
-    }
+    // Old header removed in favor of sidebar navigation via adminPage().
 } 
