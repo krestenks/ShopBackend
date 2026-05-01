@@ -1120,6 +1120,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         updateStmt.close()
     }
 
+    /**
+     * Overrides the computed appointment price (e.g. for special offers).
+     *
+     * NOTE: This writes directly to `appointments.price`.
+     */
+    fun updateAppointmentPrice(appointmentId: Int, price: Double) {
+        val updateStmt = connection.prepareStatement("UPDATE appointments SET price = ? WHERE id = ?")
+        updateStmt.setDouble(1, price)
+        updateStmt.setInt(2, appointmentId)
+        updateStmt.executeUpdate()
+        updateStmt.close()
+    }
+
     fun isAppointmentOverlapping(employeeId: Int, startMillis: Long, durationMinutes: Int): Boolean {
         val endMillis = startMillis + durationMinutes * 60 * 1000L
         // Query to check if any existing appointment for the employee overlaps with [startMillis, endMillis)

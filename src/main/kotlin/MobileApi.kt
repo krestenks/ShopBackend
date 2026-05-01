@@ -39,6 +39,8 @@ data class CreateBookingRequest(
     val voiceCallId: Int? = null,         // optional: link booking to ongoing call
     val totalDuration: Int = 0,           // pre-computed by client; used as fallback
     val customerPhone: String? = null,    // caller's phone — auto-creates customer row if provided
+    /** If set, overrides the calculated sum of service prices for this appointment. */
+    val customPrice: Double? = null,
 )
 
 @Serializable
@@ -755,6 +757,11 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
                     db.addServicesToAppointment(appointmentId, serviceIds)
+
+                    // Optional price override (special offer). If set, it wins over the service sum.
+                    body.customPrice?.let { overridePrice ->
+                        db.updateAppointmentPrice(appointmentId, overridePrice)
+                    }
 
                     // Link to ongoing call if callId provided
                     val linkedCallId = body.voiceCallId
