@@ -47,14 +47,22 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
     // Use this for TwiML that is played to the *customer* (not operator whisper/accept).
     fun customerTwiml(xmlInsideResponse: String): String = twiml(customerTtsLeadInPause + xmlInsideResponse)
 
-    fun isShopOpenNow(shopId: Int): Boolean {
-        val now = java.time.ZonedDateTime.now()
-        val dow = now.dayOfWeek.value // 1=Mon..7=Sun
-        db.ensureDefaultShopOpeningHours(shopId)
-        val row = db.getShopOpeningHours(shopId).firstOrNull { it.dayOfWeek == dow } ?: return true
-        if (row.closed) return false
-        val minutes = now.hour * 60 + now.minute
-        return minutes in row.openMinute until row.closeMinute
+    /**
+     * Effective open/closed check, respecting the per-shop phone override.
+     *
+     * override:
+     *  - "open"   -> always open
+     *  - "closed" -> always closed
+     *  - null/"auto" -> use opening-hours schedule
+     */
+    fun isShopOpenEffectiveNow(shopId: Int): Boolean {
+        val vc = db.getShopVoiceConfig(shopId)
+        val mode = vc.phoneOverride?.trim()?.lowercase()
+        return when (mode) {
+            "open" -> true
+            "closed" -> false
+            else -> db.isShopOpenByScheduleNow(shopId)
+        }
     }
 
     // ── Outbound "ready" TwiML (unchanged) ───────────────────────────────────
@@ -137,7 +145,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
         db.updateCallCustomer(callId, customerId, if (isKnownCustomer) "known" else "unknown")
 
-        val isOpen      = isShopOpenNow(shopId)
+        val isOpen      = isShopOpenEffectiveNow(shopId)
         val tempClosed  = voice.temporaryOperatorClosed
         val bizName     = voice.businessName ?: "the shop"
 
@@ -210,7 +218,9 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
         // ── Known caller: show DTMF menu ──────────────────────────────────────
         db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_MENU)
-        val menuAction = "$base/api/twilio/voice/menu?callId=$callId&attempt=1&isOpen=${isOpen}&tempClosed=${tempClosed}&shopId=$shopId"
+        // IMPORTANT: we do not pass isOpen/tempClosed as query params because the manager may
+        // change phone status live while the customer is in the menu.
+        val menuAction = "$base/api/twilio/voice/menu?callId=$callId&attempt=1&shopId=$shopId"
         val welcomeMsg = if (isOpen) voice.welcomeOpenMessage else voice.welcomeClosedMessage
 
         val xml = """
@@ -241,8 +251,6 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val to      = (params["To"]     ?: call.request.queryParameters["To"]     ?: "").trim()
             val callId  = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
             val attempt = call.request.queryParameters["attempt"]?.toIntOrNull() ?: 1
-            val isOpen  = call.request.queryParameters["isOpen"]?.toBooleanStrictOrNull() ?: true
-            val tempClosed = call.request.queryParameters["tempClosed"]?.toBooleanStrictOrNull() ?: false
             val shopId  = call.request.queryParameters["shopId"]?.toIntOrNull()
                 ?: (db.findShopIdByTwilioNumber(to) ?: 1)
 
@@ -252,9 +260,13 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
                 ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
 
+            // Re-evaluate open/closed status LIVE (manager may override at any time)
+            val isOpen = isShopOpenEffectiveNow(shopId)
+            val tempClosed = voice.temporaryOperatorClosed
+
             fun menuAgain(nextAttempt: Int): String {
                 val menuAction = "$base/api/twilio/voice/menu" +
-                        "?callId=$callId&attempt=$nextAttempt&isOpen=$isOpen&tempClosed=$tempClosed&shopId=$shopId"
+                        "?callId=$callId&attempt=$nextAttempt&shopId=$shopId"
                 return """
                     <Gather numDigits="1" timeout="15" action="${escapeForXml(menuAction)}" method="POST">
                       <Say voice="Polly.Amy-Neural" language="en-GB">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>

@@ -72,6 +72,8 @@ data class ShopVoiceConfig(
     val temporaryOperatorClosed: Boolean = false,
     val temporaryOperatorClosedMessage: String = "Our phones are temporarily unavailable. Please try again in 30 minutes.",
     val businessName: String? = null,
+    /** null/"auto" = follow opening hours schedule; "open" or "closed" forces state */
+    val phoneOverride: String? = null,
 )
 
 // ─── Voice call log ──────────────────────────────────────────────────────────
@@ -270,7 +272,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 twilio_number TEXT,
                 operator_phone TEXT,
                 welcome_open_message TEXT,
-                welcome_closed_message TEXT
+                welcome_closed_message TEXT,
+                temporary_operator_closed INTEGER NOT NULL DEFAULT 0,
+                temporary_operator_closed_message TEXT,
+                business_name TEXT,
+                phone_override TEXT
             );
             """
             ,
@@ -345,6 +351,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN temporary_operator_closed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE shop_voice_config ADD COLUMN temporary_operator_closed_message TEXT",
             "ALTER TABLE shop_voice_config ADD COLUMN business_name TEXT",
+            "ALTER TABLE shop_voice_config ADD COLUMN phone_override TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
@@ -371,7 +378,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
         val sql = """
             SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message,
-                   temporary_operator_closed, temporary_operator_closed_message, business_name
+                   temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override
             FROM shop_voice_config WHERE shop_id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -388,6 +395,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     temporaryOperatorClosedMessage = rs.getString("temporary_operator_closed_message")
                         ?: ShopVoiceConfig(shopId).temporaryOperatorClosedMessage,
                     businessName = rs.getString("business_name"),
+                    phoneOverride = rs.getString("phone_override"),
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -398,8 +406,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
         val sql = """
             INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message,
-                welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message, business_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 twilio_number = excluded.twilio_number,
                 operator_phone = excluded.operator_phone,
@@ -407,7 +415,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 welcome_closed_message = excluded.welcome_closed_message,
                 temporary_operator_closed = excluded.temporary_operator_closed,
                 temporary_operator_closed_message = excluded.temporary_operator_closed_message,
-                business_name = excluded.business_name
+                business_name = excluded.business_name,
+                phone_override = excluded.phone_override
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -419,8 +428,35 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(6, if (config.temporaryOperatorClosed) 1 else 0)
             stmt.setString(7, config.temporaryOperatorClosedMessage)
             stmt.setString(8, config.businessName)
+            stmt.setString(9, config.phoneOverride)
             stmt.executeUpdate()
         }
+    }
+
+    /** Upsert only the phone override without overwriting other voice config fields. */
+    fun upsertShopPhoneOverride(shopId: Int, phoneOverride: String?) {
+        val sql = """
+            INSERT INTO shop_voice_config (shop_id, phone_override)
+            VALUES (?, ?)
+            ON CONFLICT(shop_id) DO UPDATE SET
+                phone_override = excluded.phone_override
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phoneOverride)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Opening-hours check only (ignores overrides). */
+    fun isShopOpenByScheduleNow(shopId: Int, zoneId: ZoneId = ZoneId.of("Europe/Copenhagen")): Boolean {
+        val now = ZonedDateTime.now(zoneId)
+        val dow = now.dayOfWeek.value // 1=Mon..7=Sun
+        ensureDefaultShopOpeningHours(shopId)
+        val row = getShopOpeningHours(shopId).firstOrNull { it.dayOfWeek == dow } ?: return true
+        if (row.closed) return false
+        val minutes = now.hour * 60 + now.minute
+        return minutes in row.openMinute until row.closeMinute
     }
 
     // =========================================================================

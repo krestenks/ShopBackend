@@ -66,6 +66,24 @@ data class MeResponse(
 data class CallCustomerResponse(val success: Boolean, val status: Int, val twilio: String)
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?)
 
+// ─── Phone status (open/closed) override ──────────────────────────────────────
+
+@Serializable
+data class PhoneStatusResponse(
+    /** Resolved effective status after applying override + schedule: "open" | "closed" */
+    val status: String,
+    /** Requested mode: "auto" | "open" | "closed" */
+    val mode: String,
+    /** What the opening-hours schedule says right now (ignores override). */
+    val scheduledOpen: Boolean,
+)
+
+@Serializable
+data class SetPhoneStatusRequest(
+    /** "auto" | "open" | "closed" */
+    val mode: String,
+)
+
 suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginInfo? {
     val authHeader = call.request.headers["Authorization"]
     println("Authorization header received: $authHeader")  // Log the token
@@ -152,6 +170,70 @@ class MobileApi(private val db: DataBase) {
             }
 
             authenticate("jwt") {
+
+                // ─────────────────────────────────────────────────────────────
+                // Phone open/closed status (schedule + manual override)
+                // ─────────────────────────────────────────────────────────────
+
+                fun normalizeMode(input: String?): String {
+                    return when (input?.trim()?.lowercase()) {
+                        "open" -> "open"
+                        "closed" -> "closed"
+                        "auto", null, "" -> "auto"
+                        else -> "auto"
+                    }
+                }
+
+                fun buildPhoneStatus(shopId: Int): PhoneStatusResponse {
+                    val voice = db.getShopVoiceConfig(shopId)
+                    val mode = normalizeMode(voice.phoneOverride)
+                    val scheduledOpen = db.isShopOpenByScheduleNow(shopId)
+                    val isOpen = when (mode) {
+                        "open" -> true
+                        "closed" -> false
+                        else -> scheduledOpen
+                    }
+                    val status = if (isOpen) "open" else "closed"
+                    return PhoneStatusResponse(status = status, mode = mode, scheduledOpen = scheduledOpen)
+                }
+
+                /** Get current phone status for a shop */
+                get("/api/mobile/manager/shops/{shopId}/phone-status") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    call.respond(buildPhoneStatus(shopId))
+                }
+
+                /** Set phone mode for a shop: auto/open/closed */
+                put("/api/mobile/manager/shops/{shopId}/phone-status") {
+                    val loginInfo = authenticateManager() ?: return@put
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@put
+                    }
+
+                    val body = runCatching { call.receive<SetPhoneStatusRequest>() }.getOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val mode = normalizeMode(body.mode)
+                    val dbValue: String? = when (mode) {
+                        "auto" -> null
+                        else -> mode
+                    }
+                    db.upsertShopPhoneOverride(shopId, dbValue)
+
+                    call.respond(buildPhoneStatus(shopId))
+                }
 
                 delete("/api/mobile/manager/appointments/{appointmentId}") {
                     val loginInfo = authenticateManager() ?: return@delete
