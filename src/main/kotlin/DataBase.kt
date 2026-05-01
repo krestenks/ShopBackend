@@ -652,6 +652,34 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return ids.size
     }
 
+    /**
+     * Terminates any currently active calls for the same shop and caller phone.
+     *
+     * This protects against Twilio callback gaps where a previous call never got marked inactive
+     * (e.g. caller hung up while in menu / gather).
+     */
+    fun terminateActiveCallsFromPhone(
+        shopId: Int,
+        fromPhone: String,
+        outcome: VoiceCallOutcome = VoiceCallOutcome.STALE,
+        note: String? = null,
+    ): Int {
+        val phone = fromPhone.trim()
+        if (phone.isBlank()) return 0
+
+        val sql = "SELECT id FROM voice_call WHERE is_active = 1 AND shop_id = ? AND from_phone = ?"
+        val ids = mutableListOf<Int>()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone)
+            val rs = stmt.executeQuery()
+            while (rs.next()) ids += rs.getInt("id")
+        }
+        if (ids.isEmpty()) return 0
+        ids.forEach { id -> terminateCall(id, outcome, note = note ?: "same_caller_cleanup from=$phone") }
+        return ids.size
+    }
+
     fun linkBookingToCall(callId: Int, bookingId: Int) {
         connection.prepareStatement("UPDATE voice_call SET linked_booking_id = ? WHERE id = ?").use { stmt ->
             stmt.setInt(1, bookingId)
