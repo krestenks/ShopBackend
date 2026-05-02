@@ -215,7 +215,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             );
             ""","""
             CREATE TABLE IF NOT EXISTS appointment_services (
-                appointment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                appointment_id INTEGER NOT NULL,
                 service_id INTEGER NOT NULL
             );
             """,
@@ -333,6 +334,47 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         for (sql in sqlStatements) {
             connection.createStatement().use { stmt -> stmt.execute(sql) }
+        }
+
+        // Migration: appointment_services had a broken schema where `appointment_id` was the PRIMARY KEY,
+        // which prevented multiple services being stored per appointment.
+        // We recreate the table with an `id` PK and keep `appointment_id` as a normal FK-ish column.
+        try {
+            val cols = mutableListOf<String>()
+            connection.createStatement().use { stmt ->
+                val rs = stmt.executeQuery("PRAGMA table_info(appointment_services)")
+                while (rs.next()) cols += rs.getString("name")
+            }
+
+            val needsFix = cols.contains("appointment_id") && !cols.contains("id")
+            if (needsFix) {
+                println("Migrating appointment_services schema...")
+                connection.createStatement().use { stmt ->
+                    stmt.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS appointment_services_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            appointment_id INTEGER NOT NULL,
+                            service_id INTEGER NOT NULL
+                        );
+                        """.trimIndent()
+                    )
+                    // Copy existing rows (best-effort)
+                    stmt.execute(
+                        """
+                        INSERT INTO appointment_services_new (appointment_id, service_id)
+                        SELECT appointment_id, service_id FROM appointment_services;
+                        """.trimIndent()
+                    )
+                    stmt.execute("DROP TABLE appointment_services;")
+                    stmt.execute("ALTER TABLE appointment_services_new RENAME TO appointment_services;")
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_appointment_services_appointment_id ON appointment_services(appointment_id);")
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_appointment_services_service_id ON appointment_services(service_id);")
+                }
+                println("appointment_services migration complete.")
+            }
+        } catch (e: Exception) {
+            println("appointment_services migration skipped/failed: ${e.message}")
         }
 
         // Migration: rename old table if it exists

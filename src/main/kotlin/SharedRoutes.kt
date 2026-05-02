@@ -394,7 +394,7 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         val formatterOut = java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d yyyy 'at' HH:mm")
         val dateTimeFormatted = java.time.Instant.ofEpochMilli(appointments.first().first.dateTime)
-            .atZone(java.time.ZoneId.systemDefault())
+            .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
             .format(formatterOut)
 
         call.respondHtml {
@@ -479,7 +479,7 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         val formatter = java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d yyyy 'at' HH:mm")
         val dateTimeFormatted = java.time.Instant.ofEpochMilli(appointment.dateTime)
-            .atZone(java.time.ZoneId.systemDefault())
+            .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
             .format(formatter)
 
         call.respondHtml {
