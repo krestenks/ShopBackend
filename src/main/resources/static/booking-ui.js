@@ -74,12 +74,30 @@ document.addEventListener("DOMContentLoaded", function () {
                     checkbox.dataset.duration = service.duration;
                     checkbox.dataset.price = service.price;
 
-                    const label = document.createElement("label");
-                    label.textContent = ` ${service.name} (${service.duration} min, ${service.price} kr)`;
+                    const textWrap = document.createElement("div");
 
-                    const container = document.createElement("div");
+                    const name = document.createElement("div");
+                    name.className = "service-name";
+                    name.textContent = service.name;
+
+                    const meta = document.createElement("div");
+                    meta.className = "service-meta";
+                    meta.textContent = `${service.duration} min • ${service.price} kr`;
+
+                    textWrap.appendChild(name);
+                    textWrap.appendChild(meta);
+
+                    const container = document.createElement("label");
+                    container.className = "service-item";
                     container.appendChild(checkbox);
-                    container.appendChild(label);
+                    container.appendChild(textWrap);
+
+                    // visual feedback for selection
+                    checkbox.addEventListener("change", () => {
+                        container.dataset.checked = checkbox.checked ? "true" : "false";
+                    });
+                    container.dataset.checked = "false";
+
                     serviceContainer.appendChild(container);
                 });
             })

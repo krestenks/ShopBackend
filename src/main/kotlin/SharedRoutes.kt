@@ -7,17 +7,7 @@ import io.ktor.server.html.respondHtml
 import io.ktor.server.routing.*
 import io.ktor.server.response.*
 import io.ktor.server.request.*
-import kotlinx.html.a
-import kotlinx.html.body
-import kotlinx.html.br
-import kotlinx.html.h1
-import kotlinx.html.h2
-import kotlinx.html.h3
-import kotlinx.html.head
-import kotlinx.html.li
-import kotlinx.html.p
-import kotlinx.html.title
-import kotlinx.html.ul
+import kotlinx.html.*
 import shared.components.BookingUI
 
 
@@ -58,6 +48,9 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             <html>
             <head>
               <title>Book Appointment</title>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <link rel="stylesheet" href="/static/booking.css" type="text/css" />
             </head>
             <body>
             ${BookingUI.getFormHtml(shopId, customerId)}
@@ -291,26 +284,47 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         call.respondHtml {
             head {
+                meta { charset = "utf-8" }
+                meta {
+                    name = "viewport"
+                    content = "width=device-width, initial-scale=1"
+                }
                 title("Booking Confirmation")
+                link(rel = "stylesheet", href = "/static/booking.css", type = "text/css")
             }
             body {
-                h1 { +"Booking Confirmed" }
-                p { +"📅 Your appointment is booked for $dateTimeFormatted." }
-                p { +"👤 Employee: ${employee.name}" }
-                p { +"🏠 Shop address: ${shop.address}" }
+                div(classes = "booking-page") {
+                    div(classes = "booking-card") {
+                        div(classes = "booking-header") {
+                            h1(classes = "booking-title") { +"Booking confirmed" }
+                            p(classes = "booking-subtitle") { +"Your appointment has been booked." }
+                        }
 
-                if (!shop.directions.isNullOrBlank()) {
-                    p {
-                        +"📍 Directions: "
-                        a(href = shop.directions, target = "_blank") { +"Open in Maps" }
-                    }
-                }
+                        div(classes = "success") {
+                            +"✅ Confirmed"
+                        }
 
-                if (services.isNotEmpty()) {
-                    h2 { +"🛠 Selected Services" }
-                    ul {
-                        services.forEach {
-                            li { +"${it.name} (${it.duration} min, ${it.price} kr)" }
+                        div(classes = "details") {
+                            p { +"📅 $dateTimeFormatted" }
+                            p { +"👤 ${employee.name}" }
+                            p { +"🏠 ${shop.address}" }
+
+                            if (!shop.directions.isNullOrBlank()) {
+                                p {
+                                    +"📍 "
+                                    a(href = shop.directions, target = "_blank") { +"Open directions" }
+                                }
+                            }
+
+                            if (services.isNotEmpty()) {
+                                hr {}
+                                h2 { +"Selected services" }
+                                ul {
+                                    services.forEach {
+                                        li { +"${it.name} (${it.duration} min, ${it.price} kr)" }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

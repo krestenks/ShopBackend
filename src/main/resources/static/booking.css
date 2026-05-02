@@ -1,0 +1,181 @@
+/*
+  Customer booking UI (opened from SMS booking link)
+  Mobile-first, dark-mode, no build step.
+*/
+
+:root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --panel: rgba(255,255,255,0.04);
+    --border: #263042;
+    --text: #e6e6e6;
+    --muted: #a8b0bf;
+    --brand: #7c5cff;
+    --brand-2: #24d2ff;
+    --danger: #ff5c7a;
+    --ok: #5CFF9B;
+    --shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+    --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
+    background: radial-gradient(900px 600px at 20% -10%, rgba(124, 92, 255, 0.20), transparent 55%),
+                radial-gradient(900px 600px at 90% -10%, rgba(36, 210, 255, 0.12), transparent 55%),
+                var(--bg);
+    color: var(--text);
+}
+
+a { color: var(--brand-2); text-decoration: none; }
+a:hover { color: #8ae8ff; }
+
+.booking-page {
+    min-height: 100vh;
+    padding: 16px;
+    display: grid;
+    place-items: start center;
+}
+
+.booking-card {
+    width: min(520px, 100%);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px;
+}
+
+.booking-header {
+    margin-bottom: 12px;
+}
+
+.booking-title {
+    margin: 0;
+    font-size: 22px;
+    letter-spacing: 0.2px;
+}
+
+.booking-subtitle {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.booking-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+label {
+    display: block;
+    font-weight: 650;
+    margin-bottom: 6px;
+}
+
+select,
+input[type="text"],
+input[type="tel"],
+textarea {
+    width: 100%;
+    padding: 12px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.03);
+    color: var(--text);
+    outline: none;
+    font-size: 16px; /* prevents iOS zoom */
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+@media (max-width: 420px) {
+    .grid-2 { grid-template-columns: 1fr; }
+}
+
+.services {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+
+.service-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(255,255,255,0.02);
+}
+
+.service-item input {
+    width: 22px;
+    height: 22px;
+}
+
+.service-name { font-weight: 650; }
+.service-meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+/* When JS sets data-checked */
+.service-item[data-checked="true"] {
+    border-color: rgba(124, 92, 255, 0.55);
+    background: rgba(124, 92, 255, 0.14);
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 48px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid rgba(124, 92, 255, 0.55);
+    background: rgba(124, 92, 255, 0.18);
+    color: var(--text);
+    text-decoration: none;
+    cursor: pointer;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    font-size: 16px;
+}
+
+.btn:active { transform: translateY(1px); }
+
+.note {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.success {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(92,255,155,0.35);
+    background: rgba(92,255,155,0.10);
+    color: #b6ffd5;
+}
+
+.details {
+    margin-top: 12px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 12px;
+}
+
+.details p { margin: 8px 0; }
+
+hr { border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 14px 0; }
