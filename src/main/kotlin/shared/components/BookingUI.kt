@@ -14,26 +14,18 @@ object BookingUI {
         <div class="booking-page">
           <div class="booking-card">
             <div class="booking-header">
-              <h1 class="booking-title">Book an appointment</h1>
-              <p class="booking-subtitle">Choose employee, services and an available time slot.</p>
+              <h1 class="booking-title">Book appointments</h1>
+              <p class="booking-subtitle">Add one or more therapists. Each therapist can have different services, but all appointments will be at the same time.</p>
             </div>
 
-            <form class="booking-form" method="POST" action="/api/booking/submit">
+            <form class="booking-form" method="POST" action="/api/booking/submit-multi" id="bookingMultiForm">
               <input type="hidden" name="shop_id" value="$shopId" />
               $customerIdHtml
+              <input type="hidden" name="payload" id="multiPayload" value="" />
 
-              <div>
-                <label for="employeeSelect">Employee</label>
-                <select id="employeeSelect" name="employee_id" required>
-                  <option value="">Select an employee</option>
-                </select>
-              </div>
+              <div id="therapistBlocks"></div>
 
-              <div>
-                <label>Services</label>
-                <div id="serviceCheckboxes" class="services"></div>
-                <div class="note">Select one or more services to see available times.</div>
-              </div>
+              <button class="btn secondary" type="button" id="addTherapistBtn">Add therapist</button>
 
               <div class="grid-2">
                 <div>
@@ -46,8 +38,8 @@ object BookingUI {
                 </div>
               </div>
 
-              <button class="btn" type="submit">Confirm booking</button>
-              <div class="note">You’ll see a confirmation screen after booking.</div>
+              <button class="btn" type="submit">Confirm bookings</button>
+              <div class="note">Time slots shown are only those that match all selected therapists + services.</div>
             </form>
           </div>
         </div>

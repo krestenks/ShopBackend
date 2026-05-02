@@ -9,6 +9,8 @@ import io.ktor.server.response.*
 import io.ktor.server.request.*
 import kotlinx.html.*
 import shared.components.BookingUI
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
@@ -21,6 +23,18 @@ suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingToken
 
 // Accepts a DataBase reference (or other services) as a parameter
 fun Route.sharedBookingRoutes(db: DataBase) {
+
+    @Serializable
+    data class MultiTimeSlotsBlock(val employeeId: Int, val duration: Int)
+
+    @Serializable
+    data class MultiTimeSlotsRequest(val shopId: Int, val date: String, val blocks: List<MultiTimeSlotsBlock>)
+
+    @Serializable
+    data class MultiSubmitBlock(val employeeId: Int, val serviceIds: List<Int>)
+
+    @Serializable
+    data class MultiSubmitPayload(val appointmentTime: String, val date: String? = null, val blocks: List<MultiSubmitBlock>)
 
     get("/api/book") {
         val token = call.request.queryParameters["token"]
@@ -61,6 +75,39 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             """.trimIndent(),
             ContentType.Text.Html
         )
+    }
+
+    // Multi-therapist: return intersection of start times across blocks.
+    post("/api/timeslots/multi") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@post
+        }
+
+        val body = call.receiveText()
+        val req = runCatching {
+            Json { ignoreUnknownKeys = true }.decodeFromString(MultiTimeSlotsRequest.serializer(), body)
+        }.getOrElse {
+            call.respond(HttpStatusCode.BadRequest, "Invalid JSON")
+            return@post
+        }
+
+        // Enforce shopId from token unless token allows override (-1)
+        val shopId = if (bookingInfo.shopId == -1) req.shopId else bookingInfo.shopId
+        if (shopId <= 0) {
+            call.respond(HttpStatusCode.BadRequest, "Invalid shopId")
+            return@post
+        }
+
+        if (req.blocks.isEmpty()) {
+            call.respond(emptyArray<String>())
+            return@post
+        }
+
+        val blocks = req.blocks.map { it.employeeId to it.duration }
+        val slots = db.getAvailableTimeSlotsMulti(shopId, req.date, blocks)
+        call.respond(slots)
     }
 
 
@@ -244,6 +291,159 @@ fun Route.sharedBookingRoutes(db: DataBase) {
 
         // Redirect or respond success
         call.respondRedirect("/api/booking/confirmation?appointment_id=$appointmentId")
+    }
+
+    // Multi-therapist submit endpoint.
+    post("/api/booking/submit-multi") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@post
+        }
+
+        val params = call.receiveParameters()
+        val payloadRaw = params["payload"]
+        if (payloadRaw.isNullOrBlank()) {
+            call.respond(HttpStatusCode.BadRequest, "Missing payload")
+            return@post
+        }
+
+        val payload = runCatching {
+            Json { ignoreUnknownKeys = true }.decodeFromString(MultiSubmitPayload.serializer(), payloadRaw)
+        }.getOrElse {
+            call.respond(HttpStatusCode.BadRequest, "Invalid payload JSON")
+            return@post
+        }
+
+        if (payload.blocks.isEmpty()) {
+            call.respond(HttpStatusCode.BadRequest, "No therapists")
+            return@post
+        }
+
+        val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        val localDateTime = try {
+            java.time.LocalDateTime.parse(payload.appointmentTime, formatter)
+        } catch (e: Exception) {
+            call.respond(HttpStatusCode.BadRequest, "Invalid date/time format.")
+            return@post
+        }
+
+        val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
+        val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
+
+        val shopId = bookingInfo.shopId
+        if (shopId <= 0) {
+            call.respond(HttpStatusCode.BadRequest, "Invalid shop")
+            return@post
+        }
+
+        val blocks = payload.blocks.map { it.employeeId to it.serviceIds }
+
+        val appointmentIds = try {
+            db.createAppointmentsSameTime(shopId = shopId, customerId = bookingInfo.customerId, dateTimeMillis = dateTimeMillis, blocks = blocks)
+        } catch (e: Exception) {
+            call.respond(HttpStatusCode.Conflict, "Could not book all therapists at that time. Please choose another time.")
+            return@post
+        }
+
+        // show confirmation for the first appointment, and pass the rest as query params
+        val qs = buildString {
+            append("/api/booking/confirmation-multi?ids=")
+            append(appointmentIds.joinToString(","))
+        }
+        call.respondRedirect(qs)
+    }
+
+    get("/api/booking/confirmation-multi") {
+        val bookingInfo = call.authenticateBookingToken(db)
+        if (bookingInfo == null) {
+            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing booking token.")
+            return@get
+        }
+
+        db.markBookingTokenUsed(bookingInfo.token)
+
+        val ids = call.request.queryParameters["ids"]
+            ?.split(',')
+            ?.mapNotNull { it.trim().toIntOrNull() }
+            ?.distinct()
+            ?: emptyList()
+
+        if (ids.isEmpty()) {
+            call.respond(HttpStatusCode.BadRequest, "Missing ids")
+            return@get
+        }
+
+        val appointments = ids.mapNotNull { id ->
+            val appt = db.getAppointmentById(id) ?: return@mapNotNull null
+            val employee = db.getEmployeeById(appt.employeeId)
+            val services = db.getServicesForAppointment(id)
+            Triple(appt, employee, services)
+        }
+
+        if (appointments.isEmpty()) {
+            call.respond(HttpStatusCode.NotFound, "Appointments not found")
+            return@get
+        }
+
+        val shop = db.getShopById(appointments.first().first.shopId)
+        if (shop == null) {
+            call.respond(HttpStatusCode.InternalServerError, "Missing shop information")
+            return@get
+        }
+
+        val formatterOut = java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d yyyy 'at' HH:mm")
+        val dateTimeFormatted = java.time.Instant.ofEpochMilli(appointments.first().first.dateTime)
+            .atZone(java.time.ZoneId.systemDefault())
+            .format(formatterOut)
+
+        call.respondHtml {
+            head {
+                meta { charset = "utf-8" }
+                meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
+                title("Booking Confirmation")
+                link(rel = "stylesheet", href = "/static/booking.css", type = "text/css")
+            }
+            body {
+                div(classes = "booking-page") {
+                    div(classes = "booking-card") {
+                        div(classes = "booking-header") {
+                            h1(classes = "booking-title") { +"Bookings confirmed" }
+                            p(classes = "booking-subtitle") { +"All therapists were booked for the same start time." }
+                        }
+
+                        div(classes = "success") { +"✅ Confirmed" }
+
+                        div(classes = "details") {
+                            p { +"📅 $dateTimeFormatted" }
+                            p { +"🏠 ${shop.address}" }
+
+                            if (!shop.directions.isNullOrBlank()) {
+                                p {
+                                    +"📍 "
+                                    a(href = shop.directions, target = "_blank") { +"Open directions" }
+                                }
+                            }
+
+                            hr {}
+                            h2 { +"Therapists" }
+                            ul {
+                                appointments.forEach { (appt, emp, svcs) ->
+                                    li {
+                                        +"${emp?.name ?: "Employee #${appt.employeeId}"}: "
+                                        if (svcs.isEmpty()) {
+                                            +"(no services)"
+                                        } else {
+                                            +svcs.joinToString(", ") { s -> "${s.name} (${s.duration} min)" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     get("/api/booking/confirmation") {

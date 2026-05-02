@@ -73,6 +73,40 @@ a:hover { color: #8ae8ff; }
     gap: 12px;
 }
 
+.therapist-block {
+    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.02);
+    border-radius: 12px;
+    padding: 12px;
+}
+
+.therapist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.therapist-title {
+    font-weight: 800;
+    letter-spacing: 0.2px;
+}
+
+.link-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 6px 0;
+    font-size: 14px;
+}
+
+.link-btn.danger { color: #ff98ac; }
+.link-btn:active { transform: translateY(1px); }
+
 label {
     display: block;
     font-weight: 650;
@@ -87,10 +121,28 @@ textarea {
     padding: 12px 12px;
     border-radius: 12px;
     border: 1px solid var(--border);
-    background: rgba(255,255,255,0.03);
+    /* Opaque background so the page gradient doesn't "shade" the controls */
+    background: #1a2231;
     color: var(--text);
     outline: none;
     font-size: 16px; /* prevents iOS zoom */
+}
+
+select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-image:
+        linear-gradient(45deg, transparent 50%, rgba(230,230,230,0.8) 50%),
+        linear-gradient(135deg, rgba(230,230,230,0.8) 50%, transparent 50%);
+    background-position:
+        calc(100% - 18px) calc(50% - 2px),
+        calc(100% - 12px) calc(50% - 2px);
+    background-size:
+        6px 6px,
+        6px 6px;
+    background-repeat: no-repeat;
+    padding-right: 34px;
 }
 
 .grid-2 {
@@ -150,6 +202,18 @@ textarea {
     letter-spacing: 0.2px;
     font-size: 16px;
 }
+
+.btn.secondary {
+    border-color: rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+}
+
+.btn-row {
+    display: flex;
+    gap: 10px;
+}
+
+.btn-row .btn { width: 100%; }
 
 .btn:active { transform: translateY(1px); }
 

@@ -1148,6 +1148,63 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         updateStmt.close()
     }
 
+    private fun <T> inTransaction(block: () -> T): T {
+        val prevAutoCommit = connection.autoCommit
+        connection.autoCommit = false
+        try {
+            val res = block()
+            connection.commit()
+            return res
+        } catch (e: Exception) {
+            runCatching { connection.rollback() }
+            throw e
+        } finally {
+            connection.autoCommit = prevAutoCommit
+        }
+    }
+
+    /**
+     * Creates multiple appointments at the same start time. Each therapist (employee) may have
+     * different services (and thus duration). Inserts are done in a DB transaction.
+     */
+    fun createAppointmentsSameTime(
+        shopId: Int,
+        customerId: Int,
+        dateTimeMillis: Long,
+        blocks: List<Pair<Int, List<Int>>>,
+    ): List<Int> {
+        require(blocks.isNotEmpty()) { "No therapist blocks" }
+
+        return inTransaction {
+            val appointmentIds = mutableListOf<Int>()
+
+            for ((employeeId, serviceIds) in blocks) {
+                require(employeeId > 0) { "Invalid employeeId" }
+                require(serviceIds.isNotEmpty()) { "Missing services for employeeId=$employeeId" }
+
+                val totalDuration = serviceIds.mapNotNull { getServiceById(it)?.duration }.sum()
+                if (totalDuration <= 0) {
+                    throw IllegalArgumentException("Invalid service durations for employeeId=$employeeId")
+                }
+
+                // Check for overlapping appointments before booking
+                if (isAppointmentOverlapping(employeeId, dateTimeMillis, totalDuration)) {
+                    throw IllegalStateException("Overlapping appointment for employeeId=$employeeId")
+                }
+
+                val appointmentId = addAppointment(employeeId, shopId, customerId, dateTimeMillis, totalDuration)
+                if (appointmentId == -1) {
+                    throw IllegalStateException("Failed to create appointment for employeeId=$employeeId")
+                }
+
+                addServicesToAppointment(appointmentId, serviceIds)
+                appointmentIds += appointmentId
+            }
+
+            appointmentIds
+        }
+    }
+
     /**
      * Overrides the computed appointment price (e.g. for special offers).
      *
@@ -1967,6 +2024,26 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         return result.toTypedArray()
+    }
+
+    /**
+     * Computes the intersection of available start-times across multiple therapists, where
+     * each therapist can have a different duration.
+     */
+    fun getAvailableTimeSlotsMulti(shopId: Int, dateStr: String, blocks: List<Pair<Int, Int>>): Array<String> {
+        if (blocks.isEmpty()) return emptyArray()
+
+        val (firstEmployeeId, firstDuration) = blocks.first()
+        var common = getAvailableTimeSlots(firstEmployeeId, shopId, dateStr, firstDuration).toMutableSet()
+
+        for (i in 1 until blocks.size) {
+            val (employeeId, duration) = blocks[i]
+            val other = getAvailableTimeSlots(employeeId, shopId, dateStr, duration).toSet()
+            common.retainAll(other)
+            if (common.isEmpty()) break
+        }
+
+        return common.sorted().toTypedArray()
     }
 
     // Summarized slots to avoid returning large lists
