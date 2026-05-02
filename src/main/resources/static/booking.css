@@ -43,7 +43,8 @@ a:hover { color: #8ae8ff; }
 
 .booking-card {
     width: min(520px, 100%);
-    background: var(--panel);
+    /* Opaque card background so the page gradient doesn't bleed through */
+    background: #111926;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
