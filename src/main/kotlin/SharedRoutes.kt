@@ -340,7 +340,13 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         val blocks = payload.blocks.map { it.employeeId to it.serviceIds }
 
         val appointmentIds = try {
-            db.createAppointmentsSameTime(shopId = shopId, customerId = bookingInfo.customerId, dateTimeMillis = dateTimeMillis, blocks = blocks)
+            db.createAppointmentsSameTime(
+                shopId = shopId,
+                customerId = bookingInfo.customerId,
+                dateTimeMillis = dateTimeMillis,
+                blocks = blocks,
+                overrideDurationMinutes = null,
+            )
         } catch (e: Exception) {
             call.respond(HttpStatusCode.Conflict, "Could not book all therapists at that time. Please choose another time.")
             return@post

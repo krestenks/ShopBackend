@@ -1254,27 +1254,40 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         customerId: Int,
         dateTimeMillis: Long,
         blocks: List<Pair<Int, List<Int>>>,
+        overrideDurationMinutes: Int? = null,
     ): List<Int> {
         require(blocks.isNotEmpty()) { "No therapist blocks" }
 
         return inTransaction {
             val appointmentIds = mutableListOf<Int>()
 
-            for ((employeeId, serviceIds) in blocks) {
+            // Therapists work in parallel starting at the same time.
+            // The effective calendar block duration should therefore be the MAX duration across all therapists.
+            // Otherwise a shorter therapist could be double-booked midway through a longer multi booking.
+            val perTherapistDurations: List<Int> = blocks.map { (employeeId, serviceIds) ->
                 require(employeeId > 0) { "Invalid employeeId" }
                 require(serviceIds.isNotEmpty()) { "Missing services for employeeId=$employeeId" }
+                val d = serviceIds.mapNotNull { getServiceById(it)?.duration }.sum()
+                if (d <= 0) throw IllegalArgumentException("Invalid service durations for employeeId=$employeeId")
+                d
+            }
+            val computedMaxDuration = perTherapistDurations.maxOrNull() ?: 0
+            val maxDuration = maxOf(
+                computedMaxDuration,
+                overrideDurationMinutes?.takeIf { it > 0 } ?: 0,
+            )
+            if (maxDuration <= 0) {
+                throw IllegalArgumentException("Invalid max duration")
+            }
 
-                val totalDuration = serviceIds.mapNotNull { getServiceById(it)?.duration }.sum()
-                if (totalDuration <= 0) {
-                    throw IllegalArgumentException("Invalid service durations for employeeId=$employeeId")
-                }
-
-                // Check for overlapping appointments before booking
-                if (isAppointmentOverlapping(employeeId, dateTimeMillis, totalDuration)) {
+            for ((employeeId, serviceIds) in blocks) {
+                // Check for overlapping appointments before booking (use maxDuration for the shared block)
+                if (isAppointmentOverlapping(employeeId, dateTimeMillis, maxDuration)) {
                     throw IllegalStateException("Overlapping appointment for employeeId=$employeeId")
                 }
 
-                val appointmentId = addAppointment(employeeId, shopId, customerId, dateTimeMillis, totalDuration)
+                // Store appointment duration as the shared block duration (maxDuration)
+                val appointmentId = addAppointment(employeeId, shopId, customerId, dateTimeMillis, maxDuration)
                 if (appointmentId == -1) {
                     throw IllegalStateException("Failed to create appointment for employeeId=$employeeId")
                 }

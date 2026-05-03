@@ -53,6 +53,11 @@ data class CreateBookingMultiRequest(
     val slots: List<CreateBookingMultiSlot>,
     val voiceCallId: Int? = null,
     val customerPhone: String? = null,
+    /**
+     * Optional override for the booked calendar block length (in minutes).
+     * If set, the backend will use max(overrideDurationMinutes, computedMaxServiceDuration).
+     */
+    val overrideDurationMinutes: Int? = null,
     /** Optional custom price per slot (same ordering as slots). */
     val customPrices: List<Double?>? = null,
 )
@@ -921,6 +926,7 @@ class MobileApi(private val db: DataBase) {
                             customerId = customerId,
                             dateTimeMillis = dateTimeMillis,
                             blocks = blocks,
+                            overrideDurationMinutes = body.overrideDurationMinutes,
                         )
                     } catch (e: IllegalStateException) {
                         // overlap detected
