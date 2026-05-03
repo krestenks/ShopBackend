@@ -1129,6 +1129,46 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return getCustomerIdByPhone(phone) ?: insertNewCustomer(phone)
     }
 
+    fun updateCustomerName(customerId: Int, name: String) {
+        connection.prepareStatement("UPDATE customers SET name = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setInt(2, customerId)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun getAppointmentsForCustomer(customerId: Int, shopId: Int? = null): List<AppointmentWithServices> {
+        val sql = if (shopId != null) {
+            "SELECT * FROM appointments WHERE customer_id = ? AND shop_id = ? ORDER BY date_time DESC"
+        } else {
+            "SELECT * FROM appointments WHERE customer_id = ? ORDER BY date_time DESC"
+        }
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            if (shopId != null) stmt.setInt(2, shopId)
+            val rs = stmt.executeQuery()
+            val appointments = mutableListOf<AppointmentWithServices>()
+            while (rs.next()) {
+                val appointmentId = rs.getInt("id")
+                val services = getServicesForAppointment(appointmentId)
+                appointments += AppointmentWithServices(
+                    id = appointmentId,
+                    employeeId = rs.getInt("employee_id"),
+                    shopId = rs.getInt("shop_id"),
+                    dateTime = rs.getLong("date_time"),
+                    duration = rs.getInt("duration"),
+                    price = rs.getDouble("price"),
+                    services = services,
+                    customer = getCustomerById(rs.getInt("customer_id")),
+                    employee = getEmployeeById(rs.getInt("employee_id")),
+                )
+            }
+            rs.close()
+            return appointments
+        }
+    }
+
 
 
 

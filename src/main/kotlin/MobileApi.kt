@@ -47,6 +47,12 @@ data class CreateBookingRequest(
 data class CreateBookingResponse(val appointmentId: Int, val voiceCallId: Int?)
 
 @Serializable
+data class UpdateCustomerNameRequest(val name: String)
+
+@Serializable
+data class CustomerDetailResponse(val customer: Customer, val appointments: List<AppointmentWithServices>)
+
+@Serializable
 data class LoginRequest(val username: String, val password: String)
 @Serializable
 data class LoginResponse(
@@ -172,6 +178,75 @@ class MobileApi(private val db: DataBase) {
             }
 
             authenticate("jwt") {
+
+                // ─────────────────────────────────────────────────────────────
+                // Customer detail endpoints
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * GET customer details + appointment history for a shop.
+                 *
+                 * GET /api/mobile/manager/shops/{shopId}/customers/{customerId}
+                 */
+                get("/api/mobile/manager/shops/{shopId}/customers/{customerId}") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val customerId = call.parameters["customerId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing customerId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+
+                    val customer = db.getCustomerById(customerId)
+                        ?: return@get call.respond(HttpStatusCode.NotFound, "Customer not found")
+
+                    val appts = db.getAppointmentsForCustomer(customerId, shopId = shopId)
+                    call.respond(CustomerDetailResponse(customer = customer, appointments = appts))
+                }
+
+                /**
+                 * PATCH customer name
+                 *
+                 * PATCH /api/mobile/manager/shops/{shopId}/customers/{customerId}/name
+                 * Body: {"name":"..."}
+                 */
+                patch("/api/mobile/manager/shops/{shopId}/customers/{customerId}/name") {
+                    val loginInfo = authenticateManager() ?: return@patch
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val customerId = call.parameters["customerId"]?.toIntOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing customerId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@patch
+                    }
+
+                    val body = runCatching { call.receive<UpdateCustomerNameRequest>() }.getOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val name = body.name.trim()
+                    if (name.isBlank()) {
+                        return@patch call.respond(HttpStatusCode.BadRequest, "name is required")
+                    }
+
+                    val existing = db.getCustomerById(customerId)
+                        ?: return@patch call.respond(HttpStatusCode.NotFound, "Customer not found")
+
+                    // Basic safety: ensure this customer actually has appointments for this shop.
+                    // (We don't have an explicit customer->shop relation in DB).
+                    val hasAny = db.getAppointmentsForCustomer(customerId, shopId = shopId).isNotEmpty()
+                    if (!hasAny) {
+                        // Keep behavior strict so we don't accidentally edit a customer from another shop.
+                        return@patch call.respond(HttpStatusCode.Forbidden, "Customer not linked to this shop")
+                    }
+
+                    db.updateCustomerName(existing.id, name)
+                    call.respond(HttpStatusCode.NoContent)
+                }
 
                 // ─────────────────────────────────────────────────────────────
                 // Phone open/closed status (schedule + manual override)
