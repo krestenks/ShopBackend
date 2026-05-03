@@ -47,6 +47,29 @@ data class CreateBookingRequest(
 data class CreateBookingResponse(val appointmentId: Int, val voiceCallId: Int?)
 
 @Serializable
+data class CreateBookingMultiRequest(
+    val shopId: Int,
+    val appointmentTime: String,          // "yyyy-MM-dd HH:mm"
+    val slots: List<CreateBookingMultiSlot>,
+    val voiceCallId: Int? = null,
+    val customerPhone: String? = null,
+    /** Optional custom price per slot (same ordering as slots). */
+    val customPrices: List<Double?>? = null,
+)
+
+@Serializable
+data class CreateBookingMultiSlot(
+    val employeeId: Int,
+    val serviceIds: List<Int>,
+)
+
+@Serializable
+data class CreateBookingMultiResponse(
+    val appointmentIds: List<Int>,
+    val voiceCallId: Int? = null,
+)
+
+@Serializable
 data class UpdateCustomerNameRequest(val name: String)
 
 @Serializable
@@ -847,6 +870,87 @@ class MobileApi(private val db: DataBase) {
                     call.respond(
                         HttpStatusCode.Created,
                         CreateBookingResponse(appointmentId = appointmentId, voiceCallId = linkedCallId),
+                    )
+                }
+
+                /**
+                 * POST /api/mobile/manager/booking/create-multi-json
+                 *
+                 * Creates multiple appointments at the SAME start time atomically.
+                 * Either all slots are booked or none are (DB transaction).
+                 */
+                post("/api/mobile/manager/booking/create-multi-json") {
+                    val loginInfo = authenticateManager() ?: return@post
+
+                    val body = runCatching { call.receive<CreateBookingMultiRequest>() }.getOrElse { ex ->
+                        println("[create-multi-json] Body deserialization FAILED: ${ex.message}")
+                        null
+                    } ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val shopId = body.shopId
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@post call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
+
+                    if (body.slots.isEmpty()) {
+                        return@post call.respond(HttpStatusCode.BadRequest, "slots is required")
+                    }
+
+                    // Parse datetime
+                    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                    val localDateTime = runCatching { LocalDateTime.parse(body.appointmentTime, formatter) }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid appointmentTime format")
+
+                    val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
+                    val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
+
+                    // Resolve customer id from phone (same as create-json)
+                    val customerId: Int = when {
+                        !body.customerPhone.isNullOrBlank() -> db.ensureCustomerByPhone(body.customerPhone)
+                        else -> 0
+                    }
+
+                    val appointmentIds = try {
+                        val blocks = body.slots.map { slot ->
+                            require(slot.employeeId > 0) { "Invalid employeeId" }
+                            require(slot.serviceIds.isNotEmpty()) { "serviceIds required" }
+                            slot.employeeId to slot.serviceIds
+                        }
+                        db.createAppointmentsSameTime(
+                            shopId = shopId,
+                            customerId = customerId,
+                            dateTimeMillis = dateTimeMillis,
+                            blocks = blocks,
+                        )
+                    } catch (e: IllegalStateException) {
+                        // overlap detected
+                        return@post call.respond(HttpStatusCode.Conflict, e.message ?: "Conflict")
+                    } catch (e: IllegalArgumentException) {
+                        return@post call.respond(HttpStatusCode.BadRequest, e.message ?: "Bad request")
+                    }
+
+                    // Optional per-slot price override
+                    body.customPrices?.let { prices ->
+                        for (i in appointmentIds.indices) {
+                            val p = prices.getOrNull(i)
+                            if (p != null && p > 0.0) {
+                                db.updateAppointmentPrice(appointmentIds[i], p)
+                            }
+                        }
+                    }
+
+                    // Link to ongoing call if callId provided
+                    val linkedCallId = body.voiceCallId
+                    if (linkedCallId != null && linkedCallId > 0) {
+                        // voice_call has only one linked_booking_id, so link the first one.
+                        appointmentIds.firstOrNull()?.let { firstId ->
+                            db.linkBookingToCall(linkedCallId, firstId)
+                        }
+                    }
+
+                    call.respond(
+                        HttpStatusCode.Created,
+                        CreateBookingMultiResponse(appointmentIds = appointmentIds, voiceCallId = linkedCallId),
                     )
                 }
 
