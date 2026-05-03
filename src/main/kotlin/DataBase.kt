@@ -120,6 +120,8 @@ data class VoiceCallRecord(
     val toPhone: String,
     val customerType: String,          // "unknown" | "known"
     val customerId: Int?,
+    /** If the call was linked to a customer, this may contain the customer's name (if set). */
+    val customerName: String? = null,
     val state: String,
     val outcome: String,
     val isActive: Boolean,
@@ -754,9 +756,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getActiveCallsForShop(shopId: Int): List<VoiceCallRecord> {
         val sql = """
-            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
-                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
-            FROM voice_call WHERE shop_id = ? AND is_active = 1 ORDER BY started_at DESC
+            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+                   vc.customer_type, vc.customer_id,
+                   c.name AS customer_name,
+                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
+            FROM voice_call vc
+            LEFT JOIN customers c ON c.id = vc.customer_id
+            WHERE vc.shop_id = ? AND vc.is_active = 1
+            ORDER BY vc.started_at DESC
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
@@ -766,9 +773,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getRecentCallsForShop(shopId: Int, limit: Int = 50): List<VoiceCallRecord> {
         val sql = """
-            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
-                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
-            FROM voice_call WHERE shop_id = ? ORDER BY started_at DESC LIMIT ?
+            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+                   vc.customer_type, vc.customer_id,
+                   c.name AS customer_name,
+                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
+            FROM voice_call vc
+            LEFT JOIN customers c ON c.id = vc.customer_id
+            WHERE vc.shop_id = ?
+            ORDER BY vc.started_at DESC
+            LIMIT ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
@@ -779,9 +792,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getCallById(callId: Int): VoiceCallRecord? {
         val sql = """
-            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
-                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
-            FROM voice_call WHERE id = ?
+            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+                   vc.customer_type, vc.customer_id,
+                   c.name AS customer_name,
+                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
+            FROM voice_call vc
+            LEFT JOIN customers c ON c.id = vc.customer_id
+            WHERE vc.id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, callId)
@@ -791,9 +808,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getCallByTwilioSid(twilioCallSid: String): VoiceCallRecord? {
         val sql = """
-            SELECT id, shop_id, twilio_call_sid, from_phone, to_phone, customer_type, customer_id,
-                   state, outcome, is_active, started_at, ended_at, linked_booking_id, operator_phone
-            FROM voice_call WHERE twilio_call_sid = ?
+            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+                   vc.customer_type, vc.customer_id,
+                   c.name AS customer_name,
+                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
+            FROM voice_call vc
+            LEFT JOIN customers c ON c.id = vc.customer_id
+            WHERE vc.twilio_call_sid = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setString(1, twilioCallSid)
@@ -823,6 +844,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun buildCallRecordList(rs: java.sql.ResultSet): List<VoiceCallRecord> {
         val result = mutableListOf<VoiceCallRecord>()
         while (rs.next()) {
+            val customerName: String? = try {
+                rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() }
+            } catch (_: Exception) {
+                null
+            }
+
             result += VoiceCallRecord(
                 id = rs.getInt("id"),
                 shopId = rs.getInt("shop_id"),
@@ -831,6 +858,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 toPhone = rs.getString("to_phone"),
                 customerType = rs.getString("customer_type"),
                 customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                customerName = customerName,
                 state = rs.getString("state"),
                 outcome = rs.getString("outcome"),
                 isActive = rs.getInt("is_active") != 0,

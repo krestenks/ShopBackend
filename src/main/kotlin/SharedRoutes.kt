@@ -16,7 +16,7 @@ import kotlinx.serialization.json.Json
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
     val token = request.queryParameters["token"]
         ?: request.headers["X-Booking-Token"]
-        ?: request.cookies["booking_token"] // ✅ new fallback 
+        ?: request.cookies["booking_token"] // ✅ new fallback
     if (token == null) return null
     return db.getBookingTokenInfo(token)
 }
