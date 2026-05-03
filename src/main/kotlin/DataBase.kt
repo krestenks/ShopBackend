@@ -1638,6 +1638,43 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return employees
     }
 
+    /**
+     * Returns only employees that are assigned to the shop AND currently marked available.
+     *
+     * Used for booking UIs so managers/customers don't see therapists that are off.
+     */
+    fun getAvailableEmployeesForShop(shopId: Int): List<Employee> {
+        return try {
+            val employees = mutableListOf<Employee>()
+            val stmt = connection.prepareStatement(
+                """
+                SELECT e.id, e.name, e.phone
+                FROM employees e
+                JOIN employee_shop es ON e.id = es.employee_id
+                WHERE es.shop_id = ? AND es.available = 1
+                ORDER BY e.id
+                """.trimIndent()
+            )
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                employees.add(
+                    Employee(
+                        id = rs.getInt("id"),
+                        name = rs.getString("name"),
+                        phone = rs.getString("phone"),
+                    )
+                )
+            }
+            rs.close()
+            stmt.close()
+            employees
+        } catch (_: Exception) {
+            // Older DB without column => treat all assigned employees as available
+            getEmployeesForShop(shopId)
+        }
+    }
+
     // =========================================================================
     // Employee availability per shop (manager controlled)
     // =========================================================================

@@ -704,7 +704,8 @@ class MobileApi(private val db: DataBase) {
                         return@get
                     }
 
-                    val employees = db.getEmployeesForShop(shopId)
+                    // Only return employees that are currently available, to reduce booking confusion.
+                    val employees = db.getAvailableEmployeesForShop(shopId)
                     call.respond(employees)
                 }
 

@@ -16,7 +16,7 @@ import kotlinx.serialization.json.Json
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
     val token = request.queryParameters["token"]
         ?: request.headers["X-Booking-Token"]
-        ?: request.cookies["booking_token"] // ✅ new fallback
+        ?: request.cookies["booking_token"] // ✅ new fallback 
     if (token == null) return null
     return db.getBookingTokenInfo(token)
 }
@@ -169,7 +169,8 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         }
         if(shopId == null) { shopId = 0}
 
-        val employees = db.getEmployeesForShop(shopId)
+        // Hide employees that are marked unavailable (manager toggle) to reduce confusion in booking UI.
+        val employees = db.getAvailableEmployeesForShop(shopId)
         call.respond(EmployeeList(employees))
     }
 
