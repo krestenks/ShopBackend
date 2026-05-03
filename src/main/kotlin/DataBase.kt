@@ -162,6 +162,13 @@ data class ShopOpeningHours(
     val closed: Boolean = false,
 )
 
+@Serializable
+data class EmployeeAvailability(
+    val employeeId: Int,
+    val shopId: Int,
+    val available: Boolean,
+)
+
 
 class DataBase(dbFileName: String = "ShopManager.db") {
     private val dbFile = File(dbFileName)
@@ -395,6 +402,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN business_name TEXT",
             "ALTER TABLE shop_voice_config ADD COLUMN phone_override TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
+            // Employee availability per shop (manager controlled): 1=available, 0=unavailable
+            "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -1258,6 +1267,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     ): List<Int> {
         require(blocks.isNotEmpty()) { "No therapist blocks" }
 
+        // Enforce availability upfront (fail fast)
+        val unavailable = blocks.firstOrNull { (employeeId, _) -> !isEmployeeAvailable(shopId = shopId, employeeId = employeeId) }
+        if (unavailable != null) {
+            throw IllegalStateException("Employee unavailable for employeeId=${unavailable.first}")
+        }
+
         return inTransaction {
             val appointmentIds = mutableListOf<Int>()
 
@@ -1281,6 +1296,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
 
             for ((employeeId, serviceIds) in blocks) {
+                // Enforce availability inside transaction too
+                if (!isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
+                    throw IllegalStateException("Employee unavailable for employeeId=$employeeId")
+                }
                 // Check for overlapping appointments before booking (use maxDuration for the shared block)
                 if (isAppointmentOverlapping(employeeId, dateTimeMillis, maxDuration)) {
                     throw IllegalStateException("Overlapping appointment for employeeId=$employeeId")
@@ -1617,6 +1636,68 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         rs.close()
         stmt.close()
         return employees
+    }
+
+    // =========================================================================
+    // Employee availability per shop (manager controlled)
+    // =========================================================================
+
+    /** Returns true if employee is available for the shop. Default = true if row/column missing. */
+    fun isEmployeeAvailable(shopId: Int, employeeId: Int): Boolean {
+        val sql = "SELECT available FROM employee_shop WHERE shop_id = ? AND employee_id = ? LIMIT 1"
+        return try {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, shopId)
+                stmt.setInt(2, employeeId)
+                val rs = stmt.executeQuery()
+                if (rs.next()) {
+                    rs.getInt("available") != 0
+                } else {
+                    // Not assigned => treat as unavailable
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            // If column doesn't exist in older DBs, default to available to avoid breaking.
+            true
+        }
+    }
+
+    /** Sets availability for an employee in a shop. Returns false if no employee_shop row exists. */
+    fun setEmployeeAvailable(shopId: Int, employeeId: Int, available: Boolean): Boolean {
+        val sql = "UPDATE employee_shop SET available = ? WHERE shop_id = ? AND employee_id = ?"
+        return connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, if (available) 1 else 0)
+            stmt.setInt(2, shopId)
+            stmt.setInt(3, employeeId)
+            stmt.executeUpdate() > 0
+        }
+    }
+
+    fun listEmployeeAvailabilityForShop(shopId: Int): List<EmployeeAvailability> {
+        val sql = "SELECT employee_id, shop_id, available FROM employee_shop WHERE shop_id = ? ORDER BY employee_id"
+        return try {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, shopId)
+                val rs = stmt.executeQuery()
+                buildList {
+                    while (rs.next()) {
+                        add(
+                            EmployeeAvailability(
+                                employeeId = rs.getInt("employee_id"),
+                                shopId = rs.getInt("shop_id"),
+                                available = rs.getInt("available") != 0,
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Column missing, return all assigned employees as available
+            getEmployeesForShop(shopId).map { emp ->
+                EmployeeAvailability(employeeId = emp.id, shopId = shopId, available = true)
+            }
+        }
     }
 
 
@@ -2041,6 +2122,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getAvailableTimeSlots(employeeId: Int, shopId: Int, dateStr: String, duration: Int): Array<String> {
+        // Manager-controlled availability toggle: if employee is marked unavailable for the shop, no slots.
+        if (!isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
+            return emptyArray()
+        }
+
         println("getAvailableTimeSlots called with:")
         println("  employeeId = $employeeId")
         println("  shopId = $shopId")

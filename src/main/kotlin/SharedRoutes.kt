@@ -100,6 +100,13 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             return@post
         }
 
+        // Shop closed => bookings not possible
+        val voice = db.getShopVoiceConfig(shopId)
+        if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+            call.respond(emptyArray<String>())
+            return@post
+        }
+
         if (req.blocks.isEmpty()) {
             call.respond(emptyArray<String>())
             return@post
@@ -203,6 +210,13 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid shop_id")
             return@get
         }
+
+        // Shop closed => bookings not possible
+        val voice = db.getShopVoiceConfig(shopId)
+        if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+            call.respond(emptyArray<String>())
+            return@get
+        }
         val employeeId = call.request.queryParameters["employee_id"]?.toIntOrNull()
         val date = call.request.queryParameters["date"]
         val duration = call.request.queryParameters["duration"]?.toIntOrNull()
@@ -245,12 +259,25 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             return@post
         }
 
+        // Shop closed => bookings not possible
+        val voice = db.getShopVoiceConfig(shopId)
+        if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+            call.respond(HttpStatusCode.Conflict, "Shop is currently closed for bookings")
+            return@post
+        }
+
         val employeeId = params["employee_id"]?.toIntOrNull()
         val dateTimeStr = params["appointment_time"] // Expected format: "yyyy-MM-dd HH:mm"
         val serviceIds = params.getAll("service_ids")?.mapNotNull { it.toIntOrNull() } ?: emptyList()
 
         if (employeeId == null || dateTimeStr.isNullOrBlank() || serviceIds.isEmpty()) {
             call.respond(HttpStatusCode.BadRequest, "Missing required form data.")
+            return@post
+        }
+
+        // Employee unavailable => bookings not possible
+        if (!db.isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
+            call.respond(HttpStatusCode.Conflict, "Employee is currently unavailable")
             return@post
         }
 
@@ -337,7 +364,21 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             return@post
         }
 
+        // Shop closed => bookings not possible
+        val voice = db.getShopVoiceConfig(shopId)
+        if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+            call.respond(HttpStatusCode.Conflict, "Shop is currently closed for bookings")
+            return@post
+        }
+
         val blocks = payload.blocks.map { it.employeeId to it.serviceIds }
+
+        // Employee unavailable => bookings not possible
+        val unavailable = payload.blocks.firstOrNull { !db.isEmployeeAvailable(shopId = shopId, employeeId = it.employeeId) }
+        if (unavailable != null) {
+            call.respond(HttpStatusCode.Conflict, "Employee is currently unavailable")
+            return@post
+        }
 
         val appointmentIds = try {
             db.createAppointmentsSameTime(

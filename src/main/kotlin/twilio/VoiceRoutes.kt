@@ -233,13 +233,20 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_MENU)
         // IMPORTANT: we do not pass isOpen/tempClosed as query params because the manager may
         // change phone status live while the customer is in the menu.
-        val menuAction = "$base/api/twilio/voice/menu?callId=$callId&attempt=1&shopId=$shopId"
+        val closedForPhones = (!isOpen) || tempClosed
+        val menuAction = "$base/api/twilio/voice/menu?callId=$callId&attempt=1&shopId=$shopId&closed=$closedForPhones"
         val welcomeMsg = if (isOpen) voice.welcomeOpenMessage else voice.welcomeClosedMessage
+
+        val menuPrompt = if (closedForPhones) {
+            "The phone is currently closed but you can perform a booking by SMS link. Press 1 to receive a link."
+        } else {
+            "Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator."
+        }
 
         val xml = """
             <Say voice="Polly.Amy-Neural" language="en-GB">${escapeForXml(welcomeMsg)}</Say>
             <Gather numDigits="1" timeout="15" action="${escapeForXml(menuAction)}" method="POST">
-              <Say voice="Polly.Amy-Neural" language="en-GB">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+              <Say voice="Polly.Amy-Neural" language="en-GB">${escapeForXml(menuPrompt)}</Say>
             </Gather>
             <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
         """.trimIndent()
@@ -266,6 +273,7 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val attempt = call.request.queryParameters["attempt"]?.toIntOrNull() ?: 1
             val shopId  = call.request.queryParameters["shopId"]?.toIntOrNull()
                 ?: (db.findShopIdByTwilioNumber(to) ?: 1)
+            val closedMenu = call.request.queryParameters["closed"]?.trim()?.lowercase() == "true"
 
             val voice    = db.getShopVoiceConfig(shopId)
             val bizName  = voice.businessName ?: "the shop"
@@ -279,10 +287,15 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
             fun menuAgain(nextAttempt: Int): String {
                 val menuAction = "$base/api/twilio/voice/menu" +
-                        "?callId=$callId&attempt=$nextAttempt&shopId=$shopId"
+                        "?callId=$callId&attempt=$nextAttempt&shopId=$shopId&closed=$closedMenu"
+                val prompt = if (closedMenu) {
+                    "The phone is currently closed but you can perform a booking by SMS link. Press 1 to receive a link."
+                } else {
+                    "Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator."
+                }
                 return """
                     <Gather numDigits="1" timeout="15" action="${escapeForXml(menuAction)}" method="POST">
-                      <Say voice="Polly.Amy-Neural" language="en-GB">Press 1 to receive a booking link by SMS. Press 2 to book by phone with an operator.</Say>
+                      <Say voice="Polly.Amy-Neural" language="en-GB">${escapeForXml(prompt)}</Say>
                     </Gather>
                     <Redirect method="POST">${escapeForXml(menuAction)}</Redirect>
                 """.trimIndent()
@@ -326,6 +339,15 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
                 "2" -> {
                     if (callId > 0) db.updateCallState(callId, VoiceCallState.KNOWN_CUSTOMER_OPERATOR_ROUTE)
+                    if (closedMenu) {
+                        // Closed menu: do not offer operator route.
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
+                        call.respondText(
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
                     if (!isOpen) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
                         call.respondText(

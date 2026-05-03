@@ -102,6 +102,33 @@ data class MeResponse(
 data class CallCustomerResponse(val success: Boolean, val status: Int, val twilio: String)
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?)
 
+// ─── Availability screen models ───────────────────────────────────────────────
+
+@Serializable
+data class AvailabilityEmployee(
+    val id: Int,
+    val name: String,
+    val available: Boolean,
+)
+
+@Serializable
+data class AvailabilityShop(
+    val id: Int,
+    val name: String,
+    /** Effective open/closed status after override + schedule */
+    val status: String,
+    /** Current mode: auto/open/closed */
+    val mode: String,
+    val scheduledOpen: Boolean,
+    val employees: List<AvailabilityEmployee>,
+)
+
+@Serializable
+data class AvailabilityResponse(val shops: List<AvailabilityShop>)
+
+@Serializable
+data class SetEmployeeAvailabilityRequest(val available: Boolean)
+
 // ─── Phone status (open/closed) override ──────────────────────────────────────
 
 @Serializable
@@ -340,6 +367,73 @@ class MobileApi(private val db: DataBase) {
                     call.respond(buildPhoneStatus(shopId))
                 }
 
+                // ─────────────────────────────────────────────────────────────
+                // Availability screen (shops + employees) — manager-controlled
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * GET /api/mobile/manager/availability
+                 * Returns all manager shops with effective shop open/closed status and employee availability.
+                 */
+                get("/api/mobile/manager/availability") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+                    }
+
+                    val shops = db.getShopsForManager(loginInfo.managerId)
+                    val out = shops.map { shop ->
+                        val phone = buildPhoneStatus(shop.id)
+                        val employees = db.getEmployeesForShop(shop.id)
+                        val availability = db.listEmployeeAvailabilityForShop(shop.id)
+                            .associateBy { it.employeeId }
+
+                        AvailabilityShop(
+                            id = shop.id,
+                            name = shop.name,
+                            status = phone.status,
+                            mode = phone.mode,
+                            scheduledOpen = phone.scheduledOpen,
+                            employees = employees.map { emp ->
+                                val avail = availability[emp.id]?.available ?: true
+                                AvailabilityEmployee(id = emp.id, name = emp.name, available = avail)
+                            },
+                        )
+                    }
+
+                    call.respond(AvailabilityResponse(shops = out))
+                }
+
+                /**
+                 * PATCH /api/mobile/manager/shops/{shopId}/employees/{employeeId}/availability
+                 * Body: {"available":true/false}
+                 */
+                patch("/api/mobile/manager/shops/{shopId}/employees/{employeeId}/availability") {
+                    val loginInfo = authenticateManager() ?: return@patch
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@patch call.respond(HttpStatusCode.Forbidden, "Managers only")
+                    }
+
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val employeeId = call.parameters["employeeId"]?.toIntOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing employeeId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@patch call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
+
+                    val body = runCatching { call.receive<SetEmployeeAvailabilityRequest>() }.getOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val ok = db.setEmployeeAvailable(shopId = shopId, employeeId = employeeId, available = body.available)
+                    if (!ok) {
+                        return@patch call.respond(HttpStatusCode.NotFound, "Employee not assigned to shop")
+                    }
+
+                    call.respond(HttpStatusCode.NoContent)
+                }
+
                 delete("/api/mobile/manager/appointments/{appointmentId}") {
                     val loginInfo = authenticateManager() ?: return@delete
                     val appointmentId = call.parameters["appointmentId"]?.toIntOrNull()
@@ -484,6 +578,19 @@ class MobileApi(private val db: DataBase) {
 
                     if (loginInfo.role != "manager") {
                         call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    // Shop closed (manual override) => block all bookings
+                    val voice = db.getShopVoiceConfig(shopId)
+                    if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+                        call.respond(HttpStatusCode.Conflict, "Shop is currently closed for bookings")
+                        return@post
+                    }
+
+                    // Employee unavailable => block booking
+                    if (!db.isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
+                        call.respond(HttpStatusCode.Conflict, "Employee is currently unavailable")
                         return@post
                     }
 
@@ -815,6 +922,19 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
 
+                    // Shop closed (manual override) => block all bookings
+                    val voice = db.getShopVoiceConfig(shopId)
+                    if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+                        call.respond(HttpStatusCode.Conflict, "Shop is currently closed for bookings")
+                        return@post
+                    }
+
+                    // Employee unavailable => block booking
+                    if (!db.isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
+                        call.respond(HttpStatusCode.Conflict, "Employee is currently unavailable")
+                        return@post
+                    }
+
                     // Resolve customer: explicit id > phone lookup/create > 0 (walk-in)
                     val customerId: Int = when {
                         body.customerId != null && body.customerId > 0 -> body.customerId
@@ -897,6 +1017,12 @@ class MobileApi(private val db: DataBase) {
                         return@post call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                     }
 
+                    // Shop closed (manual override) => block all bookings
+                    val voice = db.getShopVoiceConfig(shopId)
+                    if (voice.phoneOverride?.trim()?.lowercase() == "closed") {
+                        return@post call.respond(HttpStatusCode.Conflict, "Shop is currently closed for bookings")
+                    }
+
                     if (body.slots.isEmpty()) {
                         return@post call.respond(HttpStatusCode.BadRequest, "slots is required")
                     }
@@ -921,6 +1047,12 @@ class MobileApi(private val db: DataBase) {
                             require(slot.serviceIds.isNotEmpty()) { "serviceIds required" }
                             slot.employeeId to slot.serviceIds
                         }
+
+                        val unavailable = blocks.firstOrNull { (employeeId, _) -> !db.isEmployeeAvailable(shopId = shopId, employeeId = employeeId) }
+                        if (unavailable != null) {
+                            return@post call.respond(HttpStatusCode.Conflict, "Employee is currently unavailable")
+                        }
+
                         db.createAppointmentsSameTime(
                             shopId = shopId,
                             customerId = customerId,
