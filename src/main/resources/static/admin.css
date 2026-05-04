@@ -32,6 +32,9 @@ body {
     background: radial-gradient(1200px 800px at 10% 0%, rgba(124, 92, 255, 0.18), transparent 60%),
                 radial-gradient(1200px 800px at 80% 0%, rgba(36, 210, 255, 0.12), transparent 55%),
                 var(--bg);
+    /* Prevent the gradients from tiling/repeating on tall pages, and keep them fixed while scrolling */
+    background-repeat: no-repeat;
+    background-attachment: fixed;
     color: var(--text);
 }
 
