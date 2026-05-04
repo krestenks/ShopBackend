@@ -91,6 +91,10 @@ object ShopBackend {
                 // MobileApi defines its own absolute paths like /api/mobile/...
                 // so we mount it at root to avoid /mobile/api/mobile/... double-prefix.
                 mobileApi.setupRoutes(this)
+
+                // Self-hosted Android APK update endpoints (JWT authenticated)
+                appUpdateRoutes()
+
                 twilioRoutes(db, chatbotService)
                 twilioVoiceRoutes(db)
                 chatTestRoutes(db, chatbotService)
