@@ -11,6 +11,8 @@ import kotlinx.html.*
 import shared.components.BookingUI
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import twilio.BookingConfirmationSms
+import twilio.TwilioSmsService
 
 
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
@@ -23,6 +25,12 @@ suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingToken
 
 // Accepts a DataBase reference (or other services) as a parameter
 fun Route.sharedBookingRoutes(db: DataBase) {
+
+    // SMS confirmation sender (used for both SMS-link bookings and manager-app bookings)
+    val smsService = TwilioSmsService(
+        accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+        authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+    )
 
     @Serializable
     data class MultiTimeSlotsBlock(val employeeId: Int, val duration: Int)
@@ -317,6 +325,24 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         }
         db.addServicesToAppointment(appointmentId, serviceIds)
 
+        // Send booking confirmation SMS to customer (best-effort; booking should still succeed if SMS fails)
+        runCatching {
+            val phone = db.getCustomerById(customerId)?.phone?.trim().orEmpty()
+            if (phone.isNotBlank()) {
+                val sms = BookingConfirmationSms.send(
+                    db = db,
+                    smsService = smsService,
+                    shopId = shopId,
+                    toPhoneE164 = phone,
+                    appointmentTimeMillis = dateTimeMillis,
+                    appointmentCount = 1,
+                )
+                if (!sms.success) println("[BookingConfirmSMS] Failed: status=${sms.status} body=${sms.body}")
+            }
+        }.onFailure { e ->
+            println("[BookingConfirmSMS] Exception: ${e.message}")
+        }
+
         // Redirect or respond success
         call.respondRedirect("/api/booking/confirmation?appointment_id=$appointmentId")
     }
@@ -392,6 +418,24 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         } catch (e: Exception) {
             call.respond(HttpStatusCode.Conflict, "Could not book all therapists at that time. Please choose another time.")
             return@post
+        }
+
+        // Send booking confirmation SMS once (best-effort)
+        runCatching {
+            val phone = db.getCustomerById(bookingInfo.customerId)?.phone?.trim().orEmpty()
+            if (phone.isNotBlank()) {
+                val sms = BookingConfirmationSms.send(
+                    db = db,
+                    smsService = smsService,
+                    shopId = shopId,
+                    toPhoneE164 = phone,
+                    appointmentTimeMillis = dateTimeMillis,
+                    appointmentCount = appointmentIds.size,
+                )
+                if (!sms.success) println("[BookingConfirmSMS] Failed: status=${sms.status} body=${sms.body}")
+            }
+        }.onFailure { e ->
+            println("[BookingConfirmSMS] Exception: ${e.message}")
         }
 
         // show confirmation for the first appointment, and pass the rest as query params

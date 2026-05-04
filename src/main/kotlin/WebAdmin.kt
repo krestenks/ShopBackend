@@ -555,10 +555,13 @@ class WebAdmin(private val db: DataBase) {
                     div("panel") {
                         form(action = "/shops/add", method = FormMethod.post) {
                             label { +"Shop name" }
+                            p("hint") { +"Shown in the app and used in confirmations." }
                             textInput { name = "name"; placeholder = "Shop Name" }
                             label { +"Address" }
+                            p("hint") { +"Will be included in booking confirmation SMS." }
                             textInput { name = "address"; placeholder = "Address" }
                             label { +"Directions" }
+                            p("hint") { +"Arrival instructions (door code, parking, floor, etc.). Will be included in booking confirmation SMS." }
                             textArea { name = "directions"; placeholder = "Directions" }
                             br()
                             submitInput(classes = "btn primary") { value = "Add shop" }
@@ -611,10 +614,16 @@ class WebAdmin(private val db: DataBase) {
                     div("panel") {
                         form(action = "/shops/edit", method = FormMethod.post) {
                             hiddenInput { name = "id"; value = shop.id.toString() }
+                            label { +"Shop name" }
+                            p("hint") { +"Shown in the app and used in confirmations." }
                             textInput { name = "name"; value = shop.name }
                             br()
+                            label { +"Address" }
+                            p("hint") { +"Will be included in booking confirmation SMS." }
                             textInput { name = "address"; value = shop.address ?: "" }
                             br()
+                            label { +"Directions" }
+                            p("hint") { +"Arrival instructions (door code, parking, floor, etc.). Will be included in booking confirmation SMS." }
                             textArea { name = "directions"; +(shop.directions ?: "") }
                             br()
                             label { +"Assign Manager: " }

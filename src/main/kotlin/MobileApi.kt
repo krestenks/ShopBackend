@@ -20,6 +20,8 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.serialization.*
 import twilio.TwilioVoiceCallService
+import twilio.BookingConfirmationSms
+import twilio.TwilioSmsService
 
 // ─── Request/response models used by call-log + blacklist endpoints ───────────
 
@@ -190,6 +192,11 @@ class MobileApi(private val db: DataBase) {
                 authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
                 fromNumber = System.getenv("TWILIO_FROM_NUMBER") ?: "",
                 publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
+            )
+
+            val smsService = TwilioSmsService(
+                accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
             )
 
             post("/api/mobile/login") {
@@ -602,7 +609,7 @@ class MobileApi(private val db: DataBase) {
                         call.respond(HttpStatusCode.BadRequest, "Invalid date/time format")
                         return@post
                     }
-                    val zoneId = java.time.ZoneId.systemDefault()
+                    val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
                     val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
                     // Duration sum
@@ -626,6 +633,24 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
                     db.addServicesToAppointment(appointmentId, serviceIds)
+
+                    // Send booking confirmation SMS (best-effort)
+                    runCatching {
+                        val toPhone = customerId?.takeIf { it > 0 }?.let { db.getCustomerById(it)?.phone }?.trim().orEmpty()
+                        if (toPhone.isNotBlank()) {
+                            val sms = BookingConfirmationSms.send(
+                                db = db,
+                                smsService = smsService,
+                                shopId = shopId,
+                                toPhoneE164 = toPhone,
+                                appointmentTimeMillis = dateTimeMillis,
+                                appointmentCount = 1,
+                            )
+                            if (!sms.success) println("[BookingConfirmSMS] Failed: status=${sms.status} body=${sms.body}")
+                        }
+                    }.onFailure { e ->
+                        println("[BookingConfirmSMS] Exception: ${e.message}")
+                    }
 
                     call.respond(HttpStatusCode.Created, mapOf("appointment_id" to appointmentId))
                 }
@@ -993,6 +1018,24 @@ class MobileApi(private val db: DataBase) {
                         db.linkBookingToCall(linkedCallId, appointmentId)
                     }
 
+                    // Send booking confirmation SMS (best-effort)
+                    runCatching {
+                        val toPhone = db.getCustomerById(customerId)?.phone?.trim().orEmpty()
+                        if (toPhone.isNotBlank()) {
+                            val sms = BookingConfirmationSms.send(
+                                db = db,
+                                smsService = smsService,
+                                shopId = shopId,
+                                toPhoneE164 = toPhone,
+                                appointmentTimeMillis = dateTimeMillis,
+                                appointmentCount = 1,
+                            )
+                            if (!sms.success) println("[BookingConfirmSMS] Failed: status=${sms.status} body=${sms.body}")
+                        }
+                    }.onFailure { e ->
+                        println("[BookingConfirmSMS] Exception: ${e.message}")
+                    }
+
                     call.respond(
                         HttpStatusCode.Created,
                         CreateBookingResponse(appointmentId = appointmentId, voiceCallId = linkedCallId),
@@ -1085,6 +1128,24 @@ class MobileApi(private val db: DataBase) {
                         appointmentIds.firstOrNull()?.let { firstId ->
                             db.linkBookingToCall(linkedCallId, firstId)
                         }
+                    }
+
+                    // Send booking confirmation SMS once (best-effort)
+                    runCatching {
+                        val toPhone = db.getCustomerById(customerId)?.phone?.trim().orEmpty()
+                        if (toPhone.isNotBlank()) {
+                            val sms = BookingConfirmationSms.send(
+                                db = db,
+                                smsService = smsService,
+                                shopId = shopId,
+                                toPhoneE164 = toPhone,
+                                appointmentTimeMillis = dateTimeMillis,
+                                appointmentCount = appointmentIds.size,
+                            )
+                            if (!sms.success) println("[BookingConfirmSMS] Failed: status=${sms.status} body=${sms.body}")
+                        }
+                    }.onFailure { e ->
+                        println("[BookingConfirmSMS] Exception: ${e.message}")
                     }
 
                     call.respond(

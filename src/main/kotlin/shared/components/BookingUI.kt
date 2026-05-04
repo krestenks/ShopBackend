@@ -15,7 +15,7 @@ object BookingUI {
           <div class="booking-card">
             <div class="booking-header">
               <h1 class="booking-title">Book appointments</h1>
-              <p class="booking-subtitle">Add one or more therapists. Each therapist can have different services, but all appointments will be at the same time.</p>
+              <p class="booking-subtitle">Select one or more services for each employee. If you select services from multiple employees, all appointments will be at the same time.</p>
             </div>
 
             <form class="booking-form" method="POST" action="/api/booking/submit-multi" id="bookingMultiForm">
@@ -24,8 +24,6 @@ object BookingUI {
               <input type="hidden" name="payload" id="multiPayload" value="" />
 
               <div id="therapistBlocks"></div>
-
-              <button class="btn secondary" type="button" id="addTherapistBtn">Add therapist</button>
 
               <div class="grid-2">
                 <div>
@@ -39,7 +37,7 @@ object BookingUI {
               </div>
 
               <button class="btn" type="submit">Confirm bookings</button>
-              <div class="note">Time slots shown are only those that match all selected therapists + services.</div>
+              <div class="note">Time slots shown are only those that match all selected employees + services.</div>
             </form>
           </div>
         </div>

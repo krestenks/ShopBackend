@@ -75,7 +75,7 @@ a:hover { color: #8ae8ff; }
 }
 
 .therapist-block {
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.10);
     background: rgba(255,255,255,0.02);
     border-radius: 12px;
     padding: 12px;
@@ -93,6 +93,8 @@ a:hover { color: #8ae8ff; }
     font-weight: 800;
     letter-spacing: 0.2px;
 }
+
+
 
 .link-btn {
     appearance: none;
