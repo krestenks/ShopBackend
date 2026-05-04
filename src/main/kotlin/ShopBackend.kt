@@ -82,6 +82,7 @@ object ShopBackend {
             }
             install(Sessions) {
                 cookie<WebAdmin.AdminSession>("ADMIN_SESSION")
+                cookie<SetupAppRoutes.SetupAppSession>("SETUP_APP_SESSION")
             }
             JwtConfig.install(this)
 
@@ -94,6 +95,9 @@ object ShopBackend {
 
                 // Self-hosted Android APK update endpoints (JWT authenticated)
                 appUpdateRoutes()
+
+                // Simple installer page for provisioning new handsets (session + HTML form)
+                SetupAppRoutes(db).install(this)
 
                 twilioRoutes(db, chatbotService)
                 twilioVoiceRoutes(db)
