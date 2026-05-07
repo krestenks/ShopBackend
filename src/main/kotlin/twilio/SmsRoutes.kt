@@ -85,10 +85,10 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
         // Send an SMS from the shop's Twilio number to a customer
         post("/api/mobile/sms/send") {
             val principal = call.principal<JWTPrincipal>()
-            val refType   = principal?.payload?.getClaim("refType")?.asString()
-            val refId     = principal?.payload?.getClaim("refId")?.asInt()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
 
-            if (principal == null || refType == null || refId == null) {
+            if (principal == null || refId == null || refType == null) {
                 call.respond(HttpStatusCode.Unauthorized, "Invalid token")
                 return@post
             }
@@ -164,10 +164,10 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
         // List conversation summaries for a shop (one row per counterparty)
         get("/api/mobile/sms/conversations") {
             val principal = call.principal<JWTPrincipal>()
-            val refType   = principal?.payload?.getClaim("refType")?.asString()
-            val refId     = principal?.payload?.getClaim("refId")?.asInt()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
 
-            if (principal == null || refType == null || refId == null) {
+            if (principal == null || refId == null || refType == null) {
                 call.respond(HttpStatusCode.Unauthorized, "Invalid token")
                 return@get
             }
@@ -187,10 +187,10 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
         // Full thread with a single counterparty
         get("/api/mobile/sms/thread") {
             val principal = call.principal<JWTPrincipal>()
-            val refType   = principal?.payload?.getClaim("refType")?.asString()
-            val refId     = principal?.payload?.getClaim("refId")?.asInt()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
 
-            if (principal == null || refType == null || refId == null) {
+            if (principal == null || refId == null || refType == null) {
                 call.respond(HttpStatusCode.Unauthorized, "Invalid token")
                 return@get
             }
