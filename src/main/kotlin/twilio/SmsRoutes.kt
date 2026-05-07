@@ -39,44 +39,19 @@ data class SmsConversationsResponse(val conversations: List<SmsConversationSumma
 
 fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
 
+    println("[SmsRoutes] Inbound SMS webhook registered at:")
+    println("  POST /api/twilio/sms/inbound   (canonical — matches Twilio console)")
+    println("  POST /twilio/sms/inbound        (compatibility alias)")
+
     // ── Inbound SMS webhook (called by Twilio, no auth) ──────────────────────
-    // Configure this URL in the Twilio console: https://your-backend/twilio/sms/inbound
+    // Canonical URL: https://your-backend/api/twilio/sms/inbound
+    // (Consistent with the existing voice routes at /api/twilio/voice/*)
+    post("/api/twilio/sms/inbound") {
+        handleInboundSms(call, db)
+    }
+    // Backward-compat alias so the old URL still works too
     post("/twilio/sms/inbound") {
-        val params = call.receiveParameters()
-
-        val from      = params["From"]  ?: ""
-        val to        = params["To"]    ?: ""
-        val body      = params["Body"]  ?: ""
-        val messageSid = params["MessageSid"]
-
-        println("SMS inbound: from=$from to=$to body=${body.take(80)}")
-
-        // Map the Twilio `To` number back to a shop
-        val shopId = db.findShopIdByTwilioNumber(to)
-        if (shopId == null) {
-            println("SMS inbound: no shop found for twilio number $to — ignoring")
-            call.respondText("<Response/>", ContentType.Application.Xml)
-            return@post
-        }
-
-        // Resolve optional customer id
-        val customerId = db.getCustomerIdByPhone(from)
-
-        // Persist
-        db.insertSmsMessage(
-            shopId           = shopId,
-            customerId       = customerId,
-            counterpartyPhone = from,
-            fromPhone        = from,
-            toPhone          = to,
-            body             = body,
-            direction        = "inbound",
-            status           = "received",
-            twilioMessageSid = messageSid,
-        )
-
-        // Return empty TwiML — we don't auto-reply; manager replies manually.
-        call.respondText("<Response/>", ContentType.Application.Xml)
+        handleInboundSms(call, db)
     }
 
     // ── Manager API endpoints (JWT authenticated) ─────────────────────────────
@@ -209,6 +184,48 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
             call.respond(SmsThreadResponse(messages))
         }
     }
+}
+
+// ─── Inbound SMS handler (shared by both URL aliases) ────────────────────────
+
+private suspend fun handleInboundSms(call: ApplicationCall, db: DataBase) {
+    val params = call.receiveParameters()
+
+    val from       = params["From"]       ?: ""
+    val to         = params["To"]         ?: ""
+    val body       = params["Body"]       ?: ""
+    val messageSid = params["MessageSid"]
+
+    println("[SmsRoutes] Inbound SMS: from=$from to=$to body=${body.take(80)}")
+
+    // Map the Twilio `To` number back to a shop
+    val shopId = db.findShopIdByTwilioNumber(to)
+    if (shopId == null) {
+        println("[SmsRoutes] No shop found for Twilio number '$to' — ignoring")
+        call.respondText("<Response/>", ContentType.Application.Xml)
+        return
+    }
+
+    println("[SmsRoutes] Matched shopId=$shopId — saving message")
+
+    // Resolve optional customer id
+    val customerId = db.getCustomerIdByPhone(from)
+
+    // Persist
+    db.insertSmsMessage(
+        shopId            = shopId,
+        customerId        = customerId,
+        counterpartyPhone = from,
+        fromPhone         = from,
+        toPhone           = to,
+        body              = body,
+        direction         = "inbound",
+        status            = "received",
+        twilioMessageSid  = messageSid,
+    )
+
+    // Return empty TwiML — we don't auto-reply; manager replies manually.
+    call.respondText("<Response/>", ContentType.Application.Xml)
 }
 
 // ─── Helper: check JWT caller has access to the given shopId ─────────────────
