@@ -20,6 +20,8 @@ class TwilioSmsService(
         val success: Boolean,
         val status: Int,
         val body: String,
+        val messageSid: String? = null,
+        val errorMessage: String? = null,
     )
 
     suspend fun sendSms(fromNumberE164: String, toNumberE164: String, bodyText: String): SmsResult {
@@ -46,9 +48,13 @@ class TwilioSmsService(
             }
 
             val body = resp.bodyAsText()
-            SmsResult(resp.status.value in 200..299, resp.status.value, body)
+            val ok   = resp.status.value in 200..299
+            // Extract SID from Twilio JSON response  e.g. {"sid":"SMxxx",...}
+            val sid  = if (ok) Regex(""""sid"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.get(1) else null
+            val errMsg = if (!ok) body.take(200) else null
+            SmsResult(ok, resp.status.value, body, messageSid = sid, errorMessage = errMsg)
         } catch (e: Exception) {
-            SmsResult(false, 500, "Exception sending SMS: ${e.message}")
+            SmsResult(false, 500, "Exception sending SMS: ${e.message}", errorMessage = e.message)
         }
     }
 }

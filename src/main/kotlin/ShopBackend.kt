@@ -14,11 +14,13 @@ import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import org.mindrot.jbcrypt.BCrypt
 import twilio.TwilioChatbotService
+import twilio.TwilioSmsService
 import twilio.ChatbotConfig
 import twilio.twilioRoutes
 import twilio.chatTestRoutes
 import twilio.chatApiRoutes
 import twilio.twilioVoiceRoutes
+import twilio.smsRoutes
 
 object ShopBackend {
     @JvmStatic
@@ -67,6 +69,11 @@ object ShopBackend {
         val chatbotService = TwilioChatbotService(db, chatbotConfig)
         println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")
 
+        val smsService = TwilioSmsService(
+            accountSid = chatbotConfig.twilioAccountSid,
+            authToken  = chatbotConfig.twilioAuthToken,
+        )
+
         // Background cleanup
         startCleanupScheduler(db)
 
@@ -103,6 +110,7 @@ object ShopBackend {
                 twilioVoiceRoutes(db)
                 chatTestRoutes(db, chatbotService)
                 chatApiRoutes(db, chatbotService)
+                smsRoutes(db, smsService)
             }
         }.start(wait = true)
     }

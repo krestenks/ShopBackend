@@ -140,6 +140,38 @@ data class VoiceCallEvent(
     val createdAt: Long,
 )
 
+// ─── SMS message history ─────────────────────────────────────────────────────
+
+@Serializable
+data class SmsMessage(
+    val id: Int,
+    val shopId: Int,
+    val customerId: Int?,
+    /** For outbound: customer phone.  For inbound: sender phone. */
+    val counterpartyPhone: String,
+    val fromPhone: String,
+    val toPhone: String,
+    val body: String,
+    /** "outbound" | "inbound" */
+    val direction: String,
+    /** "sent" | "queued" | "failed" | "received" */
+    val status: String,
+    val twilioMessageSid: String?,
+    val errorMessage: String?,
+    val createdAt: Long,
+)
+
+@Serializable
+data class SmsConversationSummary(
+    val counterpartyPhone: String,
+    val customerId: Int?,
+    val customerName: String?,
+    val lastBody: String,
+    val lastDirection: String,
+    val lastAt: Long,
+    val unreadCount: Int,
+)
+
 // ─── Blacklist ───────────────────────────────────────────────────────────────
 
 @Serializable
@@ -337,6 +369,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 note TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(call_id) REFERENCES voice_call(id)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sms_message (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id             INTEGER NOT NULL,
+                customer_id         INTEGER,
+                counterparty_phone  TEXT    NOT NULL,
+                from_phone          TEXT    NOT NULL,
+                to_phone            TEXT    NOT NULL,
+                body                TEXT    NOT NULL DEFAULT '',
+                direction           TEXT    NOT NULL DEFAULT 'outbound',
+                status              TEXT    NOT NULL DEFAULT 'queued',
+                twilio_message_sid  TEXT,
+                error_message       TEXT,
+                created_at          INTEGER NOT NULL
             );
             """
         )
@@ -2596,6 +2644,144 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return sb.toString()
     }
 
+    // =========================================================================
+    // SMS message history
+    // =========================================================================
+
+    /**
+     * Inserts an SMS record (outbound or inbound) and returns the new row id.
+     * [customerId] stays null until a booking is confirmed.
+     */
+    fun insertSmsMessage(
+        shopId: Int,
+        customerId: Int?,
+        counterpartyPhone: String,
+        fromPhone: String,
+        toPhone: String,
+        body: String,
+        direction: String,
+        status: String,
+        twilioMessageSid: String? = null,
+        errorMessage: String? = null,
+    ): Int {
+        val sql = """
+            INSERT INTO sms_message
+                (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
+                 body, direction, status, twilio_message_sid, error_message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            if (customerId != null) stmt.setInt(2, customerId) else stmt.setNull(2, java.sql.Types.INTEGER)
+            stmt.setString(3, counterpartyPhone.trim())
+            stmt.setString(4, fromPhone.trim())
+            stmt.setString(5, toPhone.trim())
+            stmt.setString(6, body)
+            stmt.setString(7, direction)
+            stmt.setString(8, status)
+            stmt.setString(9, twilioMessageSid)
+            stmt.setString(10, errorMessage)
+            stmt.setLong(11, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+        connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            return if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Full thread for a shop + counterparty phone, oldest first. */
+    fun getSmsThread(shopId: Int, counterpartyPhone: String, limit: Int = 200): List<SmsMessage> {
+        val sql = """
+            SELECT id, shop_id, customer_id, counterparty_phone, from_phone, to_phone,
+                   body, direction, status, twilio_message_sid, error_message, created_at
+            FROM sms_message
+            WHERE shop_id = ? AND counterparty_phone = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, counterpartyPhone.trim())
+            stmt.setInt(3, limit)
+            return buildSmsMessageList(stmt.executeQuery())
+        }
+    }
+
+    /** One summary row per counterparty phone, ordered by most-recent message first. */
+    fun getSmsConversations(shopId: Int, limit: Int = 50): List<SmsConversationSummary> {
+        val sql = """
+            SELECT m.counterparty_phone,
+                   m.customer_id,
+                   c.name AS customer_name,
+                   m.body AS last_body,
+                   m.direction AS last_direction,
+                   m.created_at AS last_at
+            FROM sms_message m
+            LEFT JOIN customers c ON c.id = m.customer_id
+            WHERE m.shop_id = ?
+              AND m.id = (
+                  SELECT id FROM sms_message
+                  WHERE shop_id = m.shop_id AND counterparty_phone = m.counterparty_phone
+                  ORDER BY created_at DESC LIMIT 1
+              )
+            ORDER BY m.created_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, limit)
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<SmsConversationSummary>()
+            while (rs.next()) {
+                result += SmsConversationSummary(
+                    counterpartyPhone = rs.getString("counterparty_phone"),
+                    customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
+                    lastBody = rs.getString("last_body") ?: "",
+                    lastDirection = rs.getString("last_direction") ?: "outbound",
+                    lastAt = rs.getLong("last_at"),
+                    unreadCount = 0,
+                )
+            }
+            return result
+        }
+    }
+
+    /** Retroactively link existing sms_message rows to a customer once created. */
+    fun linkSmsMessagesToCustomer(shopId: Int, phone: String, customerId: Int) {
+        val sql = """
+            UPDATE sms_message SET customer_id = ?
+            WHERE shop_id = ? AND counterparty_phone = ? AND customer_id IS NULL
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setInt(2, shopId)
+            stmt.setString(3, phone.trim())
+            stmt.executeUpdate()
+        }
+    }
+
+    private fun buildSmsMessageList(rs: java.sql.ResultSet): List<SmsMessage> {
+        val result = mutableListOf<SmsMessage>()
+        while (rs.next()) {
+            result += SmsMessage(
+                id = rs.getInt("id"),
+                shopId = rs.getInt("shop_id"),
+                customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                counterpartyPhone = rs.getString("counterparty_phone"),
+                fromPhone = rs.getString("from_phone"),
+                toPhone = rs.getString("to_phone"),
+                body = rs.getString("body") ?: "",
+                direction = rs.getString("direction"),
+                status = rs.getString("status"),
+                twilioMessageSid = rs.getString("twilio_message_sid"),
+                errorMessage = rs.getString("error_message"),
+                createdAt = rs.getLong("created_at"),
+            )
+        }
+        return result
+    }
 
 
 
