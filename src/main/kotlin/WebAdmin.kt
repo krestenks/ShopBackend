@@ -1479,7 +1479,7 @@ class WebAdmin(private val db: DataBase) {
 
                 call.respondAdminPage(
                     titleText = "Customers",
-                    subtitle = "Browse and verify customer phone numbers and names",
+                    subtitle = "Browse and verify customer records. 'New' = auto-created on first call/booking. Blacklist is per-shop.",
                     activePath = "/customers",
                 ) {
                     div("panel") {
@@ -1509,7 +1509,8 @@ class WebAdmin(private val db: DataBase) {
                                         th { +"ID" }
                                         th { +"Name" }
                                         th { +"Phone" }
-                                        th { +"Status" }
+                                        th { +"CRM status" }
+                                        th { +"Blacklisted" }
                                         th { +"Bookings" }
                                         th { +"Actions" }
                                     }
@@ -1517,17 +1518,34 @@ class WebAdmin(private val db: DataBase) {
                                 tbody {
                                     for (c in customers) {
                                         val bookingCount = db.getAppointmentCountForCustomer(c.id)
+                                        val blacklistShops = db.getBlacklistShopsForPhone(c.phone)
                                         tr {
                                             td { +c.id.toString() }
-                                            td { +(c.name.takeIf { it.isNotBlank() } ?: "—") }
+                                            td { +(c.name.takeIf { it.isNotBlank() && it != "NoName" } ?: "—") }
                                             td { +(c.phone.takeIf { it.isNotBlank() } ?: "—") }
                                             td {
-                                                span("badge ${if (c.status == "New") "warn" else "ok"}") { +c.status }
+                                                // "New" = auto-created stub; any other value = manually set CRM label
+                                                span("badge ${if (c.status == "New") "warn" else "ok"}") {
+                                                    +(c.status.ifBlank { "—" })
+                                                }
+                                            }
+                                            td {
+                                                if (blacklistShops.isEmpty()) {
+                                                    span("badge ok") { +"No" }
+                                                } else {
+                                                    span("badge danger") {
+                                                        +"Yes — ${blacklistShops.joinToString(", ") { it.second }}"
+                                                    }
+                                                }
                                             }
                                             td { +bookingCount.toString() }
                                             td {
                                                 div("actions") {
                                                     a(href = "/customers/edit?id=${c.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/customers/delete?id=${c.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete customer ${c.id} (${c.phone})? This cannot be undone.')"
+                                                        +"Delete"
+                                                    }
                                                 }
                                             }
                                         }
@@ -1539,7 +1557,7 @@ class WebAdmin(private val db: DataBase) {
                 }
             }
 
-            // Edit customer: name + phone
+            // Edit customer: all fields editable + blacklist info + delete
             get("/customers/edit") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
                     ?: return@get call.respondRedirect("/customers")
@@ -1547,6 +1565,7 @@ class WebAdmin(private val db: DataBase) {
                     ?: return@get call.respondRedirect("/customers")
                 val bookingCount = db.getAppointmentCountForCustomer(id)
                 val recentAppts = db.getAppointmentsForCustomer(id).take(10)
+                val blacklistShops = db.getBlacklistShopsForPhone(customer.phone)
 
                 call.respondAdminPage(
                     titleText = "Edit customer",
@@ -1562,7 +1581,7 @@ class WebAdmin(private val db: DataBase) {
                                 label { +"Name" }
                                 textInput {
                                     name = "name"
-                                    value = customer.name
+                                    value = customer.name.takeIf { it != "NoName" } ?: ""
                                     placeholder = "Customer name"
                                 }
 
@@ -1573,17 +1592,38 @@ class WebAdmin(private val db: DataBase) {
                                     placeholder = "+4512345678"
                                 }
 
-                                label { +"Status (read-only)" }
+                                label { +"CRM status" }
+                                p("hint") { +"'New' means auto-created from an incoming call or booking. You can change this to any label (e.g. VIP, Regular)." }
                                 textInput {
-                                    name = "_status"
+                                    name = "status"
                                     value = customer.status
-                                    disabled = true
+                                    placeholder = "New"
                                 }
 
                                 br()
                                 submitInput(classes = "btn primary") { value = "Save changes" }
                                 +" "
                                 a(href = "/customers", classes = "btn") { +"Cancel" }
+                            }
+
+                            hr()
+                            h3 { +"Blacklist status" }
+                            if (blacklistShops.isEmpty()) {
+                                p { span("badge ok") { +"Not blacklisted in any shop" } }
+                            } else {
+                                p { span("badge danger") { +"Blacklisted in: ${blacklistShops.joinToString(", ") { it.second }}" } }
+                                p("hint") { +"To remove from blacklist, go to the relevant shop's Blacklist page in the mobile app, or use the Blacklist API." }
+                            }
+
+                            hr()
+                            h3 { +"Danger zone" }
+                            form(action = "/customers/delete", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = customer.id.toString() }
+                                p("hint") { +"Deletes this customer record. Appointment history is retained for auditing." }
+                                submitInput(classes = "btn danger") {
+                                    value = "Delete customer"
+                                    onClick = "return confirm('Delete customer ${customer.id} (${customer.phone})? This cannot be undone.')"
+                                }
                             }
                         }
 
@@ -1640,11 +1680,27 @@ class WebAdmin(private val db: DataBase) {
                 val params = call.receiveParameters()
                 val id = params["id"]?.toIntOrNull()
                     ?: return@post call.respondRedirect("/customers")
-                val name  = params["name"]?.trim().orEmpty()
-                val phone = params["phone"]?.trim().orEmpty()
-                if (name.isNotBlank() || phone.isNotBlank()) {
-                    db.updateCustomer(id, name, phone)
-                }
+                val name   = params["name"]?.trim().orEmpty()
+                val phone  = params["phone"]?.trim().orEmpty()
+                val status = params["status"]?.trim().orEmpty().ifBlank { "New" }
+                db.updateCustomerFull(id, name, phone, status)
+                call.respondRedirect("/customers")
+            }
+
+            // GET confirm-delete (from list "Delete" button with onclick confirm)
+            get("/customers/delete") {
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/customers")
+                db.deleteCustomer(id)
+                call.respondRedirect("/customers")
+            }
+
+            // POST delete (from edit page danger zone)
+            post("/customers/delete") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers")
+                db.deleteCustomer(id)
                 call.respondRedirect("/customers")
             }
 

@@ -1220,6 +1220,58 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
+     * Update name, phone and status for a customer. Used from the web admin customer edit page.
+     */
+    fun updateCustomerFull(id: Int, name: String, phone: String, status: String) {
+        connection.prepareStatement("UPDATE customers SET name = ?, phone = ?, status = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, phone.trim())
+            stmt.setString(3, status.trim())
+            stmt.setInt(4, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Hard-delete a customer row. Also removes linked blacklist entries.
+     * Does NOT delete appointments (those remain for historical records).
+     */
+    fun deleteCustomer(id: Int): Boolean {
+        // Soft-remove any blacklist entries for this customer's phone (best-effort)
+        getCustomerById(id)?.phone?.trim()?.takeIf { it.isNotBlank() }?.let { phone ->
+            connection.prepareStatement("UPDATE phone_blacklist SET active = 0 WHERE phone_e164 = ?").use { stmt ->
+                stmt.setString(1, phone)
+                stmt.executeUpdate()
+            }
+        }
+        connection.prepareStatement("DELETE FROM customers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
+    /**
+     * Returns a list of (shopId, shopName) pairs for every shop that has this phone blacklisted.
+     * Empty list means the phone is not blacklisted anywhere.
+     */
+    fun getBlacklistShopsForPhone(phone: String): List<Pair<Int, String>> {
+        if (phone.isBlank()) return emptyList()
+        val sql = """
+            SELECT pb.shop_id, COALESCE(s.name, 'Shop #' || pb.shop_id) AS shop_name
+            FROM phone_blacklist pb
+            LEFT JOIN shops s ON s.id = pb.shop_id
+            WHERE pb.phone_e164 = ? AND pb.active = 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, phone.trim())
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<Pair<Int, String>>()
+            while (rs.next()) result += rs.getInt("shop_id") to rs.getString("shop_name")
+            return result
+        }
+    }
+
+    /**
      * Count the number of appointments for a given customer (across all shops).
      */
     fun getAppointmentCountForCustomer(customerId: Int): Int {

@@ -67,38 +67,61 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
     // ── Outbound "bridge" TwiML — manager answers, Twilio dials customer ─────
     // Called by Twilio after the manager picks up a direct-call-customer call.
-    // Query param:  ?to={customerPhoneE164}
+    //
+    // Query params set by us (never clashing with Twilio's own POST fields):
+    //   ?customerPhone={E164}   — number to dial after manager answers
+    //   &callerId={E164}        — shop Twilio number shown to customer
+    //
+    // Twilio will ALSO POST its own fields (To, From, CallSid, etc.) but since
+    // we now read from queryParameters only (for our custom params), there is
+    // no clash.  The legacy "to" param is kept as a fallback for old requests.
 
     route("/api/twilio/voice/bridge") {
         get {
-            val to       = call.request.queryParameters["to"]?.trim().orEmpty()
-            val callerId = call.request.queryParameters["callerId"]?.trim()
-            if (to.isBlank()) {
+            // Always read from query string — never from POST body — to avoid Twilio's
+            // own "To" POST field shadowing our custom "customerPhone" / "to" param.
+            val qp          = call.request.queryParameters
+            val customerPhone = qp["customerPhone"]?.trim().orEmpty()
+                .ifBlank { qp["to"]?.trim().orEmpty() }  // legacy fallback
+            val callerId    = qp["callerId"]?.trim()
+
+            println("[Bridge/GET] customerPhone=$customerPhone callerId=$callerId twilioTo=${qp["To"]} twilioFrom=${qp["From"]}")
+
+            if (customerPhone.isBlank()) {
                 call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return@get
             }
             val dialXml = buildString {
                 append("<Dial")
                 if (!callerId.isNullOrBlank()) append(" callerId=\"${escapeForXml(callerId)}\"")
-                append("><Number>${escapeForXml(to)}</Number></Dial>")
+                append("><Number>${escapeForXml(customerPhone)}</Number></Dial>")
             }
-            println("[Bridge/GET] to=$to callerId=$callerId  TwiML=$dialXml")
+            println("[Bridge/GET] ✅ dialling customer=$customerPhone  TwiML=$dialXml")
             call.respondText(twiml(dialXml), ContentType.Text.Xml)
         }
         post {
-            val params   = call.receiveParameters()
-            val to       = (params["to"]       ?: call.request.queryParameters["to"])?.trim().orEmpty()
-            val callerId = (params["callerId"] ?: call.request.queryParameters["callerId"])?.trim()
-            if (to.isBlank()) {
+            // Twilio POSTs its own To/From/CallSid etc. to this URL.
+            // We intentionally ignore the POST body for our custom params and read only
+            // from the query string, which is unambiguous and under our full control.
+            val qp          = call.request.queryParameters
+            val customerPhone = qp["customerPhone"]?.trim().orEmpty()
+                .ifBlank { qp["to"]?.trim().orEmpty() }  // legacy fallback
+            val callerId    = qp["callerId"]?.trim()
+
+            // Read Twilio's own fields for logging only
+            val twilioParams = runCatching { call.receiveParameters() }.getOrNull()
+            println("[Bridge/POST] customerPhone=$customerPhone callerId=$callerId  twilioTo=${twilioParams?.get("To")} twilioFrom=${twilioParams?.get("From")}")
+
+            if (customerPhone.isBlank()) {
                 call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return@post
             }
             val dialXml = buildString {
                 append("<Dial")
                 if (!callerId.isNullOrBlank()) append(" callerId=\"${escapeForXml(callerId)}\"")
-                append("><Number>${escapeForXml(to)}</Number></Dial>")
+                append("><Number>${escapeForXml(customerPhone)}</Number></Dial>")
             }
-            println("[Bridge/POST] to=$to callerId=$callerId  TwiML=$dialXml")
+            println("[Bridge/POST] ✅ dialling customer=$customerPhone  TwiML=$dialXml")
             call.respondText(twiml(dialXml), ContentType.Text.Xml)
         }
     }

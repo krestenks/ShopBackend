@@ -46,17 +46,25 @@ class TwilioVoiceCallService(
 
         val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls.json"
 
-        // When the manager answers we serve TwiML that dials the customer.
-        // We pass the Twilio fromNumber as callerId so Twilio can set an explicit
-        // caller ID on the outbound leg to the customer (required by many account configs).
+        // Step 1: Twilio calls the manager (To=managerPhone).
+        // Step 2: When manager answers Twilio fetches the bridge TwiML URL,
+        //         which tells Twilio to dial the customer.
+        //
+        // IMPORTANT: We use the parameter name "customerPhone" (not "to") in the bridge URL
+        // because Twilio always POSTs its own "To" field (capital-T) to the callback URL.
+        // Ktor's receiveParameters() does case-insensitive matching so a lowercase "to"
+        // in the query string would be clobbered by Twilio's "To" POST body param — which
+        // contains the MANAGER number (the initial call target), not the customer number.
         val bridgeUrl = buildString {
             append(publicBaseUrl.trimEnd('/'))
             append("/api/twilio/voice/bridge")
-            append("?to=")
+            append("?customerPhone=")
             append(java.net.URLEncoder.encode(customerPhoneE164, Charsets.UTF_8))
             append("&callerId=")
             append(java.net.URLEncoder.encode(fromNumber, Charsets.UTF_8))
         }
+
+        println("[DirectCall/TwilioAPI] initial call To(manager)=$managerPhoneE164  bridgeCustomerPhone=$customerPhoneE164  from=$fromNumber  bridgeUrl=$bridgeUrl")
 
         val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
 
@@ -65,9 +73,9 @@ class TwilioVoiceCallService(
             contentType(ContentType.Application.FormUrlEncoded)
             setBody(
                 listOf(
-                    "To"   to managerPhoneE164,
+                    "To"   to managerPhoneE164,  // Step 1: ring the manager
                     "From" to fromNumber,
-                    "Url"  to bridgeUrl,
+                    "Url"  to bridgeUrl,          // Step 2: when manager answers, bridge to customer
                 ).formUrlEncode()
             )
         }
