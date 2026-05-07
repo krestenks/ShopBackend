@@ -47,11 +47,15 @@ class TwilioVoiceCallService(
         val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls.json"
 
         // When the manager answers we serve TwiML that dials the customer.
+        // We pass the Twilio fromNumber as callerId so Twilio can set an explicit
+        // caller ID on the outbound leg to the customer (required by many account configs).
         val bridgeUrl = buildString {
             append(publicBaseUrl.trimEnd('/'))
             append("/api/twilio/voice/bridge")
             append("?to=")
             append(java.net.URLEncoder.encode(customerPhoneE164, Charsets.UTF_8))
+            append("&callerId=")
+            append(java.net.URLEncoder.encode(fromNumber, Charsets.UTF_8))
         }
 
         val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))

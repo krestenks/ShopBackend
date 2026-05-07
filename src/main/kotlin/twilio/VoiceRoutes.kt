@@ -71,27 +71,35 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
     route("/api/twilio/voice/bridge") {
         get {
-            val to = call.request.queryParameters["to"]?.trim().orEmpty()
+            val to       = call.request.queryParameters["to"]?.trim().orEmpty()
+            val callerId = call.request.queryParameters["callerId"]?.trim()
             if (to.isBlank()) {
                 call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return@get
             }
-            call.respondText(
-                twiml("<Dial>${escapeForXml(to)}</Dial>"),
-                ContentType.Text.Xml,
-            )
+            val dialXml = buildString {
+                append("<Dial")
+                if (!callerId.isNullOrBlank()) append(" callerId=\"${escapeForXml(callerId)}\"")
+                append("><Number>${escapeForXml(to)}</Number></Dial>")
+            }
+            println("[Bridge/GET] to=$to callerId=$callerId  TwiML=$dialXml")
+            call.respondText(twiml(dialXml), ContentType.Text.Xml)
         }
         post {
-            val params = call.receiveParameters()
-            val to = (params["to"] ?: call.request.queryParameters["to"])?.trim().orEmpty()
+            val params   = call.receiveParameters()
+            val to       = (params["to"]       ?: call.request.queryParameters["to"])?.trim().orEmpty()
+            val callerId = (params["callerId"] ?: call.request.queryParameters["callerId"])?.trim()
             if (to.isBlank()) {
                 call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return@post
             }
-            call.respondText(
-                twiml("<Dial>${escapeForXml(to)}</Dial>"),
-                ContentType.Text.Xml,
-            )
+            val dialXml = buildString {
+                append("<Dial")
+                if (!callerId.isNullOrBlank()) append(" callerId=\"${escapeForXml(callerId)}\"")
+                append("><Number>${escapeForXml(to)}</Number></Dial>")
+            }
+            println("[Bridge/POST] to=$to callerId=$callerId  TwiML=$dialXml")
+            call.respondText(twiml(dialXml), ContentType.Text.Xml)
         }
     }
 
