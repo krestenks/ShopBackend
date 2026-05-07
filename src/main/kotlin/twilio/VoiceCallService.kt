@@ -30,6 +30,48 @@ class TwilioVoiceCallService(
         val body: String,
     )
 
+    /**
+     * Initiates a real two-way call by:
+     * 1. Calling the manager (operator) phone FROM the Twilio number.
+     * 2. When the manager answers, TwiML dials the customer and bridges them.
+     * The customer sees the shop's Twilio number as the caller ID.
+     */
+    suspend fun directCallCustomer(
+        managerPhoneE164: String,
+        customerPhoneE164: String,
+    ): CallResult {
+        if (accountSid.isBlank() || authToken.isBlank() || fromNumber.isBlank()) {
+            return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")
+        }
+
+        val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls.json"
+
+        // When the manager answers we serve TwiML that dials the customer.
+        val bridgeUrl = buildString {
+            append(publicBaseUrl.trimEnd('/'))
+            append("/api/twilio/voice/bridge")
+            append("?to=")
+            append(java.net.URLEncoder.encode(customerPhoneE164, Charsets.UTF_8))
+        }
+
+        val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
+
+        val resp: HttpResponse = client.post(url) {
+            header(HttpHeaders.Authorization, "Basic $basic")
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(
+                listOf(
+                    "To"   to managerPhoneE164,
+                    "From" to fromNumber,
+                    "Url"  to bridgeUrl,
+                ).formUrlEncode()
+            )
+        }
+
+        val body = resp.bodyAsText()
+        return CallResult(resp.status.value in 200..299, resp.status.value, body)
+    }
+
     suspend fun callCustomer(toPhoneE164: String, message: String, appointmentId: Int? = null): CallResult {
         if (accountSid.isBlank() || authToken.isBlank() || fromNumber.isBlank()) {
             return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")

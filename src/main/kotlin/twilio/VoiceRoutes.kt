@@ -65,6 +65,36 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         }
     }
 
+    // ── Outbound "bridge" TwiML — manager answers, Twilio dials customer ─────
+    // Called by Twilio after the manager picks up a direct-call-customer call.
+    // Query param:  ?to={customerPhoneE164}
+
+    route("/api/twilio/voice/bridge") {
+        get {
+            val to = call.request.queryParameters["to"]?.trim().orEmpty()
+            if (to.isBlank()) {
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
+                return@get
+            }
+            call.respondText(
+                twiml("<Dial>${escapeForXml(to)}</Dial>"),
+                ContentType.Text.Xml,
+            )
+        }
+        post {
+            val params = call.receiveParameters()
+            val to = (params["to"] ?: call.request.queryParameters["to"])?.trim().orEmpty()
+            if (to.isBlank()) {
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
+                return@post
+            }
+            call.respondText(
+                twiml("<Dial>${escapeForXml(to)}</Dial>"),
+                ContentType.Text.Xml,
+            )
+        }
+    }
+
     // ── Outbound "ready" TwiML (unchanged) ───────────────────────────────────
 
     route("/api/twilio/voice/ready") {

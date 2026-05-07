@@ -559,6 +559,139 @@ class MobileApi(private val db: DataBase) {
                     ))
                 }
 
+                /**
+                 * Initiate a real two-way call from the shop's Twilio number to the customer,
+                 * bridged through the manager's (operator) phone.
+                 *
+                 * Flow:
+                 *  1. Manager's phone (operator_phone from voice config) rings.
+                 *  2. Manager answers → Twilio bridges them to the customer.
+                 *  3. Customer sees the shop's Twilio number as caller ID.
+                 *
+                 * Manager role only.
+                 */
+                post("/api/mobile/manager/appointments/{appointmentId}/direct-call-customer") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Manager role required")
+                        return@post
+                    }
+
+                    val appointmentId = call.parameters["appointmentId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing or invalid appointmentId")
+
+                    val appointment = db.getAppointmentWithServicesById(appointmentId)
+                        ?: return@post call.respond(HttpStatusCode.NotFound, "Appointment not found")
+
+                    if (!isAuthorizedForShop(loginInfo, appointment.shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val customerPhone = appointment.customer?.phone?.trim().orEmpty()
+                    if (customerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.UnprocessableEntity, "Customer has no phone number")
+                        return@post
+                    }
+
+                    val voice = db.getShopVoiceConfig(appointment.shopId)
+                    val managerPhone = db.getManagerPhoneForShop(appointment.shopId)?.trim().orEmpty()
+                    if (managerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.UnprocessableEntity, "No operator phone configured for this shop")
+                        return@post
+                    }
+
+                    // Use the shop's Twilio number as caller ID (if configured), otherwise fall back to global.
+                    val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
+                        ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
+
+                    val svc = TwilioVoiceCallService(
+                        accountSid   = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                        authToken    = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+                        fromNumber   = fromNumber,
+                        publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
+                    )
+
+                    println("[DirectCall/appointment] calling manager=$managerPhone → customer=$customerPhone (shop=${appointment.shopId})")
+                    val result = svc.directCallCustomer(
+                        managerPhoneE164  = managerPhone,
+                        customerPhoneE164 = customerPhone,
+                    )
+
+                    call.respond(CallCustomerResponse(
+                        success = result.success,
+                        status  = result.status,
+                        twilio  = result.body,
+                    ))
+                }
+
+                /**
+                 * Initiate a real two-way call from a call log entry.
+                 * Uses the recorded `fromPhone` (customer's number) as the destination.
+                 *
+                 * Manager role only.
+                 */
+                post("/api/mobile/manager/shops/{shopId}/calls/{callId}/direct-call-customer") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Manager role required")
+                        return@post
+                    }
+
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val callLogId = call.parameters["callId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing callId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val callRecord = db.getCallById(callLogId)
+                        ?: return@post call.respond(HttpStatusCode.NotFound, "Call record not found")
+
+                    if (callRecord.shopId != shopId) {
+                        call.respond(HttpStatusCode.Forbidden, "Call does not belong to this shop")
+                        return@post
+                    }
+
+                    val customerPhone = callRecord.fromPhone.trim()
+                    if (customerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.UnprocessableEntity, "No customer phone on this call record")
+                        return@post
+                    }
+
+                    val voice = db.getShopVoiceConfig(shopId)
+                    val managerPhone = db.getManagerPhoneForShop(shopId)?.trim().orEmpty()
+                    if (managerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.UnprocessableEntity, "No operator phone configured for this shop")
+                        return@post
+                    }
+
+                    val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
+                        ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
+
+                    val svc = TwilioVoiceCallService(
+                        accountSid   = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                        authToken    = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+                        fromNumber   = fromNumber,
+                        publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
+                    )
+
+                    println("[DirectCall/callLog] calling manager=$managerPhone → customer=$customerPhone (shop=$shopId callLogId=$callLogId)")
+                    val result = svc.directCallCustomer(
+                        managerPhoneE164  = managerPhone,
+                        customerPhoneE164 = customerPhone,
+                    )
+
+                    call.respond(CallCustomerResponse(
+                        success = result.success,
+                        status  = result.status,
+                        twilio  = result.body,
+                    ))
+                }
+
                 post("/api/mobile/manager/booking/create") {
                     val loginInfo = authenticateManager()
                     if (loginInfo == null) {
