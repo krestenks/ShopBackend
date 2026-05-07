@@ -1174,6 +1174,64 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Update both name and phone for a customer. Used from the web admin customer edit page.
+     */
+    fun updateCustomer(customerId: Int, name: String, phone: String) {
+        connection.prepareStatement("UPDATE customers SET name = ?, phone = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, phone.trim())
+            stmt.setInt(3, customerId)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * List all customers, optionally filtered by a name/phone search string.
+     * Results are ordered newest first (by id desc).
+     */
+    fun getAllCustomers(search: String? = null): List<Customer> {
+        val sql = if (search.isNullOrBlank()) {
+            "SELECT * FROM customers ORDER BY id DESC"
+        } else {
+            "SELECT * FROM customers WHERE phone LIKE ? OR name LIKE ? ORDER BY id DESC"
+        }
+        connection.prepareStatement(sql).use { stmt ->
+            if (!search.isNullOrBlank()) {
+                val pattern = "%${search.trim()}%"
+                stmt.setString(1, pattern)
+                stmt.setString(2, pattern)
+            }
+            val rs = stmt.executeQuery()
+            val customers = mutableListOf<Customer>()
+            while (rs.next()) {
+                customers += Customer(
+                    id = rs.getInt("id"),
+                    phone = rs.getString("phone") ?: "",
+                    name = rs.getString("name") ?: "",
+                    status = rs.getString("status") ?: "",
+                    payment = rs.getInt("payment"),
+                    language = rs.getInt("language"),
+                )
+            }
+            rs.close()
+            return customers
+        }
+    }
+
+    /**
+     * Count the number of appointments for a given customer (across all shops).
+     */
+    fun getAppointmentCountForCustomer(customerId: Int): Int {
+        connection.prepareStatement("SELECT COUNT(*) FROM appointments WHERE customer_id = ?").use { stmt ->
+            stmt.setInt(1, customerId)
+            val rs = stmt.executeQuery()
+            val count = if (rs.next()) rs.getInt(1) else 0
+            rs.close()
+            return count
+        }
+    }
+
     fun getAppointmentsForCustomer(customerId: Int, shopId: Int? = null): List<AppointmentWithServices> {
         val sql = if (shopId != null) {
             "SELECT * FROM appointments WHERE customer_id = ? AND shop_id = ? ORDER BY date_time DESC"

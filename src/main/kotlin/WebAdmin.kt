@@ -53,6 +53,7 @@ class WebAdmin(private val db: DataBase) {
                         NavItem("/services", "Services", "🧾"),
                         NavItem("/managers", "Managers", "🧑‍💼"),
                         NavItem("/appointments", "Appointments", "📅"),
+                        NavItem("/customers", "Customers", "👤"),
                         NavItem("/twilio/setup", "Twilio setup", "📞"),
                         NavItem("/test-booking-link", "Booking link", "🔗"),
                     )
@@ -130,9 +131,9 @@ class WebAdmin(private val db: DataBase) {
                                 p("hint") { +"Sign in to manage shops, staff and services." }
                                 form(action = "/login", method = FormMethod.post) {
                                     label { +"Username" }
-                                    textInput { name = "username"; placeholder = "admin" }
+                                    textInput { name = "username"; autoComplete = false }
                                     label { +"Password" }
-                                    passwordInput { name = "password"; placeholder = "••••" }
+                                    passwordInput { name = "password"; autoComplete = false }
                                     br()
                                     submitInput(classes = "btn primary") { value = "Login" }
                                 }
@@ -1470,6 +1471,182 @@ class WebAdmin(private val db: DataBase) {
                     )
                 }
 
+            // ── Customers ──────────────────────────────────────────────────────
+            // List page with optional search
+            get("/customers") {
+                val search = call.request.queryParameters["q"]?.trim()
+                val customers = db.getAllCustomers(search)
+
+                call.respondAdminPage(
+                    titleText = "Customers",
+                    subtitle = "Browse and verify customer phone numbers and names",
+                    activePath = "/customers",
+                ) {
+                    div("panel") {
+                        // Search bar
+                        form(action = "/customers", method = FormMethod.get) {
+                            div("actions") {
+                                textInput {
+                                    name = "q"
+                                    value = search ?: ""
+                                    placeholder = "Search by name or phone…"
+                                    style = "min-width:260px"
+                                }
+                                submitInput(classes = "btn") { value = "Search" }
+                                if (!search.isNullOrBlank()) {
+                                    a(href = "/customers", classes = "btn") { +"Clear" }
+                                }
+                            }
+                        }
+
+                        if (customers.isEmpty()) {
+                            p("hint") { +"No customers found${if (!search.isNullOrBlank()) " for \"$search\"" else ""}." }
+                        } else {
+                            p("hint") { +"${customers.size} customer(s)${if (!search.isNullOrBlank()) " matching \"$search\"" else ""}." }
+                            table {
+                                thead {
+                                    tr {
+                                        th { +"ID" }
+                                        th { +"Name" }
+                                        th { +"Phone" }
+                                        th { +"Status" }
+                                        th { +"Bookings" }
+                                        th { +"Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for (c in customers) {
+                                        val bookingCount = db.getAppointmentCountForCustomer(c.id)
+                                        tr {
+                                            td { +c.id.toString() }
+                                            td { +(c.name.takeIf { it.isNotBlank() } ?: "—") }
+                                            td { +(c.phone.takeIf { it.isNotBlank() } ?: "—") }
+                                            td {
+                                                span("badge ${if (c.status == "New") "warn" else "ok"}") { +c.status }
+                                            }
+                                            td { +bookingCount.toString() }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/customers/edit?id=${c.id}", classes = "btn") { +"Edit" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Edit customer: name + phone
+            get("/customers/edit") {
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/customers")
+                val customer = db.getCustomerById(id)
+                    ?: return@get call.respondRedirect("/customers")
+                val bookingCount = db.getAppointmentCountForCustomer(id)
+                val recentAppts = db.getAppointmentsForCustomer(id).take(10)
+
+                call.respondAdminPage(
+                    titleText = "Edit customer",
+                    subtitle = "ID ${customer.id} · ${customer.phone}",
+                    activePath = "/customers",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Customer details" }
+                            form(action = "/customers/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = customer.id.toString() }
+
+                                label { +"Name" }
+                                textInput {
+                                    name = "name"
+                                    value = customer.name
+                                    placeholder = "Customer name"
+                                }
+
+                                label { +"Phone (E.164)" }
+                                textInput {
+                                    name = "phone"
+                                    value = customer.phone
+                                    placeholder = "+4512345678"
+                                }
+
+                                label { +"Status (read-only)" }
+                                textInput {
+                                    name = "_status"
+                                    value = customer.status
+                                    disabled = true
+                                }
+
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save changes" }
+                                +" "
+                                a(href = "/customers", classes = "btn") { +"Cancel" }
+                            }
+                        }
+
+                        div("panel") {
+                            h3 { +"Appointment history ($bookingCount total)" }
+                            if (recentAppts.isEmpty()) {
+                                p("hint") { +"No bookings found." }
+                            } else {
+                                table {
+                                    thead {
+                                        tr {
+                                            th { +"Date" }
+                                            th { +"Shop" }
+                                            th { +"Services" }
+                                            th { +"Price" }
+                                        }
+                                    }
+                                    tbody {
+                                        val shops = db.getAllShops().associateBy { it.id }
+                                        for (appt in recentAppts) {
+                                            val dt = java.time.Instant.ofEpochMilli(appt.dateTime)
+                                                .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                                .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+                                            tr {
+                                                td { +dt }
+                                                td { +(shops[appt.shopId]?.name ?: "#${appt.shopId}") }
+                                                td {
+                                                    if (appt.services.isEmpty()) {
+                                                        span("badge") { +"–" }
+                                                    } else {
+                                                        +appt.services.joinToString(", ") { it.name }
+                                                    }
+                                                }
+                                                td { +"${"%.2f".format(appt.price)} DKK" }
+                                            }
+                                        }
+                                        if (bookingCount > 10) {
+                                            tr {
+                                                td {
+                                                    colSpan = "4"
+                                                    em { +"… and ${bookingCount - 10} more" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/customers/edit") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers")
+                val name  = params["name"]?.trim().orEmpty()
+                val phone = params["phone"]?.trim().orEmpty()
+                if (name.isNotBlank() || phone.isNotBlank()) {
+                    db.updateCustomer(id, name, phone)
+                }
+                call.respondRedirect("/customers")
+            }
 
         }
     }
