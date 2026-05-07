@@ -34,3 +34,4 @@ build/*
 
 # Secrets (never commit)
 .env
+Test_credentials.txt

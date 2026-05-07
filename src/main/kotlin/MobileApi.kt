@@ -588,7 +588,14 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
 
-                    val customerPhone = appointment.customer?.phone?.trim().orEmpty()
+                    // Prefer phone sent directly by the client (the app already displays it in the
+                    // confirmation dialog, so it's the ground truth).  Fall back to the DB value.
+                    val clientPhone = call.request.queryParameters["customerPhone"]?.trim()
+                    val dbPhone     = appointment.customer?.phone?.trim().orEmpty()
+                    val customerPhone = clientPhone?.takeIf { it.isNotBlank() } ?: dbPhone
+                    println("[DirectCall/appointment] appointmentId=$appointmentId " +
+                            "clientPhone=${clientPhone ?: "(none)"} dbPhone=$dbPhone resolved=$customerPhone " +
+                            "(shop=${appointment.shopId})")
                     if (customerPhone.isBlank()) {
                         call.respond(HttpStatusCode.UnprocessableEntity, "Customer has no phone number")
                         return@post
@@ -612,7 +619,7 @@ class MobileApi(private val db: DataBase) {
                         publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
                     )
 
-                    println("[DirectCall/appointment] calling manager=$managerPhone → customer=$customerPhone (shop=${appointment.shopId})")
+                    println("[DirectCall/appointment] calling manager=$managerPhone → customer=$customerPhone")
                     val result = svc.directCallCustomer(
                         managerPhoneE164  = managerPhone,
                         customerPhoneE164 = customerPhone,
@@ -656,7 +663,13 @@ class MobileApi(private val db: DataBase) {
                         return@post
                     }
 
-                    val customerPhone = callRecord.fromPhone.trim()
+                    // Prefer phone sent directly by the client; fall back to the DB-recorded fromPhone.
+                    val clientPhone   = call.request.queryParameters["customerPhone"]?.trim()
+                    val dbPhone       = callRecord.fromPhone.trim()
+                    val customerPhone = clientPhone?.takeIf { it.isNotBlank() } ?: dbPhone
+                    println("[DirectCall/callLog] callLogId=$callLogId " +
+                            "clientPhone=${clientPhone ?: "(none)"} dbPhone=$dbPhone resolved=$customerPhone " +
+                            "(shop=$shopId)")
                     if (customerPhone.isBlank()) {
                         call.respond(HttpStatusCode.UnprocessableEntity, "No customer phone on this call record")
                         return@post

@@ -147,14 +147,33 @@ class WebAdmin(private val db: DataBase) {
                 val username = params["username"] ?: ""
                 val password = params["password"] ?: ""
 
-                val allowedAdminUsername = "admin"
-                val expectedHash = "$2a$12\$bRyq/lqNzQbmYGAzS2V2qexIOd3es/8.URdwPmcamFTBGieqsodpW" // Hash of "1234"
-                //val expectedHash = "\$2a\$12\$L6lsy/RxF/FKk0ct4tQrL.f7acwEbf9wNatDed3PJKCNakSBVlKP2" //
+                // Allow credentials to be overridden via environment variables so the password
+                // can be changed on Upsun/Platform.sh without a code rebuild.
+                // Fallback: hardcoded admin / 1234 (BCrypt hash).
+                val envUser = System.getenv("ADMIN_USERNAME")?.trim()?.takeIf { it.isNotBlank() }
+                val envPass = System.getenv("ADMIN_PASSWORD")?.trim()?.takeIf { it.isNotBlank() }
 
-                if (username == allowedAdminUsername && org.mindrot.jbcrypt.BCrypt.checkpw(password, expectedHash)) {
+                val allowedAdminUsername = envUser ?: "admin"
+                val expectedHash = "$2a$12\$bRyq/lqNzQbmYGAzS2V2qexIOd3es/8.URdwPmcamFTBGieqsodpW" // Hash of "1234"
+
+                // If ADMIN_PASSWORD env var is set, compare directly (plain text).
+                // Otherwise fall back to BCrypt check against the hardcoded hash.
+                val passwordOk = if (envPass != null) {
+                    password == envPass
+                } else {
+                    org.mindrot.jbcrypt.BCrypt.checkpw(password, expectedHash)
+                }
+
+                println("[WebAdmin/login] attempt username='$username' " +
+                        "envUser=${envUser ?: "(none)"} envPassSet=${envPass != null} " +
+                        "usernameMatch=${username == allowedAdminUsername} passwordOk=$passwordOk")
+
+                if (username == allowedAdminUsername && passwordOk) {
+                    println("[WebAdmin/login] SUCCESS username='$username'")
                     call.sessions.set(AdminSession(username))
                     call.respondRedirect("/")
                 } else {
+                    println("[WebAdmin/login] FAILED username='$username'")
                     call.respondHtml {
                         head {
                             meta { charset = "utf-8" }
