@@ -31,6 +31,9 @@ object ShopBackend {
     fun main(args: Array<String>) {
         println("ShopBackend starting...")
 
+        // ── Env diagnostics ───────────────────────────────────────────────────
+        printEnvDiagnostics()
+
         // Parse CLI args
         val dbPath = parseDbArg(args)
         if (!dbPath.isNullOrBlank()) println("Using database path: $dbPath")
@@ -52,10 +55,6 @@ object ShopBackend {
         }.onFailure { e ->
             println("Startup cleanup error: ${e.message}")
         }
-
-        // Demo hash
-        val hash = BCrypt.hashpw("1234", BCrypt.gensalt(12))
-        println("Generated bcrypt hash: $hash")
 
         // Instantiate route handlers
         val webAdmin = WebAdmin(db)
@@ -84,12 +83,13 @@ object ShopBackend {
         // Optional CallApp phone-name screening (set CALLAPP_RAPIDAPI_KEY env var to enable)
         val callAppApiKey = System.getenv("CALLAPP_RAPIDAPI_KEY")
         if (!callAppApiKey.isNullOrBlank()) {
-            val callAppClient = CallAppRapidApiClient(CallAppRapidApiConfig(apiKey = callAppApiKey))
+            val callAppConfig = CallAppRapidApiConfig(apiKey = callAppApiKey)
+            val callAppClient = CallAppRapidApiClient(callAppConfig)
             val callAppScreening = CallAppScreeningService(db = db, client = callAppClient)
             startCallAppScreeningScheduler(callAppScreening)
-            println("CallApp screening enabled (CALLAPP_RAPIDAPI_KEY is set).")
+            println("[CallApp] Screening enabled. host=${callAppConfig.host} timeout=${callAppConfig.timeoutMs}ms — scheduler: first run in 30s, then every 6h.")
         } else {
-            println("CallApp screening disabled (CALLAPP_RAPIDAPI_KEY not set).")
+            println("[CallApp] Screening DISABLED — CALLAPP_RAPIDAPI_KEY not set.")
         }
 
         // Server
@@ -128,6 +128,34 @@ object ShopBackend {
                 smsRoutes(db, smsService)
             }
         }.start(wait = true)
+    }
+
+    /** Prints each relevant env var with the first 4 chars visible and the rest masked. */
+    private fun printEnvDiagnostics() {
+        val vars = listOf(
+            "PORT",
+            "PUBLIC_BASE_URL",
+            "PUBLIC_BOOKING_URL",
+            "TWILIO_ACCOUNT_SID",
+            "TWILIO_AUTH_TOKEN",
+            "TWILIO_FROM_NUMBER",
+            "CALLAPP_RAPIDAPI_KEY",
+            "ADMIN_USERNAME",
+            "ADMIN_PASSWORD",
+            "LM_STUDIO_URL",
+            "LM_MODEL",
+        )
+        println("──── Environment ────────────────────────────────")
+        for (name in vars) {
+            val value = System.getenv(name)
+            val display = when {
+                value.isNullOrBlank() -> "missing"
+                value.length <= 4     -> "set (${value.length} chars)"
+                else                  -> "set ${value.take(4)}… (${value.length} chars)"
+            }
+            println("  $name = $display")
+        }
+        println("─────────────────────────────────────────────────")
     }
 
     private fun parseDbArg(args: Array<String>): String? {

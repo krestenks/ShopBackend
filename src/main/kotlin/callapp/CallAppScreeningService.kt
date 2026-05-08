@@ -41,12 +41,15 @@ class CallAppScreeningService(
      *         [InvalidPhoneNumberException] skips or circuit-breaker short-circuits).
      */
     suspend fun screenPendingCustomers(): Int {
+        val runAt = java.time.Instant.now()
+        println("[CallAppScreening] Batch started at $runAt")
+
         // ── Circuit breaker check ─────────────────────────────────────────────
         val now = System.currentTimeMillis()
         val openUntil = circuitOpenUntil.get()
         if (now < openUntil) {
             val waitSec = (openUntil - now) / 1000
-            println("[CallAppScreening] Circuit open — pausing lookups for ${waitSec}s")
+            println("[CallAppScreening] Circuit OPEN — skipping batch, resumes in ${waitSec}s")
             return 0
         }
 
@@ -55,11 +58,15 @@ class CallAppScreeningService(
             maxAgeMs = maxAgeMs,
             limit    = batchSize,
         )
-        if (customers.isEmpty()) return 0
+        if (customers.isEmpty()) {
+            println("[CallAppScreening] No pending customers — all results are fresh or in backoff. Done.")
+            return 0
+        }
 
-        println("[CallAppScreening] Screening ${customers.size} customer(s)…")
+        println("[CallAppScreening] Screening ${customers.size} customer(s) (batchSize=$batchSize, maxAgeMs=$maxAgeMs)…")
 
         var queried = 0
+        var skipped = 0
         for (customer in customers) {
             val phone = customer.phone.trim()
             try {
@@ -71,8 +78,8 @@ class CallAppScreeningService(
                 consecutiveFailures.set(0)
 
                 println(
-                    "[CallAppScreening] customerId=${customer.id} phone=$phone " +
-                    "found=${result.found} name=${result.name} priority=${result.priority}"
+                    "[CallAppScreening] ✓ customerId=${customer.id} phone=$phone " +
+                    "found=${result.found} name=${result.name ?: "(none)"} priority=${result.priority}"
                 )
 
             } catch (e: InvalidPhoneNumberException) {
@@ -81,7 +88,8 @@ class CallAppScreeningService(
                     customerId = customer.id,
                     error      = "InvalidPhone: ${e.message}",
                 )
-                // No API call was made; don't update the failure counter.
+                skipped++
+                println("[CallAppScreening] ⚠ customerId=${customer.id} phone=$phone — not a Danish number, skipped")
 
             } catch (e: Exception) {
                 // Real API/network failure
@@ -90,7 +98,7 @@ class CallAppScreeningService(
                     customerId = customer.id,
                     error      = "Error: $msg",
                 )
-                println("[CallAppScreening] ERROR customerId=${customer.id} phone=$phone — $msg")
+                println("[CallAppScreening] ✗ customerId=${customer.id} phone=$phone — ${e.javaClass.simpleName}: $msg")
                 queried++
 
                 // Update circuit breaker
@@ -100,8 +108,8 @@ class CallAppScreeningService(
                     circuitOpenUntil.set(openUntilNew)
                     consecutiveFailures.set(0)
                     println(
-                        "[CallAppScreening] Circuit breaker tripped after $failures failures. " +
-                        "Pausing for ${circuitBreakerPauseMs / 60_000} min."
+                        "[CallAppScreening] Circuit breaker TRIPPED after $failures consecutive failures. " +
+                        "Pausing all lookups for ${circuitBreakerPauseMs / 60_000} min. Remaining batch abandoned."
                     )
                     // Stop processing the rest of this batch — API is clearly unhealthy.
                     break
@@ -109,7 +117,7 @@ class CallAppScreeningService(
             }
         }
 
-        println("[CallAppScreening] Done — API queries: $queried / ${customers.size}")
+        println("[CallAppScreening] Done — API queries: $queried, skipped (non-Danish): $skipped, total candidates: ${customers.size}")
         return queried
     }
 }

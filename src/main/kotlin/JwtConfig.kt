@@ -27,9 +27,7 @@ object JwtConfig {
                 )
                 validate { credential ->
                     val userId = credential.payload.getClaim("userId").asInt()
-                    val role = credential.payload.getClaim("role").asString()
-                    println("JWT validated: userId=$userId, role=$role")
-
+                    // Silent on success — only auth failures are logged (see MobileApi.authenticateManager).
                     if (userId != null) JWTPrincipal(credential.payload) else null
                 }
             }

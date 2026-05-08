@@ -150,34 +150,28 @@ data class SetPhoneStatusRequest(
 )
 
 suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginInfo? {
-    val authHeader = call.request.headers["Authorization"]
-    println("Authorization header received: $authHeader")  // Log the token
-
-    if (authHeader == null) {
+    if (call.request.headers["Authorization"] == null) {
+        println("[Auth] FAIL — missing Authorization header (${call.request.uri})")
         call.respond(HttpStatusCode.Unauthorized, "Missing Authorization header")
         return null
     }
 
     val principal = call.principal<JWTPrincipal>()
     if (principal == null) {
+        println("[Auth] FAIL — invalid or expired token (${call.request.uri})")
         call.respond(HttpStatusCode.Unauthorized, "Invalid or expired token")
         return null
     }
 
     val userId = principal.payload.getClaim("userId")?.asInt()
-    val role = principal.payload.getClaim("role")?.asString()
-    println("authenticateManager: $userId, $role")
+    val role   = principal.payload.getClaim("role")?.asString()
 
-    if (role == "manager" && userId != null) {
-       return LoginInfo(role, userId, null)
-    }
-    else if (role == "shop" && userId != null) {
-        return LoginInfo(role, null, userId)
-    }
+    if (role == "manager" && userId != null) return LoginInfo(role, userId, null)
+    if (role == "shop"    && userId != null) return LoginInfo(role, null, userId)
 
+    println("[Auth] FAIL — unrecognised role='$role' userId=$userId (${call.request.uri})")
     call.respond(HttpStatusCode.Unauthorized, "Invalid role")
     return null
-
 }
 
 
