@@ -1509,6 +1509,7 @@ class WebAdmin(private val db: DataBase) {
                                         th { +"ID" }
                                         th { +"Name" }
                                         th { +"Phone" }
+                                        th { +"CallApp" }
                                         th { +"CRM status" }
                                         th { +"Blacklisted" }
                                         th { +"Bookings" }
@@ -1523,6 +1524,13 @@ class WebAdmin(private val db: DataBase) {
                                             td { +c.id.toString() }
                                             td { +(c.name.takeIf { it.isNotBlank() && it != "NoName" } ?: "—") }
                                             td { +(c.phone.takeIf { it.isNotBlank() } ?: "—") }
+                                            td {
+                                                if (!c.callappName.isNullOrBlank()) {
+                                                    span("badge ok") { +"📇 ${c.callappName}" }
+                                                } else {
+                                                    span { style = "color:#aaa"; +"—" }
+                                                }
+                                            }
                                             td {
                                                 // "New" = auto-created stub; any other value = manually set CRM label
                                                 span("badge ${if (c.status == "New") "warn" else "ok"}") {
@@ -1628,6 +1636,35 @@ class WebAdmin(private val db: DataBase) {
                         }
 
                         div("panel") {
+                            // ── CallApp directory info ─────────────────────────
+                            val screening = db.getCustomerCallAppScreening(customer.id)
+                            h3 { +"📇 CallApp directory" }
+                            if (screening == null) {
+                                p("hint") { +"Not yet screened — screening runs in the background every 6 hours." }
+                            } else if (!screening.found) {
+                                p {
+                                    span("badge warn") { +"Not found in directory" }
+                                    +" (failures: ${screening.failureCount})"
+                                }
+                                if (!screening.apiMessage.isNullOrBlank()) {
+                                    p("hint") { +"API message: ${screening.apiMessage}" }
+                                }
+                            } else {
+                                p {
+                                    span("badge ok") { +"📇 ${screening.name ?: "—"}" }
+                                    if (screening.priority != null) {
+                                        +" · Priority ${screening.priority}"
+                                    }
+                                }
+                                if (screening.screenedAt > 0) {
+                                    val checkedFmt = java.time.Instant.ofEpochMilli(screening.screenedAt)
+                                        .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                        .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+                                    p("hint") { +"Last checked: $checkedFmt" }
+                                }
+                            }
+
+                            hr()
                             h3 { +"Appointment history ($bookingCount total)" }
                             if (recentAppts.isEmpty()) {
                                 p("hint") { +"No bookings found." }
