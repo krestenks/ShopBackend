@@ -27,7 +27,16 @@ data class Service(val id: Int, val name: String, val price: Double, val duratio
 @Serializable
 data class TimeSlot(val start: Long, val end: Long)
 @Serializable
-data class Customer(val id: Int, val phone: String, val name: String, val status: String, val payment: Int, val language: Int)
+data class Customer(
+    val id: Int,
+    val phone: String,
+    val name: String,
+    val status: String,
+    val payment: Int,
+    val language: Int,
+    /** Name resolved from the CallApp directory (null if not yet screened or not found). */
+    val callappName: String? = null,
+)
 
 data class BookingTokenInfo(val shopId: Int, val customerId: Int, val token: String)
 data class Appointment(
@@ -122,6 +131,8 @@ data class VoiceCallRecord(
     val customerId: Int?,
     /** If the call was linked to a customer, this may contain the customer's name (if set). */
     val customerName: String? = null,
+    /** Name resolved from CallApp directory, if screening has run for this phone. */
+    val callappName: String? = null,
     val state: String,
     val outcome: String,
     val isActive: Boolean,
@@ -166,10 +177,39 @@ data class SmsConversationSummary(
     val counterpartyPhone: String,
     val customerId: Int?,
     val customerName: String?,
+    /** Name resolved from CallApp directory for this counterparty's phone. */
+    val callappName: String? = null,
     val lastBody: String,
     val lastDirection: String,
     val lastAt: Long,
     val unreadCount: Int,
+)
+
+// ─── CallApp screening result cache ─────────────────────────────────────────
+
+@Serializable
+data class CustomerCallAppScreening(
+    val customerId: Int,
+    /** true if CallApp found the number with a non-blank name */
+    val found: Boolean,
+    val name: String?,
+    val priority: Int?,
+    /** raw API status field */
+    val apiStatus: Boolean,
+    val apiMessage: String?,
+    val apiTimestamp: Long?,
+    val rawJson: String?,
+    /** error message when the HTTP/network call itself failed (null on success) */
+    val error: String?,
+    /** epoch-ms when this screening result was stored */
+    val screenedAt: Long,
+    /** number of consecutive API failures since the last success (0 on success) */
+    val failureCount: Int = 0,
+    /**
+     * epoch-ms before which we must not retry a failed lookup.
+     * null = either a successful row or a brand-new row.
+     */
+    val nextRetryAt: Long? = null,
 )
 
 // ─── Blacklist ───────────────────────────────────────────────────────────────
@@ -470,6 +510,32 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 UNIQUE(ref_type, ref_id)
             )
         """.trimIndent()) }
+
+        // CallApp screening result cache — one row per customer, refreshed every 30 days
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS customer_callapp_screening (
+                customer_id   INTEGER PRIMARY KEY,
+                found         INTEGER NOT NULL DEFAULT 0,
+                name          TEXT,
+                priority      INTEGER,
+                api_status    INTEGER NOT NULL DEFAULT 0,
+                api_message   TEXT,
+                api_timestamp INTEGER,
+                raw_json      TEXT,
+                error         TEXT,
+                screened_at   INTEGER NOT NULL,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER
+            )
+        """.trimIndent()) }
+
+        // Migration: add retry-tracking columns to existing screening rows
+        listOf(
+            "ALTER TABLE customer_callapp_screening ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE customer_callapp_screening ADD COLUMN next_retry_at INTEGER",
+        ).forEach { sql ->
+            try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
+        }
 
         println("All tables ready.")
     }
@@ -802,17 +868,24 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /** Shared SELECT fragment used by all voice call queries. */
+    private val CALL_SELECT = """
+        SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+               vc.customer_type, vc.customer_id,
+               c.name  AS customer_name,
+               cs.name AS callapp_name,
+               vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
+               vc.linked_booking_id, vc.operator_phone
+        FROM voice_call vc
+        LEFT JOIN customers c     ON c.id  = vc.customer_id
+        -- Join screening via explicit customer_id first; fall back to a phone match for unknown callers
+        LEFT JOIN customers cph   ON cph.phone = vc.from_phone
+        LEFT JOIN customer_callapp_screening cs
+                                  ON cs.customer_id = COALESCE(vc.customer_id, cph.id) AND cs.found = 1
+    """.trimIndent()
+
     fun getActiveCallsForShop(shopId: Int): List<VoiceCallRecord> {
-        val sql = """
-            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
-                   vc.customer_type, vc.customer_id,
-                   c.name AS customer_name,
-                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
-            FROM voice_call vc
-            LEFT JOIN customers c ON c.id = vc.customer_id
-            WHERE vc.shop_id = ? AND vc.is_active = 1
-            ORDER BY vc.started_at DESC
-        """.trimIndent()
+        val sql = "$CALL_SELECT WHERE vc.shop_id = ? AND vc.is_active = 1 ORDER BY vc.started_at DESC"
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             return buildCallRecordList(stmt.executeQuery())
@@ -820,17 +893,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getRecentCallsForShop(shopId: Int, limit: Int = 50): List<VoiceCallRecord> {
-        val sql = """
-            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
-                   vc.customer_type, vc.customer_id,
-                   c.name AS customer_name,
-                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
-            FROM voice_call vc
-            LEFT JOIN customers c ON c.id = vc.customer_id
-            WHERE vc.shop_id = ?
-            ORDER BY vc.started_at DESC
-            LIMIT ?
-        """.trimIndent()
+        val sql = "$CALL_SELECT WHERE vc.shop_id = ? ORDER BY vc.started_at DESC LIMIT ?"
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setInt(2, limit)
@@ -839,15 +902,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getCallById(callId: Int): VoiceCallRecord? {
-        val sql = """
-            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
-                   vc.customer_type, vc.customer_id,
-                   c.name AS customer_name,
-                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
-            FROM voice_call vc
-            LEFT JOIN customers c ON c.id = vc.customer_id
-            WHERE vc.id = ?
-        """.trimIndent()
+        val sql = "$CALL_SELECT WHERE vc.id = ?"
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, callId)
             return buildCallRecordList(stmt.executeQuery()).firstOrNull()
@@ -855,15 +910,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getCallByTwilioSid(twilioCallSid: String): VoiceCallRecord? {
-        val sql = """
-            SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
-                   vc.customer_type, vc.customer_id,
-                   c.name AS customer_name,
-                   vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at, vc.linked_booking_id, vc.operator_phone
-            FROM voice_call vc
-            LEFT JOIN customers c ON c.id = vc.customer_id
-            WHERE vc.twilio_call_sid = ?
-        """.trimIndent()
+        val sql = "$CALL_SELECT WHERE vc.twilio_call_sid = ?"
         connection.prepareStatement(sql).use { stmt ->
             stmt.setString(1, twilioCallSid)
             return buildCallRecordList(stmt.executeQuery()).firstOrNull()
@@ -898,6 +945,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 null
             }
 
+            val callappName: String? = try {
+                rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() }
+            } catch (_: Exception) { null }
+
             result += VoiceCallRecord(
                 id = rs.getInt("id"),
                 shopId = rs.getInt("shop_id"),
@@ -907,6 +958,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 customerType = rs.getString("customer_type"),
                 customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
                 customerName = customerName,
+                callappName = callappName,
                 state = rs.getString("state"),
                 outcome = rs.getString("outcome"),
                 isActive = rs.getInt("is_active") != 0,
@@ -1157,28 +1209,27 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getCustomerById(id: Int): Customer? {
-        val stmt = connection.prepareStatement(
-            "SELECT * FROM customers WHERE id = ?"
-        )
-        stmt.setInt(1, id)
-        val rs = stmt.executeQuery()
-
-        val customer = if (rs.next()) {
-            Customer(
-                id = rs.getInt("id"),
-                phone = rs.getString("phone"),
-                name = rs.getString("name"),
-                status = rs.getString("status"),
-                payment = rs.getInt("payment"),
-                language = rs.getInt("language")
+        val sql = """
+            SELECT c.id, c.phone, c.name, c.status, c.payment, c.language,
+                   s.name AS callapp_name
+            FROM customers c
+            LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id AND s.found = 1
+            WHERE c.id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, id)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return Customer(
+                id       = rs.getInt("id"),
+                phone    = rs.getString("phone"),
+                name     = rs.getString("name"),
+                status   = rs.getString("status"),
+                payment  = rs.getInt("payment"),
+                language = rs.getInt("language"),
+                callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
             )
-        } else {
-            null
         }
-
-        rs.close()
-        stmt.close()
-        return customer
     }
 
 
@@ -1240,9 +1291,20 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      */
     fun getAllCustomers(search: String? = null): List<Customer> {
         val sql = if (search.isNullOrBlank()) {
-            "SELECT * FROM customers ORDER BY id DESC"
+            """
+            SELECT c.id, c.phone, c.name, c.status, c.payment, c.language, s.name AS callapp_name
+            FROM customers c
+            LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id AND s.found = 1
+            ORDER BY c.id DESC
+            """.trimIndent()
         } else {
-            "SELECT * FROM customers WHERE phone LIKE ? OR name LIKE ? ORDER BY id DESC"
+            """
+            SELECT c.id, c.phone, c.name, c.status, c.payment, c.language, s.name AS callapp_name
+            FROM customers c
+            LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id AND s.found = 1
+            WHERE c.phone LIKE ? OR c.name LIKE ?
+            ORDER BY c.id DESC
+            """.trimIndent()
         }
         connection.prepareStatement(sql).use { stmt ->
             if (!search.isNullOrBlank()) {
@@ -1254,12 +1316,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             val customers = mutableListOf<Customer>()
             while (rs.next()) {
                 customers += Customer(
-                    id = rs.getInt("id"),
-                    phone = rs.getString("phone") ?: "",
-                    name = rs.getString("name") ?: "",
-                    status = rs.getString("status") ?: "",
-                    payment = rs.getInt("payment"),
-                    language = rs.getInt("language"),
+                    id          = rs.getInt("id"),
+                    phone       = rs.getString("phone") ?: "",
+                    name        = rs.getString("name") ?: "",
+                    status      = rs.getString("status") ?: "",
+                    payment     = rs.getInt("payment"),
+                    language    = rs.getInt("language"),
+                    callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
                 )
             }
             rs.close()
@@ -2713,12 +2776,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             SELECT m.counterparty_phone,
                    m.customer_id,
-                   c.name AS customer_name,
+                   c.name  AS customer_name,
+                   cs.name AS callapp_name,
                    m.body AS last_body,
                    m.direction AS last_direction,
                    m.created_at AS last_at
             FROM sms_message m
-            LEFT JOIN customers c ON c.id = m.customer_id
+            LEFT JOIN customers c     ON c.id    = m.customer_id
+            -- Resolve CallApp name: prefer explicit customer_id; fall back to phone match
+            LEFT JOIN customers cph   ON cph.phone = m.counterparty_phone
+            LEFT JOIN customer_callapp_screening cs
+                                      ON cs.customer_id = COALESCE(m.customer_id, cph.id) AND cs.found = 1
             WHERE m.shop_id = ?
               AND m.id = (
                   SELECT id FROM sms_message
@@ -2736,11 +2804,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 result += SmsConversationSummary(
                     counterpartyPhone = rs.getString("counterparty_phone"),
-                    customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerId  = rs.getInt("customer_id").takeIf { !rs.wasNull() },
                     customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
-                    lastBody = rs.getString("last_body") ?: "",
+                    callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                    lastBody    = rs.getString("last_body") ?: "",
                     lastDirection = rs.getString("last_direction") ?: "outbound",
-                    lastAt = rs.getLong("last_at"),
+                    lastAt      = rs.getLong("last_at"),
                     unreadCount = 0,
                 )
             }
@@ -2759,6 +2828,177 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(2, shopId)
             stmt.setString(3, phone.trim())
             stmt.executeUpdate()
+        }
+    }
+
+    // =========================================================================
+    // CallApp screening cache
+    // =========================================================================
+
+    /** Read the cached screening result for a customer, or null if not yet screened. */
+    fun getCustomerCallAppScreening(customerId: Int): CustomerCallAppScreening? {
+        val sql = """
+            SELECT customer_id, found, name, priority, api_status, api_message,
+                   api_timestamp, raw_json, error, screened_at,
+                   COALESCE(failure_count, 0) AS failure_count,
+                   next_retry_at
+            FROM customer_callapp_screening WHERE customer_id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return CustomerCallAppScreening(
+                customerId   = rs.getInt("customer_id"),
+                found        = rs.getInt("found") != 0,
+                name         = rs.getString("name"),
+                priority     = rs.getInt("priority").takeIf { !rs.wasNull() },
+                apiStatus    = rs.getInt("api_status") != 0,
+                apiMessage   = rs.getString("api_message"),
+                apiTimestamp = rs.getLong("api_timestamp").takeIf { !rs.wasNull() },
+                rawJson      = rs.getString("raw_json"),
+                error        = rs.getString("error"),
+                screenedAt   = rs.getLong("screened_at"),
+                failureCount = rs.getInt("failure_count"),
+                nextRetryAt  = rs.getLong("next_retry_at").takeIf { !rs.wasNull() },
+            )
+        }
+    }
+
+    /**
+     * Store a successful CallApp lookup result (insert or overwrite).
+     * Resets failure_count and next_retry_at so the row is treated as healthy.
+     */
+    fun upsertCustomerCallAppScreening(
+        customerId: Int,
+        result: callapp.CallAppLookupResult,
+        screenedAt: Long = System.currentTimeMillis(),
+    ) {
+        val sql = """
+            INSERT INTO customer_callapp_screening
+                (customer_id, found, name, priority, api_status, api_message, api_timestamp,
+                 raw_json, error, screened_at, failure_count, next_retry_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL)
+            ON CONFLICT(customer_id) DO UPDATE SET
+                found         = excluded.found,
+                name          = excluded.name,
+                priority      = excluded.priority,
+                api_status    = excluded.api_status,
+                api_message   = excluded.api_message,
+                api_timestamp = excluded.api_timestamp,
+                raw_json      = excluded.raw_json,
+                error         = NULL,
+                screened_at   = excluded.screened_at,
+                failure_count = 0,
+                next_retry_at = NULL
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setInt(2, if (result.found) 1 else 0)
+            stmt.setString(3, result.name)
+            if (result.priority != null) stmt.setInt(4, result.priority) else stmt.setNull(4, java.sql.Types.INTEGER)
+            stmt.setInt(5, if (result.status) 1 else 0)
+            stmt.setString(6, result.message)
+            if (result.timestamp != null) stmt.setLong(7, result.timestamp) else stmt.setNull(7, java.sql.Types.INTEGER)
+            stmt.setString(8, result.rawJson)
+            stmt.setLong(9, screenedAt)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Store a screening error (network timeout, HTTP error, etc.).
+     *
+     * Key robustness properties:
+     * - Preserves any existing [name] from a previous successful lookup (does NOT erase it).
+     * - Increments failure_count.
+     * - Sets next_retry_at using exponential backoff: 1h → 2h → 4h → 8h → ... capped at 24h.
+     */
+    fun upsertCustomerCallAppScreeningError(
+        customerId: Int,
+        error: String,
+        screenedAt: Long = System.currentTimeMillis(),
+    ) {
+        // Determine current failure count to compute backoff; default to 0 if no row yet.
+        val currentFailures = getCustomerCallAppScreening(customerId)?.failureCount ?: 0
+        val newFailures = currentFailures + 1
+        // Backoff: 2^newFailures hours, capped at 24h
+        val backoffMs = minOf(
+            (1L shl newFailures) * 60L * 60L * 1000L,  // 2^n hours in ms
+            24L * 60L * 60L * 1000L,                    // 24h cap
+        )
+        val nextRetryAt = screenedAt + backoffMs
+
+        val sql = """
+            INSERT INTO customer_callapp_screening
+                (customer_id, found, name, priority, api_status, api_message, api_timestamp,
+                 raw_json, error, screened_at, failure_count, next_retry_at)
+            VALUES (?, 0, NULL, NULL, 0, NULL, NULL, NULL, ?, ?, ?, ?)
+            ON CONFLICT(customer_id) DO UPDATE SET
+                -- Intentionally NOT overwriting 'found', 'name', 'priority' — keep last good data.
+                api_status    = 0,
+                api_message   = NULL,
+                api_timestamp = NULL,
+                raw_json      = NULL,
+                error         = excluded.error,
+                screened_at   = excluded.screened_at,
+                failure_count = excluded.failure_count,
+                next_retry_at = excluded.next_retry_at
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setString(2, error.take(500))
+            stmt.setLong(3, screenedAt)
+            stmt.setInt(4, newFailures)
+            stmt.setLong(5, nextRetryAt)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Returns customers that need a CallApp lookup:
+     * - Never screened (no row).
+     * - Successful row older than [maxAgeMs] (default 30 days).
+     * - Failed row whose [next_retry_at] has passed (exponential backoff).
+     *
+     * Ordered ASC so oldest customers are processed first.
+     */
+    fun getCustomersNeedingCallAppScreening(
+        maxAgeMs: Long = 30L * 24 * 60 * 60 * 1000,
+        limit: Int = 50,
+    ): List<Customer> {
+        val now    = System.currentTimeMillis()
+        val cutoff = now - maxAgeMs
+        val sql = """
+            SELECT c.id, c.phone, c.name, c.status, c.payment, c.language
+            FROM customers c
+            LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id
+            WHERE c.phone IS NOT NULL AND c.phone != ''
+              AND (
+                s.customer_id IS NULL                            -- never screened
+                OR (s.error IS NULL     AND s.screened_at < ?)  -- stale success (>30 days)
+                OR (s.error IS NOT NULL AND (s.next_retry_at IS NULL OR s.next_retry_at <= ?))  -- backoff elapsed
+              )
+            ORDER BY c.id ASC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, cutoff)
+            stmt.setLong(2, now)
+            stmt.setInt(3, limit)
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<Customer>()
+            while (rs.next()) {
+                result += Customer(
+                    id       = rs.getInt("id"),
+                    phone    = rs.getString("phone") ?: "",
+                    name     = rs.getString("name") ?: "",
+                    status   = rs.getString("status") ?: "",
+                    payment  = rs.getInt("payment"),
+                    language = rs.getInt("language"),
+                )
+            }
+            return result
         }
     }
 

@@ -21,6 +21,10 @@ import twilio.chatTestRoutes
 import twilio.chatApiRoutes
 import twilio.twilioVoiceRoutes
 import twilio.smsRoutes
+import callapp.CallAppRapidApiConfig
+import callapp.CallAppRapidApiClient
+import callapp.CallAppScreeningService
+import kotlinx.coroutines.runBlocking
 
 object ShopBackend {
     @JvmStatic
@@ -77,6 +81,17 @@ object ShopBackend {
         // Background cleanup
         startCleanupScheduler(db)
 
+        // Optional CallApp phone-name screening (set CALLAPP_RAPIDAPI_KEY env var to enable)
+        val callAppApiKey = System.getenv("CALLAPP_RAPIDAPI_KEY")
+        if (!callAppApiKey.isNullOrBlank()) {
+            val callAppClient = CallAppRapidApiClient(CallAppRapidApiConfig(apiKey = callAppApiKey))
+            val callAppScreening = CallAppScreeningService(db = db, client = callAppClient)
+            startCallAppScreeningScheduler(callAppScreening)
+            println("CallApp screening enabled (CALLAPP_RAPIDAPI_KEY is set).")
+        } else {
+            println("CallApp screening disabled (CALLAPP_RAPIDAPI_KEY not set).")
+        }
+
         // Server
         val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
         val host = "0.0.0.0"
@@ -127,6 +142,24 @@ object ShopBackend {
             }
         }
         return null
+    }
+
+    /**
+     * Runs [CallAppScreeningService.screenPendingCustomers] every 6 hours.
+     * The first run is delayed by 30 seconds so startup I/O settles first.
+     */
+    private fun startCallAppScreeningScheduler(service: CallAppScreeningService) {
+        val tf = ThreadFactory { r ->
+            Thread(r, "callapp-screening").apply { isDaemon = true }
+        }
+        val executor = Executors.newSingleThreadScheduledExecutor(tf)
+        executor.scheduleAtFixedRate({
+            try {
+                runBlocking { service.screenPendingCustomers() }
+            } catch (e: Exception) {
+                println("[CallAppScreening] Scheduler error: ${e.message}")
+            }
+        }, 30, 6 * 60 * 60L, TimeUnit.SECONDS)
     }
 
     private fun startCleanupScheduler(db: DataBase) {
