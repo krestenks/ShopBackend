@@ -185,6 +185,19 @@ data class SmsConversationSummary(
     val unreadCount: Int,
 )
 
+@Serializable
+data class SmsUnhandledNotification(
+    val shopId: Int,
+    val shopName: String,
+    val counterpartyPhone: String,
+    val customerId: Int?,
+    val customerName: String?,
+    val callappName: String?,
+    val lastBody: String,
+    val lastAt: Long,
+    val unreadCount: Int,
+)
+
 // ─── CallApp screening result cache ─────────────────────────────────────────
 
 @Serializable
@@ -472,6 +485,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
         } catch (e: Exception) {
             println("appointment_services migration skipped/failed: ${e.message}")
+        }
+
+        // Migration: add handled_at to sms_message (safe idempotent ALTER TABLE ADD COLUMN)
+        try {
+            connection.createStatement().use { stmt ->
+                stmt.executeUpdate("ALTER TABLE sms_message ADD COLUMN handled_at INTEGER NULL")
+            }
+            println("[DataBase] Migration: added handled_at column to sms_message")
+        } catch (_: Exception) {
+            // Column already exists — safe to ignore
         }
 
         // Migration: rename old table if it exists
@@ -2780,7 +2803,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                    cs.name AS callapp_name,
                    m.body AS last_body,
                    m.direction AS last_direction,
-                   m.created_at AS last_at
+                   m.created_at AS last_at,
+                   COALESCE((
+                       SELECT COUNT(*) FROM sms_message u
+                       WHERE u.shop_id = m.shop_id
+                         AND u.counterparty_phone = m.counterparty_phone
+                         AND u.direction = 'inbound'
+                         AND u.handled_at IS NULL
+                   ), 0) AS unread_count
             FROM sms_message m
             LEFT JOIN customers c     ON c.id    = m.customer_id
             -- Resolve CallApp name: prefer explicit customer_id; fall back to phone match
@@ -2810,7 +2840,99 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     lastBody    = rs.getString("last_body") ?: "",
                     lastDirection = rs.getString("last_direction") ?: "outbound",
                     lastAt      = rs.getLong("last_at"),
-                    unreadCount = 0,
+                    unreadCount = rs.getInt("unread_count"),
+                )
+            }
+            return result
+        }
+    }
+
+    /** Mark all unhandled inbound messages in a conversation as handled (read). */
+    fun markSmsConversationHandled(shopId: Int, counterpartyPhone: String) {
+        val sql = """
+            UPDATE sms_message SET handled_at = ?
+            WHERE shop_id = ? AND counterparty_phone = ?
+              AND direction = 'inbound' AND handled_at IS NULL
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, System.currentTimeMillis())
+            stmt.setInt(2, shopId)
+            stmt.setString(3, counterpartyPhone.trim())
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Total count of unhandled inbound SMS messages across a set of shops. */
+    fun getUnhandledSmsCount(shopIds: List<Int>): Int {
+        if (shopIds.isEmpty()) return 0
+        val placeholders = shopIds.joinToString(",") { "?" }
+        val sql = """
+            SELECT COUNT(*) FROM sms_message
+            WHERE shop_id IN ($placeholders)
+              AND direction = 'inbound'
+              AND handled_at IS NULL
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt(1) else 0
+        }
+    }
+
+    /** One summary row per unhandled conversation, across the given shops. */
+    fun getUnhandledSmsNotifications(shopIds: List<Int>): List<SmsUnhandledNotification> {
+        if (shopIds.isEmpty()) return emptyList()
+        val placeholders = shopIds.joinToString(",") { "?" }
+        val sql = """
+            SELECT m.shop_id,
+                   s.name   AS shop_name,
+                   m.counterparty_phone,
+                   m.customer_id,
+                   c.name   AS customer_name,
+                   cs.name  AS callapp_name,
+                   m.body   AS last_body,
+                   m.created_at AS last_at,
+                   (SELECT COUNT(*) FROM sms_message u
+                    WHERE u.shop_id = m.shop_id
+                      AND u.counterparty_phone = m.counterparty_phone
+                      AND u.direction = 'inbound'
+                      AND u.handled_at IS NULL) AS unread_count
+            FROM sms_message m
+            JOIN shops s ON s.id = m.shop_id
+            LEFT JOIN customers c   ON c.id = m.customer_id
+            LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
+            LEFT JOIN customer_callapp_screening cs
+                                    ON cs.customer_id = COALESCE(m.customer_id, cph.id) AND cs.found = 1
+            WHERE m.shop_id IN ($placeholders)
+              AND m.id = (
+                  SELECT id FROM sms_message
+                  WHERE shop_id = m.shop_id AND counterparty_phone = m.counterparty_phone
+                  ORDER BY created_at DESC LIMIT 1
+              )
+              AND EXISTS (
+                  SELECT 1 FROM sms_message u
+                  WHERE u.shop_id = m.shop_id
+                    AND u.counterparty_phone = m.counterparty_phone
+                    AND u.direction = 'inbound'
+                    AND u.handled_at IS NULL
+              )
+            ORDER BY m.created_at DESC
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<SmsUnhandledNotification>()
+            while (rs.next()) {
+                result += SmsUnhandledNotification(
+                    shopId      = rs.getInt("shop_id"),
+                    shopName    = rs.getString("shop_name") ?: "",
+                    counterpartyPhone = rs.getString("counterparty_phone"),
+                    customerId  = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
+                    callappName  = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                    lastBody    = rs.getString("last_body") ?: "",
+                    lastAt      = rs.getLong("last_at"),
+                    unreadCount = rs.getInt("unread_count"),
                 )
             }
             return result

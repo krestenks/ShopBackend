@@ -3,6 +3,7 @@ package twilio
 import DataBase
 import SmsConversationSummary
 import SmsMessage
+import SmsUnhandledNotification
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -34,6 +35,15 @@ data class SmsThreadResponse(val messages: List<SmsMessage>)
 
 @Serializable
 data class SmsConversationsResponse(val conversations: List<SmsConversationSummary>)
+
+@Serializable
+data class UnhandledCountResponse(val count: Int)
+
+@Serializable
+data class UnhandledNotificationsResponse(val notifications: List<SmsUnhandledNotification>)
+
+@Serializable
+data class MarkHandledRequest(val shopId: Int, val phone: String)
 
 // ─── Route installer ──────────────────────────────────────────────────────────
 
@@ -159,6 +169,58 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
             call.respond(SmsConversationsResponse(conversations))
         }
 
+        // Total unhandled-inbound count across all the caller's shops (for top-bar badge)
+        get("/api/mobile/sms/unhandled-count") {
+            val principal = call.principal<JWTPrincipal>()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
+
+            if (principal == null || refId == null || refType == null) {
+                call.respond(HttpStatusCode.Unauthorized, "Invalid token")
+                return@get
+            }
+
+            val shopIds = getShopIdsForPrincipal(db, refType, refId)
+            call.respond(UnhandledCountResponse(db.getUnhandledSmsCount(shopIds)))
+        }
+
+        // All unhandled conversations across the caller's shops (notification list)
+        get("/api/mobile/sms/unhandled-notifications") {
+            val principal = call.principal<JWTPrincipal>()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
+
+            if (principal == null || refId == null || refType == null) {
+                call.respond(HttpStatusCode.Unauthorized, "Invalid token")
+                return@get
+            }
+
+            val shopIds = getShopIdsForPrincipal(db, refType, refId)
+            call.respond(UnhandledNotificationsResponse(db.getUnhandledSmsNotifications(shopIds)))
+        }
+
+        // Mark all inbound messages in a thread as handled (read)
+        post("/api/mobile/sms/thread/mark-handled") {
+            val principal = call.principal<JWTPrincipal>()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
+
+            if (principal == null || refId == null || refType == null) {
+                call.respond(HttpStatusCode.Unauthorized, "Invalid token")
+                return@post
+            }
+
+            val req = call.receive<MarkHandledRequest>()
+
+            if (!isAuthorisedForShop(db, refType, refId, req.shopId)) {
+                call.respond(HttpStatusCode.Forbidden, "Not authorised for this shop")
+                return@post
+            }
+
+            db.markSmsConversationHandled(req.shopId, req.phone)
+            call.respond(mapOf("ok" to true))
+        }
+
         // Full thread with a single counterparty
         get("/api/mobile/sms/thread") {
             val principal = call.principal<JWTPrincipal>()
@@ -235,5 +297,15 @@ private fun isAuthorisedForShop(db: DataBase, refType: String, refId: Int, shopI
         "manager" -> db.isManagerOfShop(managerId = refId, shopId = shopId)
         "shop"    -> refId == shopId
         else      -> false
+    }
+}
+
+// ─── Helper: all shop IDs visible to a JWT caller ────────────────────────────
+
+private fun getShopIdsForPrincipal(db: DataBase, refType: String, refId: Int): List<Int> {
+    return when (refType) {
+        "manager" -> db.getShopsForManager(refId).map { it.id }
+        "shop"    -> listOf(refId)
+        else      -> emptyList()
     }
 }
