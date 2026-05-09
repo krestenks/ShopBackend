@@ -214,8 +214,22 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
         // ── 2. Identify customer ─────────────────────────────────────────────
         db.updateCallState(callId, VoiceCallState.IDENTIFY_CUSTOMER)
-        val customerId: Int? = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
-        val isKnownCustomer = customerId != null
+        val existingCustomerId: Int? = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
+        val isKnownCustomer = existingCustomerId != null
+
+        // Auto-create a "New" customer row for unknown callers so the manager app can always
+        // navigate to a customer detail page and whitelist/blacklist the number.
+        val customerId: Int? = existingCustomerId ?: run {
+            if (from.isBlank()) null
+            else try {
+                db.insertNewCustomer(from).also { newId ->
+                    println("[VoiceRoutes/welcome] Auto-created customer id=$newId for new caller phone=$from")
+                }
+            } catch (e: Exception) {
+                println("[VoiceRoutes/welcome] Failed to auto-create customer for phone=$from: ${e.message}")
+                null
+            }
+        }
 
         db.updateCallCustomer(callId, customerId, if (isKnownCustomer) "known" else "unknown")
 
@@ -370,6 +384,16 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.SYSTEM_ERROR)
                         call.respondText(
                             customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not read your number.</Say>"),
+                            ContentType.Text.Xml,
+                        )
+                        return@post
+                    }
+                    // Block SMS booking for customers with "New" status (voice only until whitelisted)
+                    val customerStatus = db.getCustomerIdByPhone(from)?.let { db.getCustomerById(it)?.status }
+                    if (customerStatus == "New") {
+                        if (callId > 0) db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
+                        call.respondText(
+                            customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">SMS booking is not available for your account. Please call again and press 2 to speak with an operator.</Say>"),
                             ContentType.Text.Xml,
                         )
                         return@post

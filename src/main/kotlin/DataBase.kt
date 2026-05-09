@@ -1297,6 +1297,23 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
+     * Update all editable customer fields except phone and DB id.
+     * Called from the manager app customer-detail edit dialog.
+     */
+    fun updateCustomerEditable(customerId: Int, name: String, status: String, payment: Int, language: Int) {
+        connection.prepareStatement(
+            "UPDATE customers SET name = ?, status = ?, payment = ?, language = ? WHERE id = ?"
+        ).use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, status.trim().ifBlank { "New" })
+            stmt.setInt(3, payment)
+            stmt.setInt(4, language)
+            stmt.setInt(5, customerId)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
      * Update both name and phone for a customer. Used from the web admin customer edit page.
      */
     fun updateCustomer(customerId: Int, name: String, phone: String) {

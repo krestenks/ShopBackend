@@ -80,6 +80,14 @@ data class CreateBookingMultiResponse(
 data class UpdateCustomerNameRequest(val name: String)
 
 @Serializable
+data class UpdateCustomerRequest(
+    val name: String,
+    val status: String,
+    val payment: Int,
+    val language: Int,
+)
+
+@Serializable
 data class CustomerDetailResponse(val customer: Customer, val appointments: List<AppointmentWithServices>)
 
 @Serializable
@@ -301,6 +309,32 @@ class MobileApi(private val db: DataBase) {
                     }
 
                     db.updateCustomerName(existing.id, name)
+                    call.respond(HttpStatusCode.NoContent)
+                }
+
+                /**
+                 * PUT /api/mobile/manager/shops/{shopId}/customers/{customerId}
+                 * Update all editable fields (name, status, payment, language) except phone/id.
+                 */
+                put("/api/mobile/manager/shops/{shopId}/customers/{customerId}") {
+                    val loginInfo = authenticateManager() ?: return@put
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val customerId = call.parameters["customerId"]?.toIntOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing customerId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@put
+                    }
+
+                    val body = runCatching { call.receive<UpdateCustomerRequest>() }.getOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    db.getCustomerById(customerId)
+                        ?: return@put call.respond(HttpStatusCode.NotFound, "Customer not found")
+
+                    db.updateCustomerEditable(customerId, body.name, body.status, body.payment, body.language)
                     call.respond(HttpStatusCode.NoContent)
                 }
 
