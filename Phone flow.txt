@@ -165,12 +165,12 @@ The customer should hear ringing while the operator whisper is played.
 ## Whisper for unknown caller
 
 Example:
-`Incoming call for {businessName}. New customer. Intake interview required before treatment. Press 1 to accept.`
+`Incoming call for {businessName}. New customer. Press 1 to accept.`
 
 ## Whisper for known caller
 
 Example:
-`Incoming call for {businessName}. Existing customer. Standard treatment flow. Press 1 to accept.`
+`Incoming call for {businessName}. Existing customer.` Call is auto accepted.
 
 ## Minimum whisper payload
 

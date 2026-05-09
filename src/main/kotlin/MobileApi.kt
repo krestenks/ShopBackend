@@ -734,6 +734,55 @@ class MobileApi(private val db: DataBase) {
                     ))
                 }
 
+                // ── 🤝 Accept whisper: manager taps button to accept a new-customer inbound call ──
+                // Redirects the operator-leg Twilio call to /auto-accept TwiML which bridges it.
+                post("/api/mobile/manager/shops/{shopId}/calls/{callId}/accept-whisper") {
+                    val loginInfo = authenticateManager() ?: return@post
+
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    val callLogId = call.parameters["callId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing callId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val callRecord = db.getCallById(callLogId)
+                        ?: return@post call.respond(HttpStatusCode.NotFound, "Call record not found")
+
+                    if (callRecord.shopId != shopId) {
+                        call.respond(HttpStatusCode.Forbidden, "Call does not belong to this shop")
+                        return@post
+                    }
+
+                    val operatorLegSid = callRecord.operatorLegSid
+                    if (operatorLegSid.isNullOrBlank()) {
+                        call.respond(HttpStatusCode.Conflict, "No operator leg SID stored yet — whisper not active")
+                        return@post
+                    }
+
+                    val base = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080")
+                    val autoAcceptUrl = "${base.trimEnd('/')}/api/twilio/voice/auto-accept?callId=$callLogId"
+
+                    val svc = TwilioVoiceCallService(
+                        accountSid    = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                        authToken     = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+                        fromNumber    = "",
+                        publicBaseUrl = base,
+                    )
+
+                    println("[AcceptWhisper] callId=$callLogId operatorLegSid=$operatorLegSid → $autoAcceptUrl")
+                    val result = svc.redirectCall(operatorLegSid, autoAcceptUrl)
+
+                    call.respond(CallCustomerResponse(
+                        success = result.success,
+                        status  = result.status,
+                        twilio  = result.body,
+                    ))
+                }
+
                 post("/api/mobile/manager/booking/create") {
                     val loginInfo = authenticateManager()
                     if (loginInfo == null) {

@@ -128,4 +128,25 @@ class TwilioVoiceCallService(
         val body = resp.bodyAsText()
         return CallResult(resp.status.value in 200..299, resp.status.value, body)
     }
+
+    /**
+     * Redirects a live Twilio call (by its CallSid) to a new TwiML URL.
+     * Used by the app's 🤝 accept button: redirects the operator-leg call to
+     * /api/twilio/voice/auto-accept so Twilio bridges the two legs immediately.
+     */
+    suspend fun redirectCall(callSid: String, newUrl: String): CallResult {
+        if (accountSid.isBlank() || authToken.isBlank()) {
+            return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")
+        }
+        val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls/$callSid.json"
+        val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
+        val resp: HttpResponse = client.post(url) {
+            header(HttpHeaders.Authorization, "Basic $basic")
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("Url" to newUrl, "Method" to "POST").formUrlEncode())
+        }
+        val body = resp.bodyAsText()
+        println("[TwilioVoice/redirect] callSid=$callSid newUrl=$newUrl status=${resp.status.value} body=$body")
+        return CallResult(resp.status.value in 200..299, resp.status.value, body)
+    }
 }

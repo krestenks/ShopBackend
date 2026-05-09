@@ -140,6 +140,8 @@ data class VoiceCallRecord(
     val endedAt: Long?,
     val linkedBookingId: Int?,
     val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
+    /** Child (operator-leg) Twilio CallSid, stored when the whisper URL is called. */
+    val operatorLegSid: String? = null,
 )
 
 @Serializable
@@ -515,6 +517,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN business_name TEXT",
             "ALTER TABLE shop_voice_config ADD COLUMN phone_override TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
+            "ALTER TABLE voice_call ADD COLUMN operator_leg_sid TEXT",
             // Employee availability per shop (manager controlled): 1=available, 0=unavailable
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
         ).forEach { sql ->
@@ -898,7 +901,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                c.name  AS customer_name,
                cs.name AS callapp_name,
                vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
-               vc.linked_booking_id, vc.operator_phone
+               vc.linked_booking_id, vc.operator_phone, vc.operator_leg_sid
         FROM voice_call vc
         LEFT JOIN customers c     ON c.id  = vc.customer_id
         -- Join screening via explicit customer_id first; fall back to a phone match for unknown callers
@@ -989,9 +992,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 endedAt = rs.getLong("ended_at").takeIf { !rs.wasNull() },
                 linkedBookingId = rs.getInt("linked_booking_id").takeIf { !rs.wasNull() },
                 operatorPhone = rs.getString("operator_phone"),
+                operatorLegSid = try { rs.getString("operator_leg_sid") } catch (_: Exception) { null },
             )
         }
         return result
+    }
+
+    /**
+     * Store the operator-leg (child) Twilio CallSid, captured when the whisper URL is served.
+     * Used by the app's 🤝 accept button to redirect the operator-leg call via Twilio REST.
+     */
+    fun setCallOperatorLegSid(callId: Int, operatorLegSid: String) {
+        connection.prepareStatement("UPDATE voice_call SET operator_leg_sid = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, operatorLegSid.trim())
+            stmt.setInt(2, callId)
+            stmt.executeUpdate()
+        }
     }
 
     // === Shop opening hours ===

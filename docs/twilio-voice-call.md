@@ -31,7 +31,7 @@ IncomingCall
 Before a call is bridged to the operator:
 - Customer hears **ringing** (`answerOnBridge="true"`).
 - Operator hears a private whisper:
-  - *New customer*: "Incoming call for {businessName}. New customer. Intake interview required before treatment. Press 1 to accept."
+  - *New customer*: "Incoming call for {businessName}. New customer. Press 1 to accept."
   - *Existing customer*: "Incoming call for {businessName}. Existing customer. Standard treatment flow. Press 1 to accept."
 - Operator must press `1` to accept; otherwise caller hears "No operator available."
 

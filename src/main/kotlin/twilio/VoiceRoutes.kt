@@ -170,7 +170,12 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         val from = (params["From"]     ?: call.request.queryParameters["From"]     ?: "").trim()
         val sid  = (params["CallSid"]  ?: call.request.queryParameters["CallSid"]  ?: "unknown-${System.currentTimeMillis()}").trim()
 
-        val shopId = db.findShopIdByTwilioNumber(to) ?: 1
+        val shopId = db.findShopIdByTwilioNumber(to)
+        if (shopId == null) {
+            println("[VoiceRoutes/welcome] No shop found for Twilio number '$to' — hanging up")
+            call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
+            return
+        }
         val voice  = db.getShopVoiceConfig(shopId)
         val base   = PublicBaseUrl.fromCall(call)
 
@@ -346,8 +351,16 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val to      = (params["To"]     ?: call.request.queryParameters["To"]     ?: "").trim()
             val callId  = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
             val attempt = call.request.queryParameters["attempt"]?.toIntOrNull() ?: 1
-            val shopId  = call.request.queryParameters["shopId"]?.toIntOrNull()
-                ?: (db.findShopIdByTwilioNumber(to) ?: 1)
+            val shopId: Int = call.request.queryParameters["shopId"]?.toIntOrNull()
+                ?: db.findShopIdByTwilioNumber(to)
+                ?: run {
+                    println("[VoiceRoutes/menu] No shopId param and no shop found for Twilio number '$to' — hanging up")
+                    call.respondText(
+                        """<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>""",
+                        ContentType.Text.Xml,
+                    )
+                    return@post
+                }
             val closedMenu = call.request.queryParameters["closed"]?.trim()?.lowercase() == "true"
 
             val voice    = db.getShopVoiceConfig(shopId)
@@ -513,8 +526,29 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
     // ── Operator whisper: played only to operator before bridge ──────────────
 
     route("/api/twilio/voice/operator-whisper") {
-        post { handleOperatorWhisper(call) }
-        get  { handleOperatorWhisper(call) }
+        post {
+            val params = call.receiveParameters()
+            val childCallSid = params["CallSid"]
+            handleOperatorWhisper(call, db, childCallSid)
+        }
+        get {
+            val childCallSid = call.request.queryParameters["CallSid"]
+            handleOperatorWhisper(call, db, childCallSid)
+        }
+    }
+
+    // ── App-accept: operator-leg is redirected here when manager taps 🤝 in app ──
+    route("/api/twilio/voice/auto-accept") {
+        post {
+            val callId = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            if (callId > 0) db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR)
+            call.respondText(twiml(""), ContentType.Text.Xml)
+        }
+        get {
+            val callId = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            if (callId > 0) db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR)
+            call.respondText(twiml(""), ContentType.Text.Xml)
+        }
     }
 
     // ── Operator accept: operator must press 1 to accept ─────────────────────
@@ -630,34 +664,43 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
 // ── Operator whisper logic (shared between POST and GET) ─────────────────────
 
-private suspend fun handleOperatorWhisper(call: ApplicationCall) {
+private suspend fun handleOperatorWhisper(call: ApplicationCall, db: DataBase, childCallSid: String? = null) {
     val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
     val customerType = call.request.queryParameters["customerType"] ?: "new"
     val bizName      = call.request.queryParameters["bizName"]
         ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
         ?: "the shop"
 
-    val base = PublicBaseUrl.fromCall(call)
-
-    val customerLabel = when (customerType) {
-        "existing" -> "Existing customer. Standard treatment flow."
-        else       -> "New customer. Please ask customer information."
+    // Store the operator-leg (child) CallSid so the app's 🤝 button can redirect it.
+    if (callId > 0 && !childCallSid.isNullOrBlank()) {
+        runCatching { db.setCallOperatorLegSid(callId, childCallSid) }
     }
 
-    val whisperText = "Incoming call for ${escapeForXml(bizName)}. $customerLabel Press 1 to accept."
-    val acceptAction = "$base/api/twilio/voice/operator-accept?callId=$callId"
+    val base = PublicBaseUrl.fromCall(call)
 
-    val xml = """
-        <Gather numDigits="1" timeout="15" action="${escapeForXml(acceptAction)}" method="POST">
-          <Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say>
-        </Gather>
-        <Say voice="Polly.Amy-Neural" language="en-GB">No response received. The call will be disconnected.</Say>
-    """.trimIndent()
-
-    call.respondText(
-        """<?xml version="1.0" encoding="UTF-8"?><Response>$xml</Response>""",
-        ContentType.Text.Xml,
-    )
+    if (customerType == "existing") {
+        // Known customer: no DTMF required — just play whisper and let Twilio bridge automatically.
+        if (callId > 0) runCatching { db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR) }
+        val whisperText = "Incoming call for ${escapeForXml(bizName)}. Existing customer. Standard treatment flow."
+        call.respondText(
+            """<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say></Response>""",
+            ContentType.Text.Xml,
+        )
+    } else {
+        // New/unknown customer: operator must press 1 to accept.
+        val whisperText = "Incoming call for ${escapeForXml(bizName)}. New customer. Intake required. Press 1 to accept."
+        val acceptAction = "$base/api/twilio/voice/operator-accept?callId=$callId"
+        val xml = """
+            <Gather numDigits="1" timeout="15" action="${escapeForXml(acceptAction)}" method="POST">
+              <Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say>
+            </Gather>
+            <Say voice="Polly.Amy-Neural" language="en-GB">No response received. The call will be disconnected.</Say>
+        """.trimIndent()
+        call.respondText(
+            """<?xml version="1.0" encoding="UTF-8"?><Response>$xml</Response>""",
+            ContentType.Text.Xml,
+        )
+    }
 }
 
 internal fun escapeForXml(input: String): String {
