@@ -54,6 +54,7 @@ data class CreateBookingMultiRequest(
     val appointmentTime: String,          // "yyyy-MM-dd HH:mm"
     val slots: List<CreateBookingMultiSlot>,
     val voiceCallId: Int? = null,
+    val customerId: Int? = null,
     val customerPhone: String? = null,
     /**
      * Optional override for the booked calendar block length (in minutes).
@@ -1253,9 +1254,14 @@ class MobileApi(private val db: DataBase) {
                     val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
                     val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
 
-                    // Resolve customer id from phone (same as create-json)
+                    // Resolve customer: explicit id > phone lookup/create > 0 (walk-in)
                     val customerId: Int = when {
-                        !body.customerPhone.isNullOrBlank() -> db.ensureCustomerByPhone(body.customerPhone)
+                        body.customerId != null && body.customerId > 0 -> body.customerId
+                        !body.customerPhone.isNullOrBlank() -> {
+                            val cid = db.ensureCustomerByPhone(body.customerPhone)
+                            println("[create-multi-json] resolved customerPhone=${body.customerPhone} -> customerId=$cid")
+                            cid
+                        }
                         else -> 0
                     }
 
