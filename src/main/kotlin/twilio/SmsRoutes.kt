@@ -184,6 +184,21 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
             call.respond(UnhandledCountResponse(db.getUnhandledSmsCount(shopIds)))
         }
 
+        // ALL conversations across the caller's shops (unread count may be 0)
+        get("/api/mobile/sms/all-conversations") {
+            val principal = call.principal<JWTPrincipal>()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
+
+            if (principal == null || refId == null || refType == null) {
+                call.respond(HttpStatusCode.Unauthorized, "Invalid token")
+                return@get
+            }
+
+            val shopIds = getShopIdsForPrincipal(db, refType, refId)
+            call.respond(UnhandledNotificationsResponse(db.getAllSmsConversationsAcrossShops(shopIds)))
+        }
+
         // All unhandled conversations across the caller's shops (notification list)
         get("/api/mobile/sms/unhandled-notifications") {
             val principal = call.principal<JWTPrincipal>()

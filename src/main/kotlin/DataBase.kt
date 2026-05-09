@@ -2879,6 +2879,59 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /** One summary row per conversation across the given shops — ALL conversations, unread count may be 0. */
+    fun getAllSmsConversationsAcrossShops(shopIds: List<Int>): List<SmsUnhandledNotification> {
+        if (shopIds.isEmpty()) return emptyList()
+        val placeholders = shopIds.joinToString(",") { "?" }
+        val sql = """
+            SELECT m.shop_id,
+                   s.name   AS shop_name,
+                   m.counterparty_phone,
+                   m.customer_id,
+                   c.name   AS customer_name,
+                   cs.name  AS callapp_name,
+                   m.body   AS last_body,
+                   m.created_at AS last_at,
+                   (SELECT COUNT(*) FROM sms_message u
+                    WHERE u.shop_id = m.shop_id
+                      AND u.counterparty_phone = m.counterparty_phone
+                      AND u.direction = 'inbound'
+                      AND u.handled_at IS NULL) AS unread_count
+            FROM sms_message m
+            JOIN shops s ON s.id = m.shop_id
+            LEFT JOIN customers c   ON c.id = m.customer_id
+            LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
+            LEFT JOIN customer_callapp_screening cs
+                                    ON cs.customer_id = COALESCE(m.customer_id, cph.id) AND cs.found = 1
+            WHERE m.shop_id IN ($placeholders)
+              AND m.id = (
+                  SELECT id FROM sms_message
+                  WHERE shop_id = m.shop_id AND counterparty_phone = m.counterparty_phone
+                  ORDER BY created_at DESC LIMIT 1
+              )
+            ORDER BY unread_count DESC, m.created_at DESC
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
+            val rs = stmt.executeQuery()
+            val result = mutableListOf<SmsUnhandledNotification>()
+            while (rs.next()) {
+                result += SmsUnhandledNotification(
+                    shopId      = rs.getInt("shop_id"),
+                    shopName    = rs.getString("shop_name") ?: "",
+                    counterpartyPhone = rs.getString("counterparty_phone"),
+                    customerId  = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
+                    callappName  = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                    lastBody    = rs.getString("last_body") ?: "",
+                    lastAt      = rs.getLong("last_at"),
+                    unreadCount = rs.getInt("unread_count"),
+                )
+            }
+            return result
+        }
+    }
+
     /** One summary row per unhandled conversation, across the given shops. */
     fun getUnhandledSmsNotifications(shopIds: List<Int>): List<SmsUnhandledNotification> {
         if (shopIds.isEmpty()) return emptyList()
