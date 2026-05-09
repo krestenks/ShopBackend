@@ -678,29 +678,29 @@ private suspend fun handleOperatorWhisper(call: ApplicationCall, db: DataBase, c
 
     val base = PublicBaseUrl.fromCall(call)
 
-    if (customerType == "existing") {
-        // Known customer: no DTMF required — just play whisper and let Twilio bridge automatically.
-        if (callId > 0) runCatching { db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR) }
-        val whisperText = "Incoming call for ${escapeForXml(bizName)}. Existing customer. Standard treatment flow."
-        call.respondText(
-            """<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say></Response>""",
-            ContentType.Text.Xml,
-        )
+    // Both existing and new customers: play whisper, then bridge automatically.
+    //
+    // Twilio bridges the operator to the customer as soon as the whisper TwiML ends
+    // (because the parent <Dial> uses answerOnBridge="true").
+    //
+    // The app's 🤝 button fires WHILE the whisper is playing (operatorLegSid is set),
+    // and serves as a UI shortcut to the customer-detail / booking screen — it no longer
+    // needs to make a Twilio REST API call because the bridge is already in progress.
+    //
+    // If the operator wants to DECLINE, they hang up their physical phone before
+    // the whisper finishes, which triggers dial-status with no-answer/canceled.
+    if (callId > 0) runCatching { db.updateCallState(callId, VoiceCallState.BRIDGED_TO_OPERATOR) }
+
+    val whisperText = if (customerType == "existing") {
+        "Incoming call for ${escapeForXml(bizName)}. Existing customer."
     } else {
-        // New/unknown customer: operator must press 1 to accept.
-        val whisperText = "Incoming call for ${escapeForXml(bizName)}. New customer. Intake required. Press 1 to accept."
-        val acceptAction = "$base/api/twilio/voice/operator-accept?callId=$callId"
-        val xml = """
-            <Gather numDigits="1" timeout="15" action="${escapeForXml(acceptAction)}" method="POST">
-              <Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say>
-            </Gather>
-            <Say voice="Polly.Amy-Neural" language="en-GB">No response received. The call will be disconnected.</Say>
-        """.trimIndent()
-        call.respondText(
-            """<?xml version="1.0" encoding="UTF-8"?><Response>$xml</Response>""",
-            ContentType.Text.Xml,
-        )
+        "Incoming call for ${escapeForXml(bizName)}. New customer. Intake required."
     }
+
+    call.respondText(
+        """<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Amy-Neural" language="en-GB">$whisperText</Say></Response>""",
+        ContentType.Text.Xml,
+    )
 }
 
 internal fun escapeForXml(input: String): String {
