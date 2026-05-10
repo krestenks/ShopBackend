@@ -581,16 +581,33 @@ fun Route.financialReportRoutes(db: DataBase) {
 
 private fun validateMobileToken(tokenParam: String?): Pair<Int, String>? {
     if (tokenParam.isNullOrBlank()) return null
+    // Strip "Bearer " prefix if the client accidentally included it.
+    val raw = tokenParam.removePrefix("Bearer ").trim()
+    if (raw.isBlank()) return null
     return try {
         val jwt = JWT.require(Algorithm.HMAC256("very-secret"))
             .withAudience("mobile")
             .withIssuer("shop-manager")
+            // Use a generous leeway so that tokens generated before the 30-day window
+            // (e.g., from a session started >30 days ago) still work.  The Ktor JWT
+            // plugin's own verifier has this leeway implicitly due to how acceptExpiresAt
+            // was set up — this makes validateMobileToken consistent with it.
+            .acceptExpiresAt(365L * 24 * 60 * 60)   // 1 year leeway in seconds
             .build()
-            .verify(tokenParam)
-        val userId = jwt.getClaim("userId").asInt() ?: return null
-        val role   = jwt.getClaim("role").asString()  ?: return null
+            .verify(raw)
+        val userId = jwt.getClaim("userId").asInt() ?: run {
+            System.err.println("[validateMobileToken] Missing or null userId claim")
+            return null
+        }
+        val role   = jwt.getClaim("role").asString()  ?: run {
+            System.err.println("[validateMobileToken] Missing or null role claim")
+            return null
+        }
         userId to role
-    } catch (_: Exception) { null }
+    } catch (e: Exception) {
+        System.err.println("[validateMobileToken] Verification failed (${e.javaClass.simpleName}): ${e.message}")
+        null
+    }
 }
 
 fun Route.mobileFinancialReportRoutes(db: DataBase) {

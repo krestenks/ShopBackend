@@ -16,13 +16,15 @@ object JwtConfig {
         application.install(Authentication) {
             jwt("jwt") {
                 realm = JwtConfig.realm
-                val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30// 30 days
                 verifier(
                     JWT
                         .require(Algorithm.HMAC256(secret))
                         .withAudience(audience)
                         .withIssuer(issuer)
-                        .acceptExpiresAt(expiresAt)
+                        // Accept tokens that expired up to 1 year ago so that long-lived
+                        // sessions keep working between app restarts.  New tokens are issued
+                        // with a 365-day lifetime so this only matters for very old sessions.
+                        .acceptExpiresAt(365L * 24 * 60 * 60)   // leeway in seconds
                         .build()
                 )
                 validate { credential ->
@@ -35,7 +37,7 @@ object JwtConfig {
     }
 
     fun generateToken(userId: Int, role: String): String {
-        val expiresAt = System.currentTimeMillis() + 1000 * 60 * 60 * 24 * 30// 30 days
+        val expiresAt = System.currentTimeMillis() + 1000L * 60 * 60 * 24 * 365 // 365 days
         return JWT.create()
             .withAudience(audience)
             .withIssuer(issuer)
