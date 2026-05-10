@@ -109,11 +109,17 @@ object ShopBackend {
             JwtConfig.install(this)
 
             routing {
-                route("/") { webAdmin.setupRoutes(this) }
+                route("/") {
+                    webAdmin.setupRoutes(this)
+                    financialReportRoutes(db)
+                }
                 route("/api") { customerApi.setupRoutes(this) }
                 // MobileApi defines its own absolute paths like /api/mobile/...
                 // so we mount it at root to avoid /mobile/api/mobile/... double-prefix.
                 mobileApi.setupRoutes(this)
+
+                // Mobile financial reports (JWT token in query param for WebView)
+                mobileFinancialReportRoutes(db)
 
                 // Self-hosted Android APK update endpoints (JWT authenticated)
                 appUpdateRoutes()

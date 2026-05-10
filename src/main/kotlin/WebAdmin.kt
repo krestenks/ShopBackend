@@ -54,6 +54,7 @@ class WebAdmin(private val db: DataBase) {
                         NavItem("/managers", "Managers", "🧑‍💼"),
                         NavItem("/appointments", "Appointments", "📅"),
                         NavItem("/customers", "Customers", "👤"),
+                        NavItem("/reports", "Reports", "💰"),
                         NavItem("/twilio/setup", "Twilio setup", "📞"),
                         NavItem("/test-booking-link", "Booking link", "🔗"),
                     )

@@ -262,6 +262,38 @@ data class EmployeeAvailability(
     val available: Boolean,
 )
 
+// ─── Financial reporting ──────────────────────────────────────────────────────
+
+/**
+ * A single time-bucket row in a financial report.
+ *
+ * @param label  Human-readable period label, e.g. "Mon 05/05" or "January"
+ * @param earnings  Map from employeeId → earnings in this bucket (0.0 if no activity)
+ * @param total  Sum of all employees for this bucket
+ */
+data class FinancialReportRow(
+    val label: String,
+    val earnings: Map<Int, Double>,
+    val total: Double,
+)
+
+/**
+ * Full financial report result.
+ *
+ * @param shop        The shop being reported on
+ * @param employees   Ordered list of employees that appear in the report
+ * @param rows        One row per day (week/month view) or month (year view)
+ * @param employeeTotals  Grand total per employee across all rows
+ * @param grandTotal  Grand total across all employees and rows
+ */
+data class FinancialReport(
+    val shop: Shop,
+    val employees: List<Employee>,
+    val rows: List<FinancialReportRow>,
+    val employeeTotals: Map<Int, Double>,
+    val grandTotal: Double,
+)
+
 
 class DataBase(dbFileName: String = "ShopManager.db") {
     private val dbFile = File(dbFileName)
@@ -3442,6 +3474,88 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     "(no activity in ${maxRetentionMs / 86_400_000} days)")
         }
         return deleted
+    }
+
+    // =========================================================================
+    // Financial reporting
+    // =========================================================================
+
+    /**
+     * Build a [FinancialReport] for [shopId] covering [fromMs]..[toMs] (epoch-ms, inclusive).
+     *
+     * Each appointment row is placed into a bucket determined by [bucketFn], which returns
+     * a canonical bucket key (e.g. "2026-05-05" for daily or "2026-05" for monthly bucketing).
+     *
+     * @param bucketLabels   Ordered list of (bucketKey, humanLabel) for every bucket in the period,
+     *                       including those with no activity (so rows with zeros appear).
+     * @param bucketFn       Maps an epoch-ms appointment datetime → bucket key.
+     */
+    fun buildFinancialReport(
+        shopId: Int,
+        fromMs: Long,
+        toMs: Long,
+        bucketLabels: List<Pair<String, String>>,
+        bucketFn: (Long) -> String,
+    ): FinancialReport {
+        val shop = getShopById(shopId) ?: throw IllegalArgumentException("Shop $shopId not found")
+
+        // Raw query: employee_id + date_time + price for all appointments in the window
+        val sql = """
+            SELECT employee_id, date_time, price
+            FROM appointments
+            WHERE shop_id = ? AND date_time >= ? AND date_time <= ?
+            ORDER BY date_time ASC
+        """.trimIndent()
+
+        // bucket key → (employeeId → sumPrice)
+        val bucketEmpMap = mutableMapOf<String, MutableMap<Int, Double>>()
+        val employeeIdsSeen = mutableSetOf<Int>()
+
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setLong(2, fromMs)
+            stmt.setLong(3, toMs)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val empId = rs.getInt("employee_id")
+                val dt    = rs.getLong("date_time")
+                val price = rs.getDouble("price")
+                val key   = bucketFn(dt)
+                employeeIdsSeen += empId
+                bucketEmpMap.getOrPut(key) { mutableMapOf() }
+                    .merge(empId, price, Double::plus)
+            }
+        }
+
+        // Resolve employees: all employees for this shop that appeared in the report,
+        // ordered by name for a consistent column layout.
+        val allShopEmployees = getEmployeesForShop(shopId).associateBy { it.id }
+        val employees = employeeIdsSeen
+            .mapNotNull { allShopEmployees[it] ?: getEmployeeById(it) }
+            .sortedBy { it.name }
+
+        // Build rows in bucket order
+        val rows = bucketLabels.map { (key, label) ->
+            val empMap = bucketEmpMap[key] ?: emptyMap()
+            val earnings = employees.associate { emp ->
+                emp.id to (empMap[emp.id] ?: 0.0)
+            }
+            val total = earnings.values.sum()
+            FinancialReportRow(label = label, earnings = earnings, total = total)
+        }
+
+        val employeeTotals = employees.associate { emp ->
+            emp.id to rows.sumOf { it.earnings[emp.id] ?: 0.0 }
+        }
+        val grandTotal = employeeTotals.values.sum()
+
+        return FinancialReport(
+            shop = shop,
+            employees = employees,
+            rows = rows,
+            employeeTotals = employeeTotals,
+            grandTotal = grandTotal,
+        )
     }
 
 
