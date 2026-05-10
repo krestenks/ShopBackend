@@ -1865,8 +1865,51 @@ class WebAdmin(private val db: DataBase) {
                                 }
                             }
                         }
+
+                        hr()
+                        h3 { +"⚠️ Danger zone" }
+                        p("hint") { +"Permanently deletes communication records for this customer. Active calls are never deleted." }
+                        div("actions") {
+                            form(action = "/customers/comms/clear-sms", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput(classes = "btn danger") {
+                                    value = "🗑 Clear SMS history (${smsList.size} messages)"
+                                    onClick = "return confirm('Delete all ${smsList.size} SMS messages for this customer? This cannot be undone.')"
+                                }
+                            }
+                            +" "
+                            form(action = "/customers/comms/clear-calls", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput(classes = "btn danger") {
+                                    value = "🗑 Clear call history (${callsList.size} calls)"
+                                    onClick = "return confirm('Delete all ended calls for this customer? Active calls are kept. This cannot be undone.')"
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/customers/comms/clear-sms") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers")
+                val customer = db.getCustomerById(id)
+                    ?: return@post call.respondRedirect("/customers")
+                val deleted = db.clearSmsForCustomer(customer.id, customer.phone)
+                println("[Admin] Cleared $deleted SMS messages for customer ${customer.id} (${customer.phone})")
+                call.respondRedirect("/customers/comms?id=$id")
+            }
+
+            post("/customers/comms/clear-calls") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers")
+                val customer = db.getCustomerById(id)
+                    ?: return@post call.respondRedirect("/customers")
+                val deleted = db.clearCallsForCustomer(customer.id, customer.phone)
+                println("[Admin] Cleared $deleted call records for customer ${customer.id} (${customer.phone})")
+                call.respondRedirect("/customers/comms?id=$id")
             }
 
             post("/customers/edit") {

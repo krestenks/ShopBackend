@@ -3272,6 +3272,58 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Delete all SMS messages for a customer (matched by customer_id OR counterparty_phone).
+     * Returns number of rows deleted.
+     */
+    fun clearSmsForCustomer(customerId: Int, phone: String): Int {
+        // Collect matching IDs first
+        val ids = mutableListOf<Int>()
+        connection.prepareStatement(
+            "SELECT id FROM sms_message WHERE customer_id = ? OR counterparty_phone = ?"
+        ).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setString(2, phone.trim())
+            val rs = stmt.executeQuery()
+            while (rs.next()) ids += rs.getInt("id")
+        }
+        if (ids.isEmpty()) return 0
+        val ph = ids.joinToString(",") { "?" }
+        return connection.prepareStatement("DELETE FROM sms_message WHERE id IN ($ph)").use { s ->
+            ids.forEachIndexed { i, id -> s.setInt(i + 1, id) }
+            s.executeUpdate()
+        }
+    }
+
+    /**
+     * Delete all ended (is_active = 0) voice calls for a customer (matched by customer_id OR from_phone).
+     * Active calls are never deleted.
+     * Returns number of call rows deleted.
+     */
+    fun clearCallsForCustomer(customerId: Int, phone: String): Int {
+        // Collect ended call IDs
+        val ids = mutableListOf<Int>()
+        connection.prepareStatement(
+            "SELECT id FROM voice_call WHERE is_active = 0 AND (customer_id = ? OR from_phone = ?)"
+        ).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setString(2, phone.trim())
+            val rs = stmt.executeQuery()
+            while (rs.next()) ids += rs.getInt("id")
+        }
+        if (ids.isEmpty()) return 0
+        val ph = ids.joinToString(",") { "?" }
+        // Delete events first (FK)
+        connection.prepareStatement("DELETE FROM voice_call_event WHERE call_id IN ($ph)").use { s ->
+            ids.forEachIndexed { i, id -> s.setInt(i + 1, id) }
+            s.executeUpdate()
+        }
+        return connection.prepareStatement("DELETE FROM voice_call WHERE id IN ($ph)").use { s ->
+            ids.forEachIndexed { i, id -> s.setInt(i + 1, id) }
+            s.executeUpdate()
+        }
+    }
+
     /** Voice calls for a customer — matched by customer_id OR from_phone. */
     fun getVoiceCallsForCustomer(customerId: Int, phone: String, limit: Int = 100): List<VoiceCallRecord> {
         val sql = "$CALL_SELECT WHERE (vc.customer_id = ? OR vc.from_phone = ?) ORDER BY vc.started_at DESC LIMIT ?"
