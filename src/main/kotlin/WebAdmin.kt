@@ -701,6 +701,29 @@ class WebAdmin(private val db: DataBase) {
                             }
 
                             hr()
+                            h3 { +"Data retention (per shop)" }
+                            p("hint") {
+                                +"Communication history (SMS + calls) and customer profiles are automatically deleted after the configured number of days when there is no new activity."
+                            }
+                            label { +"Communication history — keep for (days)" }
+                            br()
+                            numberInput {
+                                name = "communication_retention_days"
+                                value = voiceConfig.communicationRetentionDays.toString()
+                                min = "1"; max = "365"; step = "1"
+                            }
+                            p("hint") { +"Default: 5 days. SMS messages and ended calls older than this are deleted from the database." }
+                            br()
+                            label { +"Customer profile — keep for (days without booking/contact)" }
+                            br()
+                            numberInput {
+                                name = "customer_retention_days"
+                                value = voiceConfig.customerRetentionDays.toString()
+                                min = "1"; max = "3650"; step = "1"
+                            }
+                            p("hint") { +"Default: 90 days (≈3 months). Customer records with no appointment, SMS or call within this window are deleted." }
+
+                            hr()
                             h3 { +"Opening hours" }
 
                             table {
@@ -806,6 +829,8 @@ class WebAdmin(private val db: DataBase) {
                             .ifBlank { ShopVoiceConfig(id).temporaryOperatorClosedMessage },
                         welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
+                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
+                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
                     )
                     db.upsertShopVoiceConfig(voice)
 
@@ -1608,6 +1633,41 @@ class WebAdmin(private val db: DataBase) {
                                     placeholder = "New"
                                 }
 
+                                label { +"Payment method" }
+                                select {
+                                    name = "payment"
+                                    listOf(
+                                        "0" to "— Unknown",
+                                        "1" to "Cash",
+                                        "2" to "Card",
+                                        "3" to "MobilePay",
+                                        "4" to "PayPal",
+                                        "5" to "Revolut",
+                                    ).forEach { (v, lbl) ->
+                                        option {
+                                            value = v
+                                            selected = (customer.payment.toString() == v)
+                                            +lbl
+                                        }
+                                    }
+                                }
+
+                                label { +"Preferred language" }
+                                select {
+                                    name = "language"
+                                    listOf(
+                                        "0" to "— Unknown",
+                                        "1" to "English",
+                                        "2" to "Danish",
+                                    ).forEach { (v, lbl) ->
+                                        option {
+                                            value = v
+                                            selected = (customer.language.toString() == v)
+                                            +lbl
+                                        }
+                                    }
+                                }
+
                                 br()
                                 submitInput(classes = "btn primary") { value = "Save changes" }
                                 +" "
@@ -1665,6 +1725,12 @@ class WebAdmin(private val db: DataBase) {
                             }
 
                             hr()
+                            div("actions") {
+                                a(href = "/customers/comms?id=${customer.id}", classes = "btn") {
+                                    +"📨 Communication history (SMS + calls)"
+                                }
+                            }
+                            hr()
                             h3 { +"Appointment history ($bookingCount total)" }
                             if (recentAppts.isEmpty()) {
                                 p("hint") { +"No bookings found." }
@@ -1713,14 +1779,106 @@ class WebAdmin(private val db: DataBase) {
                 }
             }
 
+            // ── Customer communication history page ───────────────────────────
+            get("/customers/comms") {
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/customers")
+                val customer = db.getCustomerById(id)
+                    ?: return@get call.respondRedirect("/customers")
+
+                val smsList   = db.getSmsMessagesForCustomer(customer.id, customer.phone, limit = 200)
+                val callsList = db.getVoiceCallsForCustomer(customer.id, customer.phone, limit = 200)
+                val shopsMap  = db.getAllShops().associateBy { it.id }
+
+                fun fmtTs(epochMs: Long): String = java.time.Instant.ofEpochMilli(epochMs)
+                    .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                    .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+
+                call.respondAdminPage(
+                    titleText = "Communication history",
+                    subtitle = "${customer.name.takeIf { it != "NoName" } ?: "—"} · ${customer.phone}",
+                    activePath = "/customers",
+                ) {
+                    div("panel") {
+                        div("actions") {
+                            a(href = "/customers/edit?id=$id", classes = "btn") { +"← Back to customer" }
+                        }
+
+                        h3 { +"📨 SMS messages (${smsList.size})" }
+                        if (smsList.isEmpty()) {
+                            p("hint") { +"No SMS messages found." }
+                        } else {
+                            table {
+                                thead {
+                                    tr {
+                                        th { +"Date" }; th { +"Shop" }; th { +"Dir" }
+                                        th { +"From" }; th { +"To" }; th { +"Status" }; th { +"Body" }
+                                    }
+                                }
+                                tbody {
+                                    for (m in smsList) {
+                                        tr {
+                                            td { +fmtTs(m.createdAt) }
+                                            td { +(shopsMap[m.shopId]?.name ?: "#${m.shopId}") }
+                                            td {
+                                                span("badge ${if (m.direction == "inbound") "ok" else ""}") {
+                                                    +(if (m.direction == "inbound") "↙ IN" else "↗ OUT")
+                                                }
+                                            }
+                                            td { +m.fromPhone }
+                                            td { +m.toPhone }
+                                            td { +m.status }
+                                            td { style = "max-width:320px;word-break:break-word;"; +m.body }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        hr()
+                        h3 { +"📞 Call log (${callsList.size})" }
+                        if (callsList.isEmpty()) {
+                            p("hint") { +"No calls found." }
+                        } else {
+                            table {
+                                thead {
+                                    tr {
+                                        th { +"Date" }; th { +"Shop" }; th { +"From" }; th { +"To" }
+                                        th { +"State" }; th { +"Outcome" }; th { +"Booking" }
+                                    }
+                                }
+                                tbody {
+                                    for (c in callsList) {
+                                        tr {
+                                            td { +fmtTs(c.startedAt) }
+                                            td { +(shopsMap[c.shopId]?.name ?: "#${c.shopId}") }
+                                            td { +c.fromPhone }
+                                            td { +c.toPhone }
+                                            td { +c.state }
+                                            td { +c.outcome }
+                                            td {
+                                                if (c.linkedBookingId != null) span("badge ok") { +"#${c.linkedBookingId}" }
+                                                else span { style = "color:#aaa"; +"—" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             post("/customers/edit") {
                 val params = call.receiveParameters()
                 val id = params["id"]?.toIntOrNull()
                     ?: return@post call.respondRedirect("/customers")
-                val name   = params["name"]?.trim().orEmpty()
-                val phone  = params["phone"]?.trim().orEmpty()
-                val status = params["status"]?.trim().orEmpty().ifBlank { "New" }
-                db.updateCustomerFull(id, name, phone, status)
+                val name    = params["name"]?.trim().orEmpty()
+                val phone   = params["phone"]?.trim().orEmpty()
+                val status  = params["status"]?.trim().orEmpty().ifBlank { "New" }
+                val payment  = params["payment"]?.toIntOrNull() ?: 0
+                val language = params["language"]?.toIntOrNull() ?: 0
+                db.updateCustomerFull(id, name, phone, status, payment, language)
                 call.respondRedirect("/customers")
             }
 

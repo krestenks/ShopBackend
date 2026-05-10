@@ -205,6 +205,13 @@ object ShopBackend {
                     note = "scheduled_cleanup",
                 )
                 if (terminated > 0) println("Cleanup: terminated $terminated stale active calls")
+
+                // Data-retention: delete old SMS + call logs, then prune dead customer profiles.
+                val commsDeleted = db.deleteExpiredCommunications()
+                val customersDeleted = db.deleteExpiredCustomers()
+                if (commsDeleted + customersDeleted > 0) {
+                    println("[DataRetention] Cleanup cycle: $commsDeleted communications, $customersDeleted customer profiles deleted.")
+                }
             } catch (e: Exception) {
                 println("Error during cleanup: ${e.message}")
             }

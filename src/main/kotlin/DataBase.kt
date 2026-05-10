@@ -83,6 +83,10 @@ data class ShopVoiceConfig(
     val businessName: String? = null,
     /** null/"auto" = follow opening hours schedule; "open" or "closed" forces state */
     val phoneOverride: String? = null,
+    /** Days to keep SMS + call-log history before auto-deletion.  Default 5. */
+    val communicationRetentionDays: Int = 5,
+    /** Days to keep a customer profile after their last booking/contact.  Default 90 (≈3 months). */
+    val customerRetentionDays: Int = 90,
 )
 
 // ─── Voice call log ──────────────────────────────────────────────────────────
@@ -518,6 +522,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN phone_override TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_leg_sid TEXT",
+            "ALTER TABLE shop_voice_config ADD COLUMN communication_retention_days INTEGER NOT NULL DEFAULT 5",
+            "ALTER TABLE shop_voice_config ADD COLUMN customer_retention_days INTEGER NOT NULL DEFAULT 90",
             // Employee availability per shop (manager controlled): 1=available, 0=unavailable
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
         ).forEach { sql ->
@@ -571,7 +577,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
         val sql = """
             SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message,
-                   temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override
+                   temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override,
+                   communication_retention_days, customer_retention_days
             FROM shop_voice_config WHERE shop_id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -589,6 +596,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                         ?: ShopVoiceConfig(shopId).temporaryOperatorClosedMessage,
                     businessName = rs.getString("business_name"),
                     phoneOverride = rs.getString("phone_override"),
+                    communicationRetentionDays = try { rs.getInt("communication_retention_days").takeIf { !rs.wasNull() } ?: 5 } catch (_: Exception) { 5 },
+                    customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 90 } catch (_: Exception) { 90 },
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -599,8 +608,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
         val sql = """
             INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message,
-                welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message,
+                business_name, phone_override, communication_retention_days, customer_retention_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 twilio_number = excluded.twilio_number,
                 operator_phone = excluded.operator_phone,
@@ -609,7 +619,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 temporary_operator_closed = excluded.temporary_operator_closed,
                 temporary_operator_closed_message = excluded.temporary_operator_closed_message,
                 business_name = excluded.business_name,
-                phone_override = excluded.phone_override
+                phone_override = excluded.phone_override,
+                communication_retention_days = excluded.communication_retention_days,
+                customer_retention_days = excluded.customer_retention_days
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -622,6 +634,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(7, config.temporaryOperatorClosedMessage)
             stmt.setString(8, config.businessName)
             stmt.setString(9, config.phoneOverride)
+            stmt.setInt(10, config.communicationRetentionDays)
+            stmt.setInt(11, config.customerRetentionDays)
             stmt.executeUpdate()
         }
     }
@@ -1387,14 +1401,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
-     * Update name, phone and status for a customer. Used from the web admin customer edit page.
+     * Update name, phone, status, payment and language for a customer.
+     * Used from the web admin customer edit page.
      */
-    fun updateCustomerFull(id: Int, name: String, phone: String, status: String) {
-        connection.prepareStatement("UPDATE customers SET name = ?, phone = ?, status = ? WHERE id = ?").use { stmt ->
+    fun updateCustomerFull(id: Int, name: String, phone: String, status: String, payment: Int = 0, language: Int = 0) {
+        connection.prepareStatement(
+            "UPDATE customers SET name = ?, phone = ?, status = ?, payment = ?, language = ? WHERE id = ?"
+        ).use { stmt ->
             stmt.setString(1, name.trim())
             stmt.setString(2, phone.trim())
-            stmt.setString(3, status.trim())
-            stmt.setInt(4, id)
+            stmt.setString(3, status.trim().ifBlank { "New" })
+            stmt.setInt(4, payment)
+            stmt.setInt(5, language)
+            stmt.setInt(6, id)
             stmt.executeUpdate()
         }
     }
@@ -3229,6 +3248,148 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             )
         }
         return result
+    }
+
+    // =========================================================================
+    // Communication history queries (for admin view)
+    // =========================================================================
+
+    /** SMS messages for a customer — matched by customer_id OR counterparty_phone. */
+    fun getSmsMessagesForCustomer(customerId: Int, phone: String, limit: Int = 100): List<SmsMessage> {
+        val sql = """
+            SELECT id, shop_id, customer_id, counterparty_phone, from_phone, to_phone,
+                   body, direction, status, twilio_message_sid, error_message, created_at
+            FROM sms_message
+            WHERE customer_id = ? OR counterparty_phone = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setString(2, phone.trim())
+            stmt.setInt(3, limit)
+            return buildSmsMessageList(stmt.executeQuery())
+        }
+    }
+
+    /** Voice calls for a customer — matched by customer_id OR from_phone. */
+    fun getVoiceCallsForCustomer(customerId: Int, phone: String, limit: Int = 100): List<VoiceCallRecord> {
+        val sql = "$CALL_SELECT WHERE (vc.customer_id = ? OR vc.from_phone = ?) ORDER BY vc.started_at DESC LIMIT ?"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, customerId)
+            stmt.setString(2, phone.trim())
+            stmt.setInt(3, limit)
+            return buildCallRecordList(stmt.executeQuery())
+        }
+    }
+
+    // =========================================================================
+    // Data-retention cleanup
+    // =========================================================================
+
+    /**
+     * Deletes SMS messages and ended voice calls older than each shop's
+     * [ShopVoiceConfig.communicationRetentionDays].
+     * Active calls (is_active = 1) are never deleted.
+     * Returns total rows deleted.
+     */
+    fun deleteExpiredCommunications(): Int {
+        val shops = getAllShops()
+        var total = 0
+        val now = System.currentTimeMillis()
+
+        for (shop in shops) {
+            val config = getShopVoiceConfig(shop.id)
+            val cutoffMs = now - config.communicationRetentionDays * 24L * 60 * 60 * 1000
+
+            // Delete old SMS
+            val smsDeleted = connection.prepareStatement(
+                "DELETE FROM sms_message WHERE shop_id = ? AND created_at < ?"
+            ).use { s -> s.setInt(1, shop.id); s.setLong(2, cutoffMs); s.executeUpdate() }
+
+            // Collect old ended call IDs for FK-safe deletion
+            val oldCallIds = mutableListOf<Int>()
+            connection.prepareStatement(
+                "SELECT id FROM voice_call WHERE shop_id = ? AND is_active = 0 AND started_at < ?"
+            ).use { s ->
+                s.setInt(1, shop.id); s.setLong(2, cutoffMs)
+                val rs = s.executeQuery(); while (rs.next()) oldCallIds += rs.getInt("id")
+            }
+
+            var callsDeleted = 0
+            if (oldCallIds.isNotEmpty()) {
+                val ph = oldCallIds.joinToString(",") { "?" }
+                connection.prepareStatement("DELETE FROM voice_call_event WHERE call_id IN ($ph)").use { s ->
+                    oldCallIds.forEachIndexed { i, id -> s.setInt(i + 1, id) }; s.executeUpdate()
+                }
+                connection.prepareStatement("DELETE FROM voice_call WHERE id IN ($ph)").use { s ->
+                    oldCallIds.forEachIndexed { i, id -> s.setInt(i + 1, id) }
+                    callsDeleted = s.executeUpdate()
+                }
+            }
+
+            if (smsDeleted + callsDeleted > 0) {
+                println("[DataRetention] Shop ${shop.id}: deleted $smsDeleted SMS, $callsDeleted calls " +
+                        "(retention=${config.communicationRetentionDays}d)")
+            }
+            total += smsDeleted + callsDeleted
+        }
+        return total
+    }
+
+    /**
+     * Deletes customer profiles with no booking, SMS, or call activity within
+     * the maximum [ShopVoiceConfig.customerRetentionDays] across all shops.
+     *
+     * Safety rules:
+     * - Future appointments always protect a customer.
+     * - The most lenient shop window is used so customers are not removed while
+     *   another shop still considers them active.
+     * Returns count of deleted profiles.
+     */
+    fun deleteExpiredCustomers(): Int {
+        val shops = getAllShops()
+        if (shops.isEmpty()) return 0
+
+        val now = System.currentTimeMillis()
+        val maxRetentionMs = shops.mapNotNull { runCatching { getShopVoiceConfig(it.id).customerRetentionDays }.getOrNull() }
+            .maxOrNull()?.let { it * 24L * 60 * 60 * 1000 } ?: return 0
+        val cutoff = now - maxRetentionMs
+
+        val sql = """
+            SELECT c.id FROM customers c
+            WHERE NOT EXISTS (
+                SELECT 1 FROM appointments a
+                WHERE a.customer_id = c.id AND a.date_time > ?
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM sms_message s
+                WHERE (s.customer_id = c.id OR s.counterparty_phone = c.phone)
+                  AND s.created_at > ?
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM voice_call v
+                WHERE (v.customer_id = c.id OR v.from_phone = c.phone)
+                  AND v.started_at > ?
+            )
+        """.trimIndent()
+
+        val expiredIds = mutableListOf<Int>()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, now)   // no future appointments
+            stmt.setLong(2, cutoff)
+            stmt.setLong(3, cutoff)
+            val rs = stmt.executeQuery()
+            while (rs.next()) expiredIds += rs.getInt("id")
+        }
+
+        var deleted = 0
+        expiredIds.forEach { id -> if (deleteCustomer(id)) deleted++ }
+        if (deleted > 0) {
+            println("[DataRetention] Deleted $deleted expired customer profiles " +
+                    "(no activity in ${maxRetentionMs / 86_400_000} days)")
+        }
+        return deleted
     }
 
 
