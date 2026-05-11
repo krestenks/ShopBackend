@@ -244,25 +244,23 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
         if (!isKnownCustomer) {
             // ── Unknown caller ────────────────────────────────────────────────
+            // Unknown customers hear NO automated messages at any point.
+            // Shop closed or any unavailable condition → silent rejection (no audio).
+            // Open shop → pure ringing until the operator picks up (answerOnBridge=true, no <Say> before <Dial>).
             db.updateCallState(callId, VoiceCallState.UNKNOWN_CUSTOMER_ROUTE)
 
             if (!isOpen) {
+                // Reject before the call is answered so the caller just hears a "not available" signal.
                 db.updateCallState(callId, VoiceCallState.CLOSED_MESSAGE)
                 db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
-                call.respondText(
-                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.welcomeClosedMessage)}</Say>"),
-                    ContentType.Text.Xml,
-                )
+                call.respondText(twiml("<Reject/>"), ContentType.Text.Xml)
                 return
             }
 
             if (tempClosed) {
                 db.updateCallState(callId, VoiceCallState.TEMPORARY_CLOSED_MESSAGE)
                 db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
-                call.respondText(
-                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">${escapeForXml(voice.temporaryOperatorClosedMessage)}</Say>"),
-                    ContentType.Text.Xml,
-                )
+                call.respondText(twiml("<Reject/>"), ContentType.Text.Xml)
                 return
             }
 
@@ -273,20 +271,14 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             println("[VoiceRoutes/welcome] resolvedOperator='$operator' shopId=$shopId")
             if (operator.isBlank()) {
                 db.terminateCall(callId, VoiceCallOutcome.OPERATOR_DECLINED)
-                call.respondText(
-                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, call forwarding is not available.</Say>"),
-                    ContentType.Text.Xml,
-                )
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return
             }
             // ── Operator busy check (operator-phone scoped, cross-shop) ──────
             if (db.isOperatorBusy(operator)) {
                 db.updateCallState(callId, VoiceCallState.OPERATOR_BUSY, "operator=$operator")
                 db.terminateCall(callId, VoiceCallOutcome.OPERATOR_BUSY)
-                call.respondText(
-                    customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Our operator is currently busy. Please call again in 5 minutes.</Say>"),
-                    ContentType.Text.Xml,
-                )
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
                 return
             }
             db.setCallOperatorPhone(callId, operator)
@@ -294,18 +286,19 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             val callerId = fromNumber.takeIf { it.isNotBlank() }
             val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
                     "?callId=$callId&customerType=new&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
-            val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
+            // Pass customerType to dial-status so it knows whether to speak or stay silent
+            val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId&customerType=new"
             println("[VoiceRoutes/welcome] DIAL callId=$callId shop=$shopId" +
                 " operator='$operator' callerId='$callerId'" +
                 " whisperUrl=$whisperUrl dialAction=$dialAction")
+            // No <Say> before <Dial> — unknown caller hears only ringing while operator decides.
             val xml = """
-                <Say voice="Polly.Amy-Neural" language="en-GB">Please hold while we connect you.</Say>
                 <Dial answerOnBridge="true"${callerId?.let { " callerId=\"${escapeForXml(it)}\"" } ?: ""} action="${escapeForXml(dialAction)}">
                   <Number url="${escapeForXml(whisperUrl)}">${escapeForXml(operator)}</Number>
                 </Dial>
             """.trimIndent()
             println("[VoiceRoutes/welcome] TwiML sent:\n${twiml(xml)}")
-            call.respondText(customerTwiml(xml), ContentType.Text.Xml)
+            call.respondText(twiml(xml), ContentType.Text.Xml)
             return
         }
 
@@ -592,13 +585,16 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
 
     route("/api/twilio/voice/dial-status") {
         post {
-            val params      = call.receiveParameters()
-            val dialStatus  = params["DialCallStatus"]?.trim() ?: "unknown"
-            val callId      = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val params       = call.receiveParameters()
+            val dialStatus   = params["DialCallStatus"]?.trim() ?: "unknown"
+            val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            // customerType=new means the call was an unknown/new customer — no spoken feedback for them.
+            val customerType = call.request.queryParameters["customerType"]?.trim() ?: "existing"
+            val isUnknownCaller = customerType == "new"
             val dialSid     = params["DialCallSid"]?.trim() ?: ""
             val dialTo      = params["To"]?.trim() ?: ""
             val callSid     = params["CallSid"]?.trim() ?: ""
-            println("[VoiceRoutes/dial-status] callId=$callId DialCallStatus=$dialStatus" +
+            println("[VoiceRoutes/dial-status] callId=$callId DialCallStatus=$dialStatus customerType=$customerType" +
                 " DialCallSid=$dialSid To=$dialTo CallSid=$callSid")
             // Log all params for full diagnostic
             params.entries().forEach { (k, vals) ->
@@ -615,22 +611,29 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 }
                 db.terminateCall(callId, outcome)
             }
-            // Return meaningful spoken message based on outcome
-            val responseXml = when (dialStatus) {
-                "completed" -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Thank you. Goodbye.</Say>"
-                "no-answer" -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The operator did not answer. Please try again in a few minutes.</Say>"
-                "busy"      -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The operator is currently busy. Please try again in a few minutes.</Say>"
-                "failed"    -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not reach the operator. Please try again later.</Say>"
-                "canceled"  -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The call was cancelled. Goodbye.</Say>"
-                else        -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"
+            if (isUnknownCaller) {
+                // Unknown callers hear nothing — just hang up silently.
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
+            } else {
+                // Known customers hear a meaningful spoken message.
+                val responseXml = when (dialStatus) {
+                    "completed" -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Thank you. Goodbye.</Say>"
+                    "no-answer" -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The operator did not answer. Please try again in a few minutes.</Say>"
+                    "busy"      -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The operator is currently busy. Please try again in a few minutes.</Say>"
+                    "failed"    -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Sorry, we could not reach the operator. Please try again later.</Say>"
+                    "canceled"  -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">The call was cancelled. Goodbye.</Say>"
+                    else        -> "<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"
+                }
+                call.respondText(customerTwiml(responseXml), ContentType.Text.Xml)
             }
-            call.respondText(customerTwiml(responseXml), ContentType.Text.Xml)
         }
         get {
             // Twilio sometimes hits action URLs as GET
-            val dialStatus  = call.request.queryParameters["DialCallStatus"]?.trim() ?: "unknown"
-            val callId      = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
-            println("[VoiceRoutes/dial-status GET] callId=$callId DialCallStatus=$dialStatus")
+            val dialStatus   = call.request.queryParameters["DialCallStatus"]?.trim() ?: "unknown"
+            val callId       = call.request.queryParameters["callId"]?.toIntOrNull() ?: -1
+            val customerType = call.request.queryParameters["customerType"]?.trim() ?: "existing"
+            val isUnknownCaller = customerType == "new"
+            println("[VoiceRoutes/dial-status GET] callId=$callId DialCallStatus=$dialStatus customerType=$customerType")
             if (callId > 0) {
                 val outcome = when (dialStatus) {
                     "completed"  -> VoiceCallOutcome.OPERATOR_BRIDGED
@@ -638,7 +641,11 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                 }
                 db.terminateCall(callId, outcome)
             }
-            call.respondText(customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"), ContentType.Text.Xml)
+            if (isUnknownCaller) {
+                call.respondText(twiml("<Hangup/>"), ContentType.Text.Xml)
+            } else {
+                call.respondText(customerTwiml("<Say voice=\"Polly.Amy-Neural\" language=\"en-GB\">Goodbye.</Say>"), ContentType.Text.Xml)
+            }
         }
     }
 

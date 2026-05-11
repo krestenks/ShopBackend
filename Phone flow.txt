@@ -79,28 +79,25 @@ If caller is blacklisted:
 
 ## Rule 2: Unknown caller
 
-If caller is unknown:
+Unknown callers hear **no automated messages** at any point — no greetings, no hold music,
+no error announcements.
 
 ### Within opening hours
 
 * If `temporaryOperatorClosed == true`:
 
-  * play temporary operator closed message
-  * terminate call
+  * silently reject/terminate the call (`<Reject/>`)
 
 * Else:
 
-  * transfer to operator
+  * transfer to operator (caller hears only ringing — no `<Say>` before `<Dial>`)
   * before bridging, play operator whisper to operator only
-  * require operator to press `1` to accept
-  * if operator accepts, bridge the call
-  * if operator does not accept, fail according to fallback policy
+  * if operator answers, the whisper plays and the call is bridged immediately
+  * if operator does not answer or the call fails, hang up silently (`<Hangup/>`)
 
 ### Outside opening hours
 
-* do not offer SMS booking
-* play `closedWelcomeMessage`
-* terminate call
+* silently reject the call (`<Reject/>`) — no audio, no `closedWelcomeMessage`
 
 ## Rule 3: Known caller
 

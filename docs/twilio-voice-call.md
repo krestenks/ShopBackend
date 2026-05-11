@@ -13,27 +13,40 @@ bookings linked to an ongoing call.
 
 ```
 IncomingCall
-  → (blacklisted)            RejectedBlacklisted → Terminated
+  → (blacklisted)            RejectedBlacklisted → Terminated (silent <Reject/>)
   → (unknown customer)
-      outside hours          ClosedMessage → Terminated
-      inside hours + temp-closed   TemporaryClosedMessage → Terminated
-      inside hours + open    OperatorWhisper → BridgedToOperator / Terminated
+      outside hours          ClosedMessage → Terminated (silent <Reject/>, no audio)
+      inside hours + temp-closed   TemporaryClosedMessage → Terminated (silent <Reject/>, no audio)
+      inside hours + no operator   Terminated (silent <Hangup/>, no audio)
+      inside hours + operator busy Terminated (silent <Hangup/>, no audio)
+      inside hours + open    OperatorWhisper → BridgedToOperator / Terminated (silent <Hangup/>)
   → (known customer)         KnownCustomerMenu (up to 3 DTMF attempts)
       digit 1                KnownCustomerSmsBooking → Terminated
-      digit 2 + outside hours     ClosedMessage → Terminated
-      digit 2 + temp-closed  TemporaryClosedMessage → Terminated
-      digit 2 + open         OperatorWhisper → BridgedToOperator / Terminated
+      digit 2 + outside hours     ClosedMessage → Terminated (plays closedWelcomeMessage)
+      digit 2 + temp-closed  TemporaryClosedMessage → Terminated (plays temporaryOperatorClosedMessage)
+      digit 2 + open         OperatorWhisper → BridgedToOperator / Terminated (plays spoken feedback)
       no input × 3           Terminated
 ```
+
+### Unknown caller — no audio policy
+
+Unknown/new callers hear **no automated messages** at any stage:
+- Shop closed or unavailable → silent `<Reject/>` (call is declined before being answered).
+- Shop open but operator busy / misconfigured → silent `<Hangup/>`.
+- Shop open and operator available → caller hears **only ringing** until the operator picks up.
+  There is no hold message, no "please wait" announcement.
+- Operator does not answer / declines → silent `<Hangup/>`.
 
 ### Operator whisper
 
 Before a call is bridged to the operator:
-- Customer hears **ringing** (`answerOnBridge="true"`).
-- Operator hears a private whisper:
-  - *New customer*: "Incoming call for {businessName}. New customer. Press 1 to accept."
-  - *Existing customer*: "Incoming call for {businessName}. Existing customer. Standard treatment flow. Press 1 to accept."
-- Operator must press `1` to accept; otherwise caller hears "No operator available."
+- Customer hears **ringing only** (`answerOnBridge="true"`, no `<Say>` before `<Dial>`).
+- Operator hears a private whisper (customer cannot hear this):
+  - *New customer*: "Incoming call for {businessName}. New customer. Intake required."
+  - *Existing customer*: "Incoming call for {businessName}. Existing customer."
+- The call is bridged automatically as soon as the whisper TwiML ends.
+- If the operator wants to decline, they hang up their phone before the whisper finishes.
+  This triggers `dial-status` with `no-answer`/`canceled` → silent hangup for unknown callers.
 
 ---
 
