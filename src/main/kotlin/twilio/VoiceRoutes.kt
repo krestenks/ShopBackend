@@ -220,10 +220,20 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
         // ── 2. Identify customer ─────────────────────────────────────────────
         db.updateCallState(callId, VoiceCallState.IDENTIFY_CUSTOMER)
         val existingCustomerId: Int? = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
-        val isKnownCustomer = existingCustomerId != null
 
-        // Auto-create a "New" customer row for unknown callers so the manager app can always
-        // navigate to a customer detail page and whitelist/blacklist the number.
+        // A customer is "known" (whitelisted) only if their row exists AND their status is set
+        // to something other than "New" or blank.
+        // Status "New" means the customer was auto-created on first call, or had their whitelist
+        // removed. In both cases they must be routed identically to a brand-new unknown caller:
+        // no automated messages, just ringing until the operator picks up (or silent reject if closed).
+        val existingCustomerStatus: String? = existingCustomerId?.let { db.getCustomerById(it)?.status?.trim() }
+        val isKnownCustomer = existingCustomerId != null &&
+            !existingCustomerStatus.isNullOrBlank() &&
+            !existingCustomerStatus.equals("New", ignoreCase = true)
+
+        // Auto-create a "New" customer row for callers with no row at all so the manager app can
+        // always navigate to a customer detail page and whitelist/blacklist the number.
+        // (Callers with an existing "New" row already have a row — no auto-create needed.)
         val customerId: Int? = existingCustomerId ?: run {
             if (from.isBlank()) null
             else try {
