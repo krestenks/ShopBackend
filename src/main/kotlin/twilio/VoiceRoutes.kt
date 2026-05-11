@@ -283,13 +283,15 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             }
             db.setCallOperatorPhone(callId, operator)
             db.updateCallState(callId, VoiceCallState.OPERATOR_WHISPER)
-            val callerId = fromNumber.takeIf { it.isNotBlank() }
+            // Use the original caller's number as callerId so the manager sees who is calling,
+            // not the shop Twilio number. Fall back to Twilio number only if from is blank.
+            val callerId = from.takeIf { it.isNotBlank() } ?: fromNumber.takeIf { it.isNotBlank() }
             val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
                     "?callId=$callId&customerType=new&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
             // Pass customerType to dial-status so it knows whether to speak or stay silent
             val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId&customerType=new"
             println("[VoiceRoutes/welcome] DIAL callId=$callId shop=$shopId" +
-                " operator='$operator' callerId='$callerId'" +
+                " operator='$operator' callerId='$callerId' (original caller=$from)" +
                 " whisperUrl=$whisperUrl dialAction=$dialAction")
             // No <Say> before <Dial> — unknown caller hears only ringing while operator decides.
             val xml = """
@@ -483,12 +485,14 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
                         db.setCallOperatorPhone(callId, operator)
                         db.updateCallState(callId, VoiceCallState.OPERATOR_WHISPER)
                     }
-                    val callerId = fromNumber.takeIf { it.isNotBlank() }
+                    // Use the original caller's number as callerId so the manager sees who is calling,
+                    // not the shop Twilio number. Fall back to Twilio number only if from is blank.
+                    val callerId = from.takeIf { it.isNotBlank() } ?: fromNumber.takeIf { it.isNotBlank() }
                     val whisperUrl = "$base/api/twilio/voice/operator-whisper" +
                             "?callId=$callId&customerType=existing&bizName=${java.net.URLEncoder.encode(bizName, Charsets.UTF_8)}"
                     val dialAction = "$base/api/twilio/voice/dial-status?callId=$callId"
                     println("[VoiceRoutes/menu digit=2] DIAL callId=$callId shop=$shopId" +
-                        " operator='$operator' callerId='$callerId'" +
+                        " operator='$operator' callerId='$callerId' (original caller=$from)" +
                         " whisperUrl=$whisperUrl dialAction=$dialAction")
                     val xml = """
                         <Say voice="Polly.Amy-Neural" language="en-GB">Please hold while we connect you to the operator.</Say>
