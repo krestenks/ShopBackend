@@ -1,9 +1,9 @@
-{
-  "versionCode": 1,
-  "versionName": "1.0.0",
-  "apkUrl": "https://example.com/api/app/download/shopmanager-1.0.0.apk",
-  "sha256": "REPLACE_WITH_REAL_SHA256",
+﻿{
+  "versionCode": 2,
+  "versionName": "1.0.1",
+  "apkUrl": "https://master-7rqtwti-vvspwmuxtuql4.eu-5.platformsh.site/api/app/download/shopmanager-1.0.1.apk",
+  "sha256": "00b65306af178cab3ccb56870175256d4dd2606669c52d893a9fe98602c2a1c6",
   "required": false,
-  "releaseNotes": "Initial private release.",
+  "releaseNotes": "Initial private signed release.",
   "minSupportedVersionCode": 1
 }

@@ -601,6 +601,21 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
 
+        // One-time install tokens for QR-code-based APK installation
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS app_install_tokens (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                token        TEXT    NOT NULL UNIQUE,
+                apk_filename TEXT    NOT NULL,
+                version_code INTEGER NOT NULL,
+                version_name TEXT    NOT NULL,
+                created_by   TEXT,
+                created_at   INTEGER NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                used_at      INTEGER
+            )
+        """.trimIndent()) }
+
         println("All tables ready.")
     }
 
@@ -1272,6 +1287,96 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setLong(1, cutoff)
             val deleted = stmt.executeUpdate()
             println("Deleted $deleted old or used booking tokens")
+        }
+    }
+
+    // ── One-time APK install tokens ───────────────────────────────────────
+
+    data class InstallToken(
+        val token: String,
+        val apkFilename: String,
+        val versionCode: Int,
+        val versionName: String,
+        val createdBy: String?,
+        val createdAt: Long,
+        val expiresAt: Long,
+        val usedAt: Long?,
+    ) {
+        val isExpired: Boolean get() = System.currentTimeMillis() > expiresAt
+        val isUsed: Boolean get() = usedAt != null
+        val isValid: Boolean get() = !isExpired && !isUsed
+    }
+
+    /** Create a new one-time install token. Returns the raw token string. */
+    fun createInstallToken(
+        apkFilename: String,
+        versionCode: Int,
+        versionName: String,
+        createdBy: String?,
+        ttlMillis: Long = 30 * 60 * 1000L, // 30 minutes
+    ): String {
+        val token = java.security.SecureRandom().let { rng ->
+            val bytes = ByteArray(24)
+            rng.nextBytes(bytes)
+            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        }
+        val now = System.currentTimeMillis()
+        connection.prepareStatement(
+            "INSERT INTO app_install_tokens (token, apk_filename, version_code, version_name, created_by, created_at, expires_at) VALUES (?,?,?,?,?,?,?)"
+        ).use { stmt ->
+            stmt.setString(1, token)
+            stmt.setString(2, apkFilename)
+            stmt.setInt(3, versionCode)
+            stmt.setString(4, versionName)
+            stmt.setString(5, createdBy)
+            stmt.setLong(6, now)
+            stmt.setLong(7, now + ttlMillis)
+            stmt.executeUpdate()
+        }
+        return token
+    }
+
+    /** Look up a token. Returns null if not found. Caller checks isValid. */
+    fun getInstallToken(token: String): InstallToken? {
+        connection.prepareStatement(
+            "SELECT token, apk_filename, version_code, version_name, created_by, created_at, expires_at, used_at FROM app_install_tokens WHERE token = ?"
+        ).use { stmt ->
+            stmt.setString(1, token)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return InstallToken(
+                token = rs.getString("token"),
+                apkFilename = rs.getString("apk_filename"),
+                versionCode = rs.getInt("version_code"),
+                versionName = rs.getString("version_name"),
+                createdBy = rs.getString("created_by"),
+                createdAt = rs.getLong("created_at"),
+                expiresAt = rs.getLong("expires_at"),
+                usedAt = rs.getLong("used_at").takeIf { it != 0L },
+            )
+        }
+    }
+
+    /** Mark a token as consumed. Returns false if it was already used or not found. */
+    fun consumeInstallToken(token: String): Boolean {
+        connection.prepareStatement(
+            "UPDATE app_install_tokens SET used_at = ? WHERE token = ? AND used_at IS NULL"
+        ).use { stmt ->
+            stmt.setLong(1, System.currentTimeMillis())
+            stmt.setString(2, token)
+            return stmt.executeUpdate() == 1
+        }
+    }
+
+    /** Delete expired + used tokens older than given threshold. */
+    fun deleteOldInstallTokens(olderThanMillis: Long = 24 * 3600_000L) {
+        val cutoff = System.currentTimeMillis() - olderThanMillis
+        connection.prepareStatement(
+            "DELETE FROM app_install_tokens WHERE used_at IS NOT NULL OR expires_at < ?"
+        ).use { stmt ->
+            stmt.setLong(1, cutoff)
+            val n = stmt.executeUpdate()
+            if (n > 0) println("Deleted $n old install tokens")
         }
     }
 

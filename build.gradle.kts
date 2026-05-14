@@ -33,6 +33,10 @@ dependencies {
     implementation("org.apache.poi:poi-ooxml:5.2.5")              // xlsx
     implementation("com.github.librepdf:openpdf:1.3.35")          // PDF
 
+    // QR code generation for one-time install tokens
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:javase:3.5.3")
+
     // Test dependencies
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
     testImplementation("io.mockk:mockk:1.13.8")
