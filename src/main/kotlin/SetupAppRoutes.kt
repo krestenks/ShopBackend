@@ -97,8 +97,9 @@ class SetupAppRoutes(
             style {
                 unsafe {
                     raw("""
-                        .version-box { background:#f5f5f5; border-radius:8px; padding:16px 20px; margin:12px 0; }
-                        .version-box p { margin:4px 0; }
+                        .version-box { background:#1e2a3a; color:#e8edf3; border-radius:8px; padding:16px 20px; margin:12px 0; border-left:4px solid #4a90d9; }
+                        .version-box p { margin:4px 0; color:#e8edf3; }
+                        .version-box strong { color:#ffffff; }
                         .qr-wrap { text-align:center; margin:20px 0; }
                         .qr-wrap img { max-width:240px; border:1px solid #ddd; padding:8px; border-radius:8px; background:#fff; }
                         .qr-expiry { font-size:0.85em; color:#666; margin-top:6px; }
@@ -234,16 +235,19 @@ class SetupAppRoutes(
 
                                 // QR code section
                                 if (v.apkFilename != null) {
-                                    h3 { +"One-time install QR code" }
-                                    p("hint") { +"Generate a QR code valid for 30 minutes. The link can only be used once." }
+                    h3 { +"One-time install QR code" }
+                                    p("hint") { +"Generate a QR code valid for 24 hours. The link can only be used once." }
 
                                     if (qrTokenData != null) {
                                         val (tok, tokenInfo) = qrTokenData
                                         val installUrl = "$baseUrl/setup-app/install/t/$tok"
                                         val expiry = fmt.format(Instant.ofEpochMilli(tokenInfo.expiresAt))
+                                        val expiryDate = java.time.Instant.ofEpochMilli(tokenInfo.expiresAt)
+                                            .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                            .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
                                         div("qr-wrap") {
                                             img(src = "/setup-app/download/qr.png?token=$tok", alt = "QR install code")
-                                            p("qr-expiry") { +"Valid until $expiry — single use" }
+                                            p("qr-expiry") { +"Valid until $expiryDate — single use" }
                                             p { small { +installUrl } }
                                         }
                                     }
@@ -291,7 +295,7 @@ class SetupAppRoutes(
                     versionCode  = v.versionCode ?: 0,
                     versionName  = v.versionName ?: "?",
                     createdBy    = session.username,
-                    ttlMillis    = 30 * 60 * 1000L,
+                    ttlMillis    = 24 * 60 * 60 * 1000L,
                 )
                 call.respondRedirect("/setup-app/download?token=$token")
             }
@@ -323,7 +327,7 @@ class SetupAppRoutes(
                                             p { +"File: ${tok.apkFilename}" }
                                         }
                                         p("hint") { +"Tap the button below to download and install the APK." }
-                                        p("hint") { +"This link works once and expires 30 minutes after generation." }
+                                        p("hint") { +"This link works once and expires 24 hours after generation." }
                                         a(
                                             href = "/setup-app/install/t/$rawToken/apk",
                                             classes = "btn primary",
