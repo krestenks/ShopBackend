@@ -88,23 +88,53 @@ class SetupAppRoutes(
 
     // ── HTML helpers ──────────────────────────────────────────────────────────
 
+    private val extraCss = """
+        .version-box { background:#1e2a3a; color:#e8edf3; border-radius:8px; padding:16px 20px; margin:12px 0; border-left:4px solid #4a90d9; }
+        .version-box p { margin:4px 0; color:#e8edf3; }
+        .version-box strong { color:#ffffff; }
+        .qr-wrap { text-align:center; margin:20px 0; }
+        .qr-wrap img { max-width:240px; border:1px solid #ddd; padding:8px; border-radius:8px; background:#fff; }
+        .qr-expiry { font-size:0.85em; color:#666; margin-top:6px; }
+        .badge-required { background:#e53935; color:#fff; border-radius:4px; padding:1px 6px; font-size:0.8em; }
+    """.trimIndent()
+
     private fun HTML.setupHead(titleText: String) {
         head {
             meta { charset = "utf-8" }
             meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
             title { +titleText }
             link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
-            style {
-                unsafe {
-                    raw("""
-                        .version-box { background:#1e2a3a; color:#e8edf3; border-radius:8px; padding:16px 20px; margin:12px 0; border-left:4px solid #4a90d9; }
-                        .version-box p { margin:4px 0; color:#e8edf3; }
-                        .version-box strong { color:#ffffff; }
-                        .qr-wrap { text-align:center; margin:20px 0; }
-                        .qr-wrap img { max-width:240px; border:1px solid #ddd; padding:8px; border-radius:8px; background:#fff; }
-                        .qr-expiry { font-size:0.85em; color:#666; margin-top:6px; }
-                        .badge-required { background:#e53935; color:#fff; border-radius:4px; padding:1px 6px; font-size:0.8em; }
-                    """.trimIndent())
+            style { unsafe { raw(extraCss) } }
+        }
+    }
+
+    /** Full admin-style sidebar layout for authenticated setup-app pages. */
+    private suspend fun ApplicationCall.respondSetupPage(
+        titleText: String,
+        bodyContent: FlowContent.() -> Unit,
+    ) {
+        respondHtml {
+            setupHead(titleText)
+            body {
+                div("layout") {
+                    div("sidebar") {
+                        div("brand") {
+                            div {
+                                div("brand-title") { +"ShopManager" }
+                                div("brand-sub") { +"Install" }
+                            }
+                        }
+                        div("nav") {
+                            a(href = "/") { span { +"🏠" }; span { +"Admin" } }
+                            a(href = "/setup-app/download", classes = "active") { span { +"📲" }; span { +"Install app" } }
+                            div("spacer") {}
+                            a(href = "/setup-app/logout") { span { +"🚪" }; span { +"Logout" } }
+                        }
+                    }
+                    div("main") {
+                        div("page-header") { h1("page-title") { +titleText } }
+                        div("panel") { bodyContent() }
+                    }
                 }
             }
         }
@@ -205,62 +235,46 @@ class SetupAppRoutes(
                 val v = readVersionInfo()
                 val tokenParam = call.request.queryParameters["token"]
 
-                // If we just generated a token, show its QR
                 val qrTokenData: Pair<String, DataBase.InstallToken>? = if (tokenParam != null) {
                     val tok = db.getInstallToken(tokenParam)
                     if (tok?.isValid == true) tokenParam to tok else null
                 } else null
 
-                call.respondHtml {
-                    setupHead("Download ShopManager")
-                    body {
-                        div("center") {
-                            div("card") {
-                                h2 { +"ShopManager APK" }
+                call.respondSetupPage("Install ShopManager App") {
+                    // Version info box
+                    if (v.versionName != null) {
+                        div("version-box") {
+                            p { strong { +"Version: " }; +v.versionName }
+                            if (v.versionCode != null) p { +"Build: ${v.versionCode}" }
+                            if (v.apkFilename != null) p { +"File: ${v.apkFilename}" }
+                            if (v.releaseNotes != null) p { em { +v.releaseNotes } }
+                            if (v.required == true) p { span("badge-required") { +"Required update" } }
+                        }
+                    } else {
+                        p { +"No release found yet. Upload an APK to data/apk/ first." }
+                    }
 
-                                // Version info box
-                                if (v.versionName != null) {
-                                    div("version-box") {
-                                        p { strong { +"Version: " }; +v.versionName }
-                                        if (v.versionCode != null) p { +"Build: ${v.versionCode}" }
-                                        if (v.apkFilename != null) p { +"File: ${v.apkFilename}" }
-                                        if (v.releaseNotes != null) p { em { +v.releaseNotes } }
-                                        if (v.required == true) p { span("badge-required") { +"Required update" } }
-                                    }
-                                } else {
-                                    p { +"No release found yet. Upload an APK to data/apk/ first." }
-                                }
+                    hr {}
 
-                                hr {}
+                    if (v.apkFilename != null) {
+                        h3 { +"One-time install QR code" }
+                        p("hint") { +"Generate a QR code valid for 24 hours. The link can only be used once." }
 
-                                // QR code section
-                                if (v.apkFilename != null) {
-                    h3 { +"One-time install QR code" }
-                                    p("hint") { +"Generate a QR code valid for 24 hours. The link can only be used once." }
-
-                                    if (qrTokenData != null) {
-                                        val (tok, tokenInfo) = qrTokenData
-                                        val installUrl = "$baseUrl/setup-app/install/t/$tok"
-                                        val expiry = fmt.format(Instant.ofEpochMilli(tokenInfo.expiresAt))
-                                        val expiryDate = java.time.Instant.ofEpochMilli(tokenInfo.expiresAt)
-                                            .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
-                                            .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
-                                        div("qr-wrap") {
-                                            img(src = "/setup-app/download/qr.png?token=$tok", alt = "QR install code")
-                                            p("qr-expiry") { +"Valid until $expiryDate — single use" }
-                                            p { small { +installUrl } }
-                                        }
-                                    }
-
-                                    // Always show generate button
-                                    form(action = "/setup-app/generate-token", method = FormMethod.post) {
-                                        submitInput(classes = "btn primary") { value = "⟳ Generate new QR code" }
-                                    }
-                                }
-
-                                hr {}
-                                a(href = "/setup-app/logout", classes = "btn") { +"Logout" }
+                        if (qrTokenData != null) {
+                            val (tok, tokenInfo) = qrTokenData
+                            val installUrl = "$baseUrl/setup-app/install/t/$tok"
+                            val expiryDate = java.time.Instant.ofEpochMilli(tokenInfo.expiresAt)
+                                .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
+                            div("qr-wrap") {
+                                img(src = "/setup-app/download/qr.png?token=$tok", alt = "QR install code")
+                                p("qr-expiry") { +"Valid until $expiryDate — single use" }
+                                p { small { +installUrl } }
                             }
+                        }
+
+                        form(action = "/setup-app/generate-token", method = FormMethod.post) {
+                            submitInput(classes = "btn primary") { value = "⟳ Generate new QR code" }
                         }
                     }
                 }
