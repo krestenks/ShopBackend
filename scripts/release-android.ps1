@@ -140,8 +140,9 @@ $sshTarget = "${UpsunSshUser}@${UpsunSshHost}"
 # Upload APK
 & scp -o StrictHostKeyChecking=no (Join-Path $StageApkDir $ApkName) "${sshTarget}:data/apk/$ApkName"
 if ($LASTEXITCODE -ne 0) { Write-Error "APK scp upload failed" }
-# Upload version.json (write without BOM via remote printf)
-& upsun ssh -p $UpsunProject -e . -A shopbackend --no-interaction "printf '%s' '$versionJson' > data/apk/version.json"
+# Upload version.json via scp (avoids remote shell quoting issues with special chars in JSON)
+& scp -o StrictHostKeyChecking=no (Join-Path $StageApkDir "version.json") "${sshTarget}:data/apk/version.json"
+if ($LASTEXITCODE -ne 0) { Write-Error "version.json scp upload failed" }
 Write-Host "  Upload complete" -ForegroundColor Green
 
 # Cleanup staging dir
