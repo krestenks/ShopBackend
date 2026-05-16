@@ -121,7 +121,8 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         }
 
         val blocks = req.blocks.map { it.employeeId to it.duration }
-        val slots = db.getAvailableTimeSlotsMulti(shopId, req.date, blocks)
+        // Enforce 2-hour minimum lead time for customer (SMS-link) bookings
+        val slots = db.getAvailableTimeSlotsMulti(shopId, req.date, blocks, minimumLeadMinutes = 120L)
         call.respond(slots)
     }
 
@@ -235,7 +236,8 @@ fun Route.sharedBookingRoutes(db: DataBase) {
             return@get
         }
 
-        val timeSlots = db.getAvailableTimeSlots(employeeId, shopId, date, duration)
+        // Enforce 2-hour minimum lead time for customer (SMS-link) bookings
+        val timeSlots = db.getAvailableTimeSlots(employeeId, shopId, date, duration, minimumLeadMinutes = 120L)
         call.respond(timeSlots)
     }
 
@@ -302,6 +304,15 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         // Use explicit timezone to avoid +2h offset in the mobile app.
         val zoneId = java.time.ZoneId.of("Europe/Copenhagen")
         val dateTimeMillis = localDateTime.atZone(zoneId).toInstant().toEpochMilli()
+
+        // Enforce minimum 2-hour lead time for customer (SMS-link) bookings.
+        // A 10-minute grace window is allowed so a slot visible when the page loaded
+        // remains bookable while the customer completes the form.
+        val minimumAllowedMillis = System.currentTimeMillis() + (120 - 10) * 60 * 1000L
+        if (dateTimeMillis < minimumAllowedMillis) {
+            call.respond(HttpStatusCode.Conflict, "Booking time must be at least 2 hours from now.")
+            return@post
+        }
 
         // Calculate total duration of selected services
         val totalDuration = serviceIds.mapNotNull { db.getServiceById(it)?.duration }.sum()
@@ -388,6 +399,15 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         val shopId = bookingInfo.shopId
         if (shopId <= 0) {
             call.respond(HttpStatusCode.BadRequest, "Invalid shop")
+            return@post
+        }
+
+        // Enforce minimum 2-hour lead time for customer (SMS-link) bookings.
+        // A 10-minute grace window is allowed so a slot visible when the page loaded
+        // remains bookable while the customer completes the form.
+        val minimumAllowedMillisMulti = System.currentTimeMillis() + (120 - 10) * 60 * 1000L
+        if (dateTimeMillis < minimumAllowedMillisMulti) {
+            call.respond(HttpStatusCode.Conflict, "Booking time must be at least 2 hours from now.")
             return@post
         }
 

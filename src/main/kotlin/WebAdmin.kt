@@ -701,6 +701,16 @@ class WebAdmin(private val db: DataBase) {
                                 style = "width: 100%; height: 80px;"
                                 +voiceConfig.welcomeClosedMessage
                             }
+                            br(); br()
+
+                            label { +"Price list SMS footer (appended after generated price list):" }
+                            br()
+                            p("hint") { +"Text appended at the end when the manager taps 'Send price list' in the messaging interface. Leave blank for no footer." }
+                            textArea {
+                                name = "sms_price_list_footer"
+                                style = "width: 100%; height: 60px;"
+                                +(voiceConfig.smsPriceListFooter ?: "")
+                            }
 
                             hr()
                             h3 { +"Data retention (per shop)" }
@@ -833,6 +843,7 @@ class WebAdmin(private val db: DataBase) {
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
                         communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
                         customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
+                        smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
                     )
                     db.upsertShopVoiceConfig(voice)
 

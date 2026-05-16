@@ -20,6 +20,8 @@ data class SendSmsRequest(
     val shopId: Int,
     val toPhone: String,
     val body: String,
+    /** When true the backend appends the shop's configured price-list footer (smsPriceListFooter) to the body. */
+    val appendPriceListFooter: Boolean = false,
 )
 
 @Serializable
@@ -114,6 +116,14 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
                 return@post
             }
 
+            // Optionally append the shop-configured price-list footer
+            val effectiveBody = if (req.appendPriceListFooter) {
+                val footer = voiceConfig.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() }
+                if (footer != null) "${req.body}\n\n$footer" else req.body
+            } else {
+                req.body
+            }
+
             // Optimistically insert with status "queued"
             val customerId = db.getCustomerIdByPhone(req.toPhone)
             val msgId = db.insertSmsMessage(
@@ -122,7 +132,7 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
                 counterpartyPhone = req.toPhone,
                 fromPhone         = fromNumber,
                 toPhone           = req.toPhone,
-                body              = req.body,
+                body              = effectiveBody,
                 direction         = "outbound",
                 status            = "queued",
             )
@@ -131,7 +141,7 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
             val result = smsService.sendSms(
                 fromNumberE164 = fromNumber,
                 toNumberE164   = req.toPhone,
-                bodyText       = req.body,
+                bodyText       = effectiveBody,
             )
 
             // Update status based on Twilio response (best-effort; row was already inserted)

@@ -87,6 +87,11 @@ data class ShopVoiceConfig(
     val communicationRetentionDays: Int = 5,
     /** Days to keep a customer profile after their last booking/contact.  Default 90 (≈3 months). */
     val customerRetentionDays: Int = 90,
+    /**
+     * Optional text appended after the generated price list SMS when the manager taps
+     * "Send price list" in the messaging interface. Null/blank = no footer appended.
+     */
+    val smsPriceListFooter: String? = null,
 )
 
 // ─── Voice call log ──────────────────────────────────────────────────────────
@@ -558,6 +563,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN customer_retention_days INTEGER NOT NULL DEFAULT 90",
             // Employee availability per shop (manager controlled): 1=available, 0=unavailable
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
+            // Price-list SMS footer appended when manager taps "Send price list" in the app
+            "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -625,7 +632,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message,
                    temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override,
-                   communication_retention_days, customer_retention_days
+                   communication_retention_days, customer_retention_days, sms_price_list_footer
             FROM shop_voice_config WHERE shop_id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -645,6 +652,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     phoneOverride = rs.getString("phone_override"),
                     communicationRetentionDays = try { rs.getInt("communication_retention_days").takeIf { !rs.wasNull() } ?: 5 } catch (_: Exception) { 5 },
                     customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 90 } catch (_: Exception) { 90 },
+                    smsPriceListFooter = try { rs.getString("sms_price_list_footer")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -656,8 +664,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message,
                 welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message,
-                business_name, phone_override, communication_retention_days, customer_retention_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                business_name, phone_override, communication_retention_days, customer_retention_days,
+                sms_price_list_footer)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 twilio_number = excluded.twilio_number,
                 operator_phone = excluded.operator_phone,
@@ -668,7 +677,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 business_name = excluded.business_name,
                 phone_override = excluded.phone_override,
                 communication_retention_days = excluded.communication_retention_days,
-                customer_retention_days = excluded.customer_retention_days
+                customer_retention_days = excluded.customer_retention_days,
+                sms_price_list_footer = excluded.sms_price_list_footer
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -683,6 +693,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(9, config.phoneOverride)
             stmt.setInt(10, config.communicationRetentionDays)
             stmt.setInt(11, config.customerRetentionDays)
+            stmt.setString(12, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
             stmt.executeUpdate()
         }
     }
@@ -2619,7 +2630,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    fun getAvailableTimeSlots(employeeId: Int, shopId: Int, dateStr: String, duration: Int): Array<String> {
+    fun getAvailableTimeSlots(
+        employeeId: Int,
+        shopId: Int,
+        dateStr: String,
+        duration: Int,
+        minimumLeadMinutes: Long = 0L,
+    ): Array<String> {
         // Manager-controlled availability toggle: if employee is marked unavailable for the shop, no slots.
         if (!isEmployeeAvailable(shopId = shopId, employeeId = employeeId)) {
             return emptyArray()
@@ -2630,6 +2647,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         println("  shopId = $shopId")
         println("  dateStr = $dateStr")
         println("  duration = $duration")
+        println("  minimumLeadMinutes = $minimumLeadMinutes")
 
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val date = LocalDate.parse(dateStr, formatter)
@@ -2641,10 +2659,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val shopZoneForNow = java.time.ZoneId.of("Europe/Copenhagen")
         val now = LocalDateTime.now(shopZoneForNow)
         val workStart = if (date.isEqual(LocalDate.now(shopZoneForNow))) {
-            // Round now up to next 10-minute mark
-            val minute = now.minute
+            // Apply lead time first, then round up to next 10-minute mark
+            val earliestAllowed = now.plusMinutes(minimumLeadMinutes)
+            val minute = earliestAllowed.minute
             val roundedMinute = ((minute + 9) / 10) * 10
-            val adjustedNow = now.withMinute(0).withSecond(0).withNano(0).plusMinutes(roundedMinute.toLong())
+            val adjustedNow = earliestAllowed.withMinute(0).withSecond(0).withNano(0).plusMinutes(roundedMinute.toLong())
             if (adjustedNow.isAfter(defaultWorkStart)) adjustedNow else defaultWorkStart
         } else {
             defaultWorkStart
@@ -2708,16 +2727,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Computes the intersection of available start-times across multiple therapists, where
      * each therapist can have a different duration.
+     * @param minimumLeadMinutes Minimum minutes from now before the earliest bookable slot (0 = no restriction).
      */
-    fun getAvailableTimeSlotsMulti(shopId: Int, dateStr: String, blocks: List<Pair<Int, Int>>): Array<String> {
+    fun getAvailableTimeSlotsMulti(
+        shopId: Int,
+        dateStr: String,
+        blocks: List<Pair<Int, Int>>,
+        minimumLeadMinutes: Long = 0L,
+    ): Array<String> {
         if (blocks.isEmpty()) return emptyArray()
 
         val (firstEmployeeId, firstDuration) = blocks.first()
-        var common = getAvailableTimeSlots(firstEmployeeId, shopId, dateStr, firstDuration).toMutableSet()
+        var common = getAvailableTimeSlots(firstEmployeeId, shopId, dateStr, firstDuration, minimumLeadMinutes).toMutableSet()
 
         for (i in 1 until blocks.size) {
             val (employeeId, duration) = blocks[i]
-            val other = getAvailableTimeSlots(employeeId, shopId, dateStr, duration).toSet()
+            val other = getAvailableTimeSlots(employeeId, shopId, dateStr, duration, minimumLeadMinutes).toSet()
             common.retainAll(other)
             if (common.isEmpty()) break
         }
