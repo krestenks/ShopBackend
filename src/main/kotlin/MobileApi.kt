@@ -519,8 +519,9 @@ class MobileApi(private val db: DataBase) {
                     }
 
                     db.updateAppointmentStatus(appointmentId, body.status)
-                    val updated = db.getAppointmentWithServicesById(appointmentId)
-                        ?: return@patch call.respond(HttpStatusCode.InternalServerError, "Failed to read updated appointment")
+                    val updated = (db.getAppointmentWithServicesById(appointmentId)
+                        ?: return@patch call.respond(HttpStatusCode.InternalServerError, "Failed to read updated appointment"))
+                        .enrichWithStatusActions()
                     call.respond(updated)
                 }
 
@@ -588,8 +589,9 @@ class MobileApi(private val db: DataBase) {
                         status = body.status,
                         actualDurationMinutes = body.actualDurationMinutes,
                     )
-                    val updated = db.getAppointmentWithServicesById(appointmentId)
-                        ?: return@put call.respond(HttpStatusCode.InternalServerError, "Failed to read updated appointment")
+                    val updated = (db.getAppointmentWithServicesById(appointmentId)
+                        ?: return@put call.respond(HttpStatusCode.InternalServerError, "Failed to read updated appointment"))
+                        .enrichWithStatusActions()
                     call.respond(updated)
                 }
 
