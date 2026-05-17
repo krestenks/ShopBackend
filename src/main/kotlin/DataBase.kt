@@ -67,7 +67,58 @@ data class AppointmentWithServices(
     val completedAt: Long? = null,
     /** Recorded treatment duration in minutes once Done (null until then). */
     val actualDurationMinutes: Int? = null,
+    /**
+     * Server-computed numeric status: 0=Waiting, 1=Ongoing, 2=Done.
+     * Derived from [status] — eliminates any string encoding / locale / casing mismatch.
+     */
+    val statusCode: Int = 0,
+    /**
+     * Server-computed (UTC epoch-ms from server clock):
+     * true  → 💆 Start action is currently available.
+     * Window: appointment start − 30 min  to  appointment start + 2 h.
+     */
+    val canStartStatus: Boolean = false,
+    /**
+     * Server-computed: true → ✅ Done action is available.
+     * Window: status == Ongoing  AND  appointment start + 2 h not yet elapsed.
+     */
+    val canDoneStatus: Boolean = false,
+    /**
+     * Server-computed human hint for the status row,
+     * e.g. "Starts in 5 min", "Start available", "In progress", "Expired".
+     */
+    val statusWindowText: String = "",
 )
+
+// ─── Server-side status action enrichment ────────────────────────────────────
+
+/**
+ * Enriches a single [AppointmentWithServices] with server-clock-based action booleans
+ * ([canStartStatus], [canDoneStatus]) and a human-readable timing hint ([statusWindowText]).
+ *
+ * Using server time avoids phone timezone / DST / clock-drift issues.
+ * The phone UI just reads these booleans directly.
+ */
+fun AppointmentWithServices.enrichWithStatusActions(now: Long = System.currentTimeMillis()): AppointmentWithServices {
+    val code = when (status.trim().lowercase()) { "ongoing" -> 1; "done" -> 2; else -> 0 }
+    val startWindowOpen = now >= dateTime - 30 * 60_000L
+    val tooOld          = now > dateTime + 2L * 60 * 60_000L
+    val canStart        = code == 0 && startWindowOpen && !tooOld
+    val canDone         = code == 1 && !tooOld
+    val minsToStart     = ((dateTime - now) / 60_000L).toInt()
+    val windowText = when {
+        tooOld   && code != 2 -> "Expired"
+        code == 2              -> ""
+        code == 1              -> if (!tooOld) "In progress" else "Expired"
+        canStart               -> "Start available"
+        minsToStart > 0        -> "Starts in $minsToStart min"
+        else                   -> ""
+    }
+    return copy(statusCode = code, canStartStatus = canStart, canDoneStatus = canDone, statusWindowText = windowText)
+}
+
+/** Enriches every item in the list in a single pass. */
+fun List<AppointmentWithServices>.enrichWithStatusActions() = map { it.enrichWithStatusActions() }
 
 
 
