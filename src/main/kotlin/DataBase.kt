@@ -269,6 +269,26 @@ data class SmsUnhandledNotification(
     val unreadCount: Int,
 )
 
+// ─── Group chat ───────────────────────────────────────────────────────────────
+
+/**
+ * A message in the manager group chat.
+ * [createdAt] is always set by the server to avoid phone/server clock drift.
+ */
+@Serializable
+data class GroupChatMessage(
+    val id: Int,
+    /** The manager group this message belongs to */
+    val managerId: Int,
+    /** "manager" | "shop" */
+    val senderType: String,
+    val senderId: Int,
+    val senderName: String,
+    val body: String,
+    /** Server-side UTC epoch-ms — always calculated on server */
+    val createdAt: Long,
+)
+
 // ─── CallApp screening result cache ─────────────────────────────────────────
 
 @Serializable
@@ -691,6 +711,24 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 used_at      INTEGER
             )
         """.trimIndent()) }
+
+        // Group chat — one room per manager, shared with all shops under that manager
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS group_chat_message (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                manager_id   INTEGER NOT NULL,
+                sender_type  TEXT    NOT NULL,
+                sender_id    INTEGER NOT NULL,
+                sender_name  TEXT    NOT NULL,
+                body         TEXT    NOT NULL,
+                created_at   INTEGER NOT NULL
+            )
+        """.trimIndent()) }
+        try {
+            connection.createStatement().use { it.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_chat_manager_created ON group_chat_message(manager_id, created_at)"
+            ) }
+        } catch (_: Exception) {}
 
         println("All tables ready.")
     }
@@ -3874,6 +3912,67 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             employeeTotals = employeeTotals,
             grandTotal = grandTotal,
         )
+    }
+
+    // =========================================================================
+    // Group chat
+    // =========================================================================
+
+    fun insertGroupChatMessage(
+        managerId: Int,
+        senderType: String,
+        senderId: Int,
+        senderName: String,
+        body: String,
+    ): GroupChatMessage {
+        val now = System.currentTimeMillis()
+        var newId = -1
+        connection.prepareStatement(
+            "INSERT INTO group_chat_message (manager_id, sender_type, sender_id, sender_name, body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.setString(2, senderType)
+            stmt.setInt(3, senderId)
+            stmt.setString(4, senderName)
+            stmt.setString(5, body)
+            stmt.setLong(6, now)
+            stmt.executeUpdate()
+            val rs = stmt.generatedKeys
+            if (rs.next()) newId = rs.getInt(1)
+        }
+        return GroupChatMessage(id = newId, managerId = managerId, senderType = senderType,
+            senderId = senderId, senderName = senderName, body = body, createdAt = now)
+    }
+
+    /** Returns up to [limit] messages for the manager group, oldest first. */
+    fun getGroupChatMessages(managerId: Int, limit: Int = 200): List<GroupChatMessage> {
+        val result = mutableListOf<GroupChatMessage>()
+        connection.prepareStatement(
+            "SELECT id, manager_id, sender_type, sender_id, sender_name, body, created_at FROM group_chat_message WHERE manager_id = ? ORDER BY created_at DESC LIMIT ?"
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.setInt(2, limit)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result += GroupChatMessage(
+                    id = rs.getInt("id"), managerId = rs.getInt("manager_id"),
+                    senderType = rs.getString("sender_type"), senderId = rs.getInt("sender_id"),
+                    senderName = rs.getString("sender_name"), body = rs.getString("body"),
+                    createdAt = rs.getLong("created_at"),
+                )
+            }
+        }
+        return result.reversed() // oldest first for chat display
+    }
+
+    /** Resolves the manager_id that owns a given shop. */
+    fun getManagerIdForShop(shopId: Int): Int? {
+        connection.prepareStatement("SELECT manager_id FROM shops WHERE id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("manager_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
     }
 
 

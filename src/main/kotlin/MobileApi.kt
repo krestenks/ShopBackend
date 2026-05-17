@@ -1511,12 +1511,85 @@ class MobileApi(private val db: DataBase) {
                     )
                 }
 
+                // ─────────────────────────────────────────────────────────────
+                // Group chat  (manager + all their shops share one room)
+                // ─────────────────────────────────────────────────────────────
+
+                /** GET /api/mobile/group-chat/messages?limit=200 */
+                get("/api/mobile/group-chat/messages") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val managerId = resolveManagerId(loginInfo, db)
+                        ?: return@get call.respond(HttpStatusCode.Forbidden, "Cannot resolve manager group")
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 500) ?: 200
+                    val messages = db.getGroupChatMessages(managerId, limit)
+                    call.respond(GroupChatMessagesResponse(messages))
+                }
+
+                /** POST /api/mobile/group-chat/messages  body: {"body":"..."} */
+                post("/api/mobile/group-chat/messages") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val managerId = resolveManagerId(loginInfo, db)
+                        ?: return@post call.respond(HttpStatusCode.Forbidden, "Cannot resolve manager group")
+                    val req = runCatching { call.receive<SendGroupChatMessageRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+                    val body = req.body.trim()
+                    if (body.isBlank()) {
+                        return@post call.respond(HttpStatusCode.BadRequest, "body must not be blank")
+                    }
+
+                    val senderType: String
+                    val senderId: Int
+                    val senderName: String
+                    when (loginInfo.role) {
+                        "manager" -> {
+                            senderType = "manager"
+                            senderId   = loginInfo.managerId!!
+                            senderName = db.getManagerById(senderId)?.name ?: "Manager"
+                        }
+                        "shop" -> {
+                            senderType = "shop"
+                            senderId   = loginInfo.shopId!!
+                            senderName = db.getShopById(senderId)?.name ?: "Shop"
+                        }
+                        else -> return@post call.respond(HttpStatusCode.Forbidden, "Unknown role")
+                    }
+
+                    val msg = db.insertGroupChatMessage(
+                        managerId  = managerId,
+                        senderType = senderType,
+                        senderId   = senderId,
+                        senderName = senderName,
+                        body       = body,
+                    )
+                    call.respond(HttpStatusCode.Created, msg)
+                }
+
             }
         }
     }
 }
 
+// ─── Group chat DTOs ──────────────────────────────────────────────────────────
+
+@Serializable
+data class SendGroupChatMessageRequest(val body: String)
+
+@Serializable
+data class GroupChatMessagesResponse(val messages: List<GroupChatMessage>)
+
 // ─── Auth helper ──────────────────────────────────────────────────────────────
+
+/**
+ * Given the current caller's [LoginInfo], resolve the manager_id for the group chat room.
+ * - Manager → their own id.
+ * - Shop    → looked up via shops.manager_id.
+ * Returns null if the manager cannot be resolved (un-assigned shop etc.).
+ */
+private fun resolveManagerId(loginInfo: LoginInfo, db: DataBase): Int? = when (loginInfo.role) {
+    "manager" -> loginInfo.managerId
+    "shop"    -> loginInfo.shopId?.let { db.getManagerIdForShop(it) }
+    else      -> null
+}
 
 private fun isAuthorizedForShop(loginInfo: LoginInfo, shopId: Int, db: DataBase): Boolean {
     return when (loginInfo.role) {
