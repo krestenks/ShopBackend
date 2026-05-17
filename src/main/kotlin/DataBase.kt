@@ -12,6 +12,24 @@ import kotlinx.serialization.Serializable
 import java.util.UUID
 import kotlin.String
 
+// ─── Multi-tenant owner ───────────────────────────────────────────────────────
+
+/**
+ * Represents a shop-chain tenant (owner / SaaS customer).
+ * All operational entities (shops, managers, employees, services, customers, etc.)
+ * belong to exactly one owner, providing full domain isolation.
+ */
+@Serializable
+data class Owner(
+    val id: Int,
+    val name: String,
+    val slug: String? = null,
+    val active: Boolean = true,
+    val createdAt: Long = 0L,
+)
+
+// ─── Existing entity models ───────────────────────────────────────────────────
+
 @Serializable
 data class SimpleEmployee(val id: Int, val name: String)
 @Serializable
@@ -401,6 +419,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun createTables() {
         val sqlStatements = listOf(
             """
+            CREATE TABLE IF NOT EXISTS owners (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL,
+                slug       TEXT UNIQUE,
+                active     INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS booking_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token TEXT NOT NULL UNIQUE,
@@ -656,9 +683,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE appointments ADD COLUMN actual_duration_minutes INTEGER",
             // Token revocation: bump this column to instantly invalidate all existing tokens
             "ALTER TABLE app_account ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+            // ── Multi-tenant owner_id columns (Step 1: nullable, backfilled later) ──
+            "ALTER TABLE shops     ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE managers  ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE employees ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE services  ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE customers ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
+
+        // Owner foundation: ensure a default owner exists and backfill existing records
+        ensureDefaultOwnerAndBackfill()
 
         // Dedicated mobile app accounts (separate from web-admin login)
         connection.createStatement().use { it.execute("""
@@ -4012,6 +4049,118 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.getInt("manager_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
+    // =========================================================================
+    // Multi-tenant owner helpers
+    // =========================================================================
+
+    /**
+     * Ensures a default owner (id=1, slug="default") exists and then backfills
+     * owner_id = 1 on all existing rows that still have owner_id IS NULL.
+     * Safe to call on every startup — all operations are idempotent.
+     */
+    private fun ensureDefaultOwnerAndBackfill() {
+        val now = System.currentTimeMillis()
+        connection.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT COUNT(*) FROM owners")
+            val count = if (rs.next()) rs.getInt(1) else 0
+            if (count == 0) {
+                connection.prepareStatement(
+                    "INSERT INTO owners (name, slug, active, created_at) VALUES ('Default Owner', 'default', 1, ?)"
+                ).use { ins -> ins.setLong(1, now); ins.executeUpdate() }
+                println("[Owner] Created default owner (id=1)")
+            }
+        }
+        listOf(
+            "UPDATE shops     SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE managers  SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE employees SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE services  SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE customers SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE app_account SET owner_id = 1 WHERE owner_id IS NULL",
+        ).forEach { sql ->
+            try {
+                val updated = connection.createStatement().use { it.executeUpdate(sql) }
+                if (updated > 0) println("[Owner] Backfilled $updated rows: $sql")
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun getAllOwners(): List<Owner> {
+        connection.prepareStatement("SELECT id, name, slug, active, created_at FROM owners ORDER BY name").use { stmt ->
+            val rs = stmt.executeQuery()
+            return buildList {
+                while (rs.next()) {
+                    add(Owner(
+                        id        = rs.getInt("id"),
+                        name      = rs.getString("name"),
+                        slug      = rs.getString("slug"),
+                        active    = rs.getInt("active") != 0,
+                        createdAt = rs.getLong("created_at"),
+                    ))
+                }
+            }
+        }
+    }
+
+    fun getOwnerById(id: Int): Owner? {
+        connection.prepareStatement("SELECT id, name, slug, active, created_at FROM owners WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return Owner(
+                id        = rs.getInt("id"),
+                name      = rs.getString("name"),
+                slug      = rs.getString("slug"),
+                active    = rs.getInt("active") != 0,
+                createdAt = rs.getLong("created_at"),
+            )
+        }
+    }
+
+    fun addOwner(name: String, slug: String?): Int {
+        val now = System.currentTimeMillis()
+        connection.prepareStatement(
+            "INSERT INTO owners (name, slug, active, created_at) VALUES (?, ?, 1, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, slug?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setLong(3, now)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    fun updateOwner(id: Int, name: String, slug: String?, active: Boolean) {
+        connection.prepareStatement(
+            "UPDATE owners SET name = ?, slug = ?, active = ? WHERE id = ?"
+        ).use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, slug?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setInt(3, if (active) 1 else 0)
+            stmt.setInt(4, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun getOwnerIdForShop(shopId: Int): Int? {
+        connection.prepareStatement("SELECT owner_id FROM shops WHERE id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
+    fun getOwnerIdForManager(managerId: Int): Int? {
+        connection.prepareStatement("SELECT owner_id FROM managers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
         }
     }
 
