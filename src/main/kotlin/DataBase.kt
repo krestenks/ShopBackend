@@ -3926,10 +3926,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         body: String,
     ): GroupChatMessage {
         val now = System.currentTimeMillis()
-        var newId = -1
         connection.prepareStatement(
-            "INSERT INTO group_chat_message (manager_id, sender_type, sender_id, sender_name, body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            Statement.RETURN_GENERATED_KEYS
+            "INSERT INTO group_chat_message (manager_id, sender_type, sender_id, sender_name, body, created_at) VALUES (?, ?, ?, ?, ?, ?)"
         ).use { stmt ->
             stmt.setInt(1, managerId)
             stmt.setString(2, senderType)
@@ -3938,8 +3936,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(5, body)
             stmt.setLong(6, now)
             stmt.executeUpdate()
-            val rs = stmt.generatedKeys
-            if (rs.next()) newId = rs.getInt(1)
+        }
+        // SQLite JDBC doesn't implement getGeneratedKeys() — use last_insert_rowid() instead.
+        val newId = connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
         }
         return GroupChatMessage(id = newId, managerId = managerId, senderType = senderType,
             senderId = senderId, senderName = senderName, body = body, createdAt = now)
