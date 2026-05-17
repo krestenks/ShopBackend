@@ -4164,6 +4164,190 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    // =========================================================================
+    // Owner-scoped read methods (Step 3)
+    // These are the safe replacements for the global getAllXxx() calls.
+    // Existing global methods are kept for now (Step 11 removes them).
+    // =========================================================================
+
+    fun getShopsByOwner(ownerId: Int): List<Shop> {
+        val shops = mutableListOf<Shop>()
+        connection.prepareStatement(
+            "SELECT id, name, address, directions, manager_id FROM shops WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                shops.add(Shop(
+                    id        = rs.getInt("id"),
+                    name      = rs.getString("name"),
+                    address   = rs.getString("address"),
+                    directions = rs.getString("directions"),
+                    managerId = rs.getInt("manager_id"),
+                ))
+            }
+        }
+        return shops
+    }
+
+    fun getManagersByOwner(ownerId: Int): List<Manager> {
+        val result = mutableListOf<Manager>()
+        connection.prepareStatement(
+            "SELECT id, name, username, password_hash, phone FROM managers WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Manager(
+                    id           = rs.getInt("id"),
+                    name         = rs.getString("name"),
+                    username     = rs.getString("username"),
+                    passwordHash = rs.getString("password_hash"),
+                    phone        = rs.getString("phone"),
+                ))
+            }
+        }
+        return result
+    }
+
+    fun getEmployeesByOwner(ownerId: Int): List<Employee> {
+        val result = mutableListOf<Employee>()
+        connection.prepareStatement(
+            "SELECT id, name, phone FROM employees WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Employee(
+                    id    = rs.getInt("id"),
+                    name  = rs.getString("name"),
+                    phone = rs.getString("phone"),
+                ))
+            }
+        }
+        return result
+    }
+
+    fun getServicesByOwner(ownerId: Int): List<Service> {
+        val result = mutableListOf<Service>()
+        connection.prepareStatement(
+            "SELECT id, name, price, duration FROM services WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Service(
+                    id       = rs.getInt("id"),
+                    name     = rs.getString("name"),
+                    price    = rs.getDouble("price"),
+                    duration = rs.getInt("duration"),
+                ))
+            }
+        }
+        return result
+    }
+
+    // =========================================================================
+    // Owner-scoped insert methods (Step 3)
+    // These set owner_id on every new entity so new data is always scoped.
+    // =========================================================================
+
+    /** Adds a shop belonging to [ownerId]. Returns the new shop id. */
+    fun addShopForOwner(ownerId: Int, name: String, address: String?, directions: String?): Int {
+        connection.prepareStatement(
+            "INSERT INTO shops (name, address, directions, owner_id) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, address)
+            stmt.setString(3, directions)
+            stmt.setInt(4, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds a manager belonging to [ownerId]. Returns the new manager id. */
+    fun addManagerForOwner(ownerId: Int, name: String, username: String, password: String, phone: String?): Int {
+        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        connection.prepareStatement(
+            "INSERT INTO managers (name, username, password_hash, phone, owner_id) VALUES (?, ?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, username)
+            stmt.setString(3, hash)
+            stmt.setString(4, phone)
+            stmt.setInt(5, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds an employee belonging to [ownerId]. Returns the new employee id. */
+    fun addEmployeeForOwner(ownerId: Int, name: String, phone: String?): Int {
+        connection.prepareStatement(
+            "INSERT INTO employees (name, phone, owner_id) VALUES (?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, phone)
+            stmt.setInt(3, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds a service belonging to [ownerId]. Returns the new service id. */
+    fun addServiceForOwner(ownerId: Int, name: String, price: Double, duration: Int): Int {
+        connection.prepareStatement(
+            "INSERT INTO services (name, price, duration, owner_id) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setDouble(2, price)
+            stmt.setInt(3, duration)
+            stmt.setInt(4, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /**
+     * Verifies that a shop belongs to the given owner.
+     * Used for owner-scoped authorization checks before any shop operation.
+     */
+    fun isShopOwnedBy(shopId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM shops WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
+    /**
+     * Verifies that a manager belongs to the given owner.
+     */
+    fun isManagerOwnedBy(managerId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM managers WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
 
 
 
