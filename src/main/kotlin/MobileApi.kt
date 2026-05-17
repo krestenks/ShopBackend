@@ -636,6 +636,8 @@ class MobileApi(private val db: DataBase) {
                         return@get
                     }
 
+                    // Auto-complete any Ongoing appointments that have been running for >2 h
+                    db.autoCompleteStaleOngoingAppointments()
                     val appointments = db.getAppointmentsForShop(shopId)
                     call.respond(appointments)
                 }

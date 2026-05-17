@@ -2000,6 +2000,55 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
+     * Automatically completes any appointments that are still "Ongoing"
+     * but whose start time was more than [stallMinutes] minutes ago
+     * (default 120 min = 2 hours, matching the app UI lock-out rule).
+     *
+     * Called before appointment list reads so the app always sees the latest state.
+     * Returns the number of rows updated.
+     */
+    fun autoCompleteStaleOngoingAppointments(stallMinutes: Long = 120L): Int {
+        val now = System.currentTimeMillis()
+        val stallMs = stallMinutes * 60_000L
+        val cutoff = now - stallMs
+
+        // Collect all stale Ongoing rows
+        val rows = mutableListOf<Triple<Int, Long, Long?>>() // id, dateTime, ongoingStartedAt
+        connection.prepareStatement(
+            "SELECT id, date_time, ongoing_started_at FROM appointments WHERE status = 'Ongoing' AND date_time <= ?"
+        ).use { stmt ->
+            stmt.setLong(1, cutoff)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val osaRaw = rs.getLong("ongoing_started_at")
+                val osa = if (rs.wasNull()) null else osaRaw
+                rows += Triple(rs.getInt("id"), rs.getLong("date_time"), osa)
+            }
+        }
+
+        if (rows.isEmpty()) return 0
+
+        var updated = 0
+        for ((id, dateTime, ongoingStartedAt) in rows) {
+            val startMs = ongoingStartedAt ?: dateTime
+            val actualMin = ((now - startMs) / 60_000L).toInt().coerceAtLeast(0)
+            connection.prepareStatement(
+                "UPDATE appointments SET status='Done', completed_at=?, actual_duration_minutes=? WHERE id=?"
+            ).use { stmt ->
+                stmt.setLong(1, now)
+                stmt.setInt(2, actualMin)
+                stmt.setInt(3, id)
+                updated += stmt.executeUpdate()
+            }
+        }
+
+        if (updated > 0) {
+            println("[autoComplete] Auto-completed $updated stale Ongoing appointments (>${stallMinutes}min)")
+        }
+        return updated
+    }
+
+    /**
      * Manual correction edit for an appointment (excluding services).
      * Used when manager long-presses the card headline and edits details.
      */
