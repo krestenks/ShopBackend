@@ -45,7 +45,8 @@ data class Appointment(
     val shopId: Int,
     val dateTime: Long,
     val duration: Int,
-    val price: Double
+    val price: Double,
+    val status: String = "Waiting",
 )
 @Serializable
 data class AppointmentWithServices(
@@ -57,7 +58,15 @@ data class AppointmentWithServices(
     val price: Double,
     val services: List<Service>,
     val employee: Employee?,
-    val customer: Customer?
+    val customer: Customer?,
+    /** Workflow status: "Waiting" | "Ongoing" | "Done" */
+    val status: String = "Waiting",
+    /** Epoch-ms when status was set to Ongoing (null if never started). */
+    val ongoingStartedAt: Long? = null,
+    /** Epoch-ms when status was set to Done (null if not finished). */
+    val completedAt: Long? = null,
+    /** Recorded treatment duration in minutes once Done (null until then). */
+    val actualDurationMinutes: Int? = null,
 )
 
 
@@ -565,6 +574,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
             // Price-list SMS footer appended when manager taps "Send price list" in the app
             "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
+            // Appointment workflow status tracking
+            "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
+            "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
+            "ALTER TABLE appointments ADD COLUMN completed_at INTEGER",
+            "ALTER TABLE appointments ADD COLUMN actual_duration_minutes INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -1643,6 +1657,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     services = services,
                     customer = getCustomerById(rs.getInt("customer_id")),
                     employee = getEmployeeById(rs.getInt("employee_id")),
+                    status = try { rs.getString("status") ?: "Waiting" } catch (_: Exception) { "Waiting" },
+                    ongoingStartedAt = try { rs.getLong("ongoing_started_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                    completedAt = try { rs.getLong("completed_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                    actualDurationMinutes = try { rs.getInt("actual_duration_minutes").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
                 )
             }
             rs.close()
@@ -1895,7 +1913,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 price = rs.getDouble("price"),
                 services = services,
                 customer = getCustomerById(rs.getInt("customer_id")),
-                employee = getEmployeeById(rs.getInt("employee_id"))
+                employee = getEmployeeById(rs.getInt("employee_id")),
+                status = try { rs.getString("status") ?: "Waiting" } catch (_: Exception) { "Waiting" },
+                ongoingStartedAt = try { rs.getLong("ongoing_started_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                completedAt = try { rs.getLong("completed_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                actualDurationMinutes = try { rs.getInt("actual_duration_minutes").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
             )
         } else {
             null
@@ -1926,7 +1948,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     price = rs.getDouble("price"),
                     services = services,
                     customer = getCustomerById(rs.getInt("customer_id")),
-                    employee = getEmployeeById(rs.getInt("employee_id"))
+                    employee = getEmployeeById(rs.getInt("employee_id")),
+                    status = try { rs.getString("status") ?: "Waiting" } catch (_: Exception) { "Waiting" },
+                    ongoingStartedAt = try { rs.getLong("ongoing_started_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                    completedAt = try { rs.getLong("completed_at").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
+                    actualDurationMinutes = try { rs.getInt("actual_duration_minutes").takeIf { !rs.wasNull() } } catch (_: Exception) { null },
                 )
             )
         }
@@ -1934,6 +1960,64 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         rs.close()
         stmt.close()
         return appointments
+    }
+
+    /**
+     * Update workflow status of an appointment.
+     * - Waiting → Ongoing: records ongoing_started_at = now, clears completed fields.
+     * - Ongoing → Done:    records completed_at = now, computes actualDurationMinutes from ongoingStartedAt.
+     * - Any   → Waiting:   clears all timing fields (reset / undo).
+     */
+    fun updateAppointmentStatus(appointmentId: Int, newStatus: String) {
+        val now = System.currentTimeMillis()
+        // Read current state for duration computation
+        val current = getAppointmentWithServicesById(appointmentId)
+        when (newStatus) {
+            "Ongoing" -> connection.prepareStatement(
+                "UPDATE appointments SET status=?, ongoing_started_at=?, completed_at=NULL, actual_duration_minutes=NULL WHERE id=?"
+            ).use { stmt -> stmt.setString(1, "Ongoing"); stmt.setLong(2, now); stmt.setInt(3, appointmentId); stmt.executeUpdate() }
+            "Done" -> {
+                val startMs = current?.ongoingStartedAt
+                val actualMin = if (startMs != null) ((now - startMs) / 60_000L).toInt().coerceAtLeast(0) else null
+                connection.prepareStatement(
+                    "UPDATE appointments SET status=?, completed_at=?, actual_duration_minutes=? WHERE id=?"
+                ).use { stmt ->
+                    stmt.setString(1, "Done")
+                    stmt.setLong(2, now)
+                    if (actualMin != null) stmt.setInt(3, actualMin) else stmt.setNull(3, java.sql.Types.INTEGER)
+                    stmt.setInt(4, appointmentId)
+                    stmt.executeUpdate()
+                }
+            }
+            else -> connection.prepareStatement(
+                "UPDATE appointments SET status='Waiting', ongoing_started_at=NULL, completed_at=NULL, actual_duration_minutes=NULL WHERE id=?"
+            ).use { stmt -> stmt.setInt(1, appointmentId); stmt.executeUpdate() }
+        }
+    }
+
+    /**
+     * Manual correction edit for an appointment (excluding services).
+     * Used when manager long-presses the card headline and edits details.
+     */
+    fun updateAppointmentFull(
+        appointmentId: Int,
+        dateTime: Long,
+        duration: Int,
+        price: Double,
+        status: String,
+        actualDurationMinutes: Int?,
+    ) {
+        connection.prepareStatement(
+            "UPDATE appointments SET date_time=?, duration=?, price=?, status=?, actual_duration_minutes=? WHERE id=?"
+        ).use { stmt ->
+            stmt.setLong(1, dateTime)
+            stmt.setInt(2, duration)
+            stmt.setDouble(3, price)
+            stmt.setString(4, status)
+            if (actualDurationMinutes != null) stmt.setInt(5, actualDurationMinutes) else stmt.setNull(5, java.sql.Types.INTEGER)
+            stmt.setInt(6, appointmentId)
+            stmt.executeUpdate()
+        }
     }
 
 
