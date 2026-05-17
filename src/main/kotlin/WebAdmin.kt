@@ -18,6 +18,16 @@ class WebAdmin(private val db: DataBase) {
 
     data class AdminSession(val username: String)
 
+    /** Session stored for an authenticated owner web-login. */
+    data class OwnerSession(val ownerId: Int, val ownerName: String)
+
+    /**
+     * Set by the platform admin to "impersonate" a specific owner.
+     * While this cookie is present, /admin/... pages filter data to the impersonated owner.
+     * The owner admin login also creates this session so the same pages work for owners.
+     */
+    data class ImpersonationSession(val ownerId: Int, val ownerName: String)
+
     private data class NavItem(val href: String, val label: String, val icon: String)
 
     private fun HTML.adminPage(
@@ -105,6 +115,64 @@ class WebAdmin(private val db: DataBase) {
                 bodyContent = bodyContent,
             )
         }
+    }
+
+    // ── Owner-portal HTML page wrapper (Step 13) ──────────────────────────────
+    private fun HTML.ownerPage(
+        session: OwnerSession,
+        titleText: String,
+        activePath: String? = null,
+        bodyContent: FlowContent.() -> Unit,
+    ) {
+        head {
+            meta { charset = "utf-8" }
+            meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
+            title { +"$titleText — ${session.ownerName}" }
+            link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+        }
+        body {
+            div("layout") {
+                div("sidebar") {
+                    div("brand") {
+                        div {
+                            div("brand-title") { +session.ownerName }
+                            div("brand-sub") { +"Owner Portal" }
+                        }
+                    }
+                    val nav = listOf(
+                        NavItem("/owner", "Dashboard", "🏠"),
+                        NavItem("/owner/shops", "Shops", "🏪"),
+                        NavItem("/owner/employees", "Employees", "👥"),
+                        NavItem("/owner/services", "Services", "🧾"),
+                        NavItem("/owner/managers", "Managers", "🧑‍💼"),
+                    )
+                    div("nav") {
+                        for (item in nav) {
+                            a(href = item.href, classes = if (activePath == item.href) "active" else null) {
+                                span { +item.icon }; span { +item.label }
+                            }
+                        }
+                        div("spacer") {}
+                        a(href = "/owner-logout") { span { +"🚪" }; span { +"Logout" } }
+                    }
+                }
+                div("main") {
+                    div("page-header") {
+                        div { h1("page-title") { +titleText } }
+                    }
+                    bodyContent()
+                }
+            }
+        }
+    }
+
+    private suspend fun ApplicationCall.respondOwnerPage(
+        session: OwnerSession,
+        titleText: String,
+        activePath: String? = null,
+        bodyContent: FlowContent.() -> Unit,
+    ) {
+        respondHtml { ownerPage(session, titleText, activePath, bodyContent) }
     }
 
     fun setupRoutes(routing: Route) {
@@ -211,6 +279,7 @@ class WebAdmin(private val db: DataBase) {
                 // Public customer booking endpoints must NOT require admin login.
                 // Otherwise booking links sent by SMS (/api/book?token=...) redirect to /login.
                 val isPublic = path == "/login"
+                        || path == "/owner-login"
                         || path.startsWith("/api/book")
                         || path.startsWith("/api/booking/")
                         || path.startsWith("/api/shops")
@@ -219,9 +288,19 @@ class WebAdmin(private val db: DataBase) {
                         || path.startsWith("/api/timeslots")
                         || path.startsWith("/static/")
 
-                if (!isPublic && call.sessions.get<AdminSession>() == null) {
-                    call.respondRedirect("/login")
-                    finish()
+                // Owner-login portal pages are public; owner-portal pages require OwnerSession.
+                val isOwnerPortal = path.startsWith("/owner/") || path == "/owner"
+
+                if (!isPublic) {
+                    if (isOwnerPortal) {
+                        if (call.sessions.get<OwnerSession>() == null) {
+                            call.respondRedirect("/owner-login")
+                            finish()
+                        }
+                    } else if (call.sessions.get<AdminSession>() == null) {
+                        call.respondRedirect("/login")
+                        finish()
+                    }
                 }
             }
 
@@ -1989,8 +2068,746 @@ class WebAdmin(private val db: DataBase) {
                 call.respondRedirect("/customers")
             }
 
+            // =================================================================
+            // Step 5 — Owner web-login portal  (/owner-login, /owner, /owner-logout)
+            // =================================================================
+
+            get("/owner-login") {
+                call.respondHtml {
+                    head {
+                        meta { charset = "utf-8" }
+                        meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
+                        title { +"Owner Login" }
+                        link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+                    }
+                    body {
+                        div("center") {
+                            div("card") {
+                                h2 { +"Owner Login" }
+                                p("hint") { +"Sign in to manage your shops, staff and services." }
+                                form(action = "/owner-login", method = FormMethod.post) {
+                                    label { +"Username" }
+                                    textInput { name = "username"; autoComplete = false }
+                                    label { +"Password" }
+                                    passwordInput { name = "password"; autoComplete = false }
+                                    br()
+                                    submitInput(classes = "btn primary") { value = "Sign in" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/owner-login") {
+                val params = call.receiveParameters()
+                val username = params["username"]?.trim() ?: ""
+                val password = params["password"] ?: ""
+                val result = db.authenticateOwnerAccount(username, password)
+                if (result != null) {
+                    val (ownerId, _) = result
+                    val owner = db.getOwnerById(ownerId)
+                    val ownerName = owner?.name ?: "Owner"
+                    call.sessions.set(OwnerSession(ownerId = ownerId, ownerName = ownerName))
+                    println("[WebAdmin/owner-login] SUCCESS ownerId=$ownerId name='$ownerName'")
+                    call.respondRedirect("/owner")
+                } else {
+                    println("[WebAdmin/owner-login] FAILED username='$username'")
+                    call.respondHtml {
+                        head {
+                            meta { charset = "utf-8" }
+                            meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
+                            title { +"Owner Login" }
+                            link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+                        }
+                        body {
+                            div("center") {
+                                div("card") {
+                                    h2 { +"Owner Login" }
+                                    p("hint") { +"Invalid credentials." }
+                                    a(href = "/owner-login", classes = "btn") { +"Try again" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            get("/owner-logout") {
+                call.sessions.clear<OwnerSession>()
+                call.respondRedirect("/owner-login")
+            }
+
+            get("/owner") {
+                val session = call.sessions.get<OwnerSession>()
+                    ?: return@get call.respondRedirect("/owner-login")
+                val shops = db.getShopsByOwner(session.ownerId)
+                val managers = db.getManagersByOwner(session.ownerId)
+                val employees = db.getEmployeesByOwner(session.ownerId)
+                val services = db.getServicesByOwner(session.ownerId)
+                call.respondHtml {
+                    head {
+                        meta { charset = "utf-8" }
+                        meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
+                        title { +"Owner Dashboard — ${session.ownerName}" }
+                        link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
+                    }
+                    body {
+                        div("layout") {
+                            div("sidebar") {
+                                div("brand") {
+                                    div { div("brand-title") { +"ShopManager" }; div("brand-sub") { +"Owner Portal" } }
+                                }
+                                div("nav") {
+                                    a(href = "/owner") { span { +"🏠" }; span { +"Dashboard" } }
+                                    div("spacer") {}
+                                    a(href = "/owner-logout") { span { +"🚪" }; span { +"Logout" } }
+                                }
+                            }
+                            div("main") {
+                                div("page-header") {
+                                    div {
+                                        h1("page-title") { +"Owner Dashboard" }
+                                        p("page-subtitle") { +"Welcome, ${session.ownerName}" }
+                                    }
+                                }
+                                div("panel") {
+                                    h3 { +"Your tenancy at a glance" }
+                                    ul {
+                                        li { +"Shops: ${shops.size}" }
+                                        li { +"Managers: ${managers.size}" }
+                                        li { +"Employees: ${employees.size}" }
+                                        li { +"Services: ${services.size}" }
+                                    }
+                                    p("hint") { +"Full management pages (shops, employees, etc.) will be added in a future release." }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // Step 9 — Platform-admin owner management  (/admin/owners)
+            // Step 6 — Impersonation: /admin/switch-owner/{id}, /admin/exit-owner
+            // =================================================================
+
+            get("/admin/owners") {
+                val owners = db.getAllOwners()
+                val impersonating = call.sessions.get<ImpersonationSession>()
+                call.respondAdminPage(
+                    titleText = "Owners",
+                    subtitle = "Manage SaaS tenants (owners)",
+                    activePath = "/admin/owners",
+                ) {
+                    if (impersonating != null) {
+                        div("panel") {
+                            p {
+                                span("badge warn") { +"Impersonating: ${impersonating.ownerName} (id=${impersonating.ownerId})" }
+                                +" "
+                                a(href = "/admin/exit-owner", classes = "btn") { +"Exit impersonation" }
+                            }
+                        }
+                    }
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All owners" }
+                            table {
+                                thead {
+                                    tr {
+                                        th { +"ID" }; th { +"Name" }; th { +"Slug" }; th { +"Active" }
+                                        th { +"Login" }; th { +"Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for (owner in owners) {
+                                        val account = db.getOwnerAccountByOwnerId(owner.id)
+                                        tr {
+                                            td { +owner.id.toString() }
+                                            td { +owner.name }
+                                            td { +(owner.slug ?: "—") }
+                                            td { span("badge ${if (owner.active) "ok" else "warn"}") { +(if (owner.active) "Yes" else "No") } }
+                                            td {
+                                                if (account != null) span("badge ok") { +account.username }
+                                                else span("badge warn") { +"No login" }
+                                            }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/admin/owners/edit?id=${owner.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/admin/switch-owner/${owner.id}", classes = "btn") { +"Impersonate" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Add owner" }
+                            form(action = "/admin/owners/add", method = FormMethod.post) {
+                                label { +"Owner name" }
+                                textInput { name = "name"; placeholder = "Acme Salons" }
+                                label { +"Slug (optional, URL-friendly)" }
+                                textInput { name = "slug"; placeholder = "acme-salons" }
+                                label { +"Login username" }
+                                textInput { name = "username"; placeholder = "acme-admin" }
+                                label { +"Password" }
+                                passwordInput { name = "password"; placeholder = "Secure password" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Create owner" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/admin/owners/add") {
+                val params = call.receiveParameters()
+                val name     = params["name"]?.trim().orEmpty()
+                val slug     = params["slug"]?.trim()?.takeIf { it.isNotBlank() }
+                val username = params["username"]?.trim().orEmpty()
+                val password = params["password"].orEmpty()
+                if (name.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
+                    val ownerId = db.addOwner(name, slug)
+                    if (ownerId > 0) db.addOwnerAccount(ownerId, username, password)
+                }
+                call.respondRedirect("/admin/owners")
+            }
+
+            get("/admin/owners/edit") {
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/admin/owners")
+                val owner = db.getOwnerById(id)
+                    ?: return@get call.respondRedirect("/admin/owners")
+                val account = db.getOwnerAccountByOwnerId(id)
+                call.respondAdminPage(
+                    titleText = "Edit owner — ${owner.name}",
+                    activePath = "/admin/owners",
+                ) {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Owner details" }
+                            form(action = "/admin/owners/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"Name" }
+                                textInput { name = "name"; value = owner.name }
+                                label { +"Slug" }
+                                textInput { name = "slug"; value = owner.slug ?: "" }
+                                label { +"Active" }
+                                checkBoxInput { name = "active"; checked = owner.active }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Owner login" }
+                            if (account != null) {
+                                p { +"Current username: "; b { +account.username } }
+                            } else {
+                                p { em { +"No login set." } }
+                            }
+                            form(action = "/admin/owners/set-login", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"Username" }
+                                textInput { name = "username"; value = account?.username ?: "" }
+                                label { +"Password (leave blank to keep existing)" }
+                                passwordInput { name = "password"; placeholder = "New password" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save login" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/admin/owners/edit") {
+                val params = call.receiveParameters()
+                val id     = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/admin/owners")
+                val name   = params["name"]?.trim().orEmpty()
+                val slug   = params["slug"]?.trim()?.takeIf { it.isNotBlank() }
+                val active = params["active"] == "on"
+                if (name.isNotBlank()) db.updateOwner(id, name, slug, active)
+                call.respondRedirect("/admin/owners")
+            }
+
+            post("/admin/owners/set-login") {
+                val params = call.receiveParameters()
+                val id       = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/admin/owners")
+                val username = params["username"]?.trim().orEmpty()
+                val password = params["password"].orEmpty()
+                val existing = db.getOwnerAccountByOwnerId(id)
+                when {
+                    existing == null && username.isNotBlank() && password.isNotBlank() ->
+                        db.addOwnerAccount(id, username, password)
+                    existing != null && username.isNotBlank() -> {
+                        db.updateOwnerAccount(existing.id, username)
+                        if (password.isNotBlank()) db.updateOwnerAccountPassword(existing.id, password)
+                    }
+                }
+                call.respondRedirect("/admin/owners/edit?id=$id")
+            }
+
+            get("/admin/switch-owner/{ownerId}") {
+                val ownerId = call.parameters["ownerId"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/admin/owners")
+                val owner = db.getOwnerById(ownerId)
+                    ?: return@get call.respondRedirect("/admin/owners")
+                call.sessions.set(ImpersonationSession(ownerId = owner.id, ownerName = owner.name))
+                println("[WebAdmin] Admin impersonating ownerId=${owner.id} name='${owner.name}'")
+                call.respondRedirect("/admin/owners")
+            }
+
+            get("/admin/exit-owner") {
+                call.sessions.clear<ImpersonationSession>()
+                call.respondRedirect("/admin/owners")
+            }
+
+            // =================================================================
+            // Step 13 — Owner-scoped portal CRUD pages  (/owner/...)
+            // All routes below require OwnerSession (enforced by the intercept above).
+            // =================================================================
+
+            // ── Owner / Shops ────────────────────────────────────────────────
+            get("/owner/shops") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val shops = db.getShopsByOwner(session.ownerId)
+                val managers = db.getManagersByOwner(session.ownerId).associateBy { it.id }
+                call.respondOwnerPage(session, "Shops", "/owner/shops") {
+                    div("panel") {
+                        div("actions") {
+                            a(href = "/owner/shops/add", classes = "btn primary") { +"Add new shop" }
+                        }
+                        table {
+                            thead { tr { th { +"ID" }; th { +"Name" }; th { +"Address" }; th { +"Manager" }; th { +"Actions" } } }
+                            tbody {
+                                for (s in shops) {
+                                    tr {
+                                        td { +s.id.toString() }
+                                        td { +s.name }
+                                        td { +(s.address ?: "—") }
+                                        td { +(managers[s.managerId]?.name ?: "Unassigned") }
+                                        td {
+                                            div("actions") {
+                                                a(href = "/owner/shops/edit?id=${s.id}", classes = "btn") { +"Edit" }
+                                                a(href = "/owner/shops/delete?id=${s.id}", classes = "btn danger") {
+                                                    onClick = "return confirm('Delete shop?')"
+                                                    +"Delete"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            get("/owner/shops/add") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val managers = db.getManagersByOwner(session.ownerId)
+                call.respondOwnerPage(session, "Add shop", "/owner/shops") {
+                    div("panel") {
+                        form(action = "/owner/shops/add", method = FormMethod.post) {
+                            label { +"Shop name" }; textInput { name = "name"; placeholder = "My Shop" }
+                            label { +"Address" }; textInput { name = "address"; placeholder = "Street, City" }
+                            label { +"Directions" }; textArea { name = "directions"; placeholder = "Arrival instructions" }
+                            label { +"Manager" }
+                            select {
+                                name = "managerId"
+                                option { value = ""; +"Unassigned" }
+                                for (m in managers) { option { value = m.id.toString(); +m.name } }
+                            }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Add shop" }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/shops/add") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val name = params["name"]?.trim().orEmpty()
+                val address = params["address"]?.trim().orEmpty()
+                val directions = params["directions"]?.trim().orEmpty()
+                val managerId = params["managerId"]?.toIntOrNull()
+                if (name.isNotBlank()) {
+                    val shopId = db.addShopForOwner(session.ownerId, name, address.ifBlank { null }, directions.ifBlank { null })
+                    if (shopId > 0 && managerId != null && db.isManagerOwnedBy(managerId, session.ownerId)) {
+                        db.updateShop(shopId, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                    }
+                }
+                call.respondRedirect("/owner/shops")
+            }
+
+            get("/owner/shops/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(id, session.ownerId)) return@get call.respondRedirect("/owner/shops")
+                val shop = db.getShopById(id) ?: return@get call.respondRedirect("/owner/shops")
+                val managers = db.getManagersByOwner(session.ownerId)
+                call.respondOwnerPage(session, "Edit shop — ${shop.name}", "/owner/shops") {
+                    div("panel") {
+                        form(action = "/owner/shops/edit", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = id.toString() }
+                            label { +"Shop name" }; textInput { name = "name"; value = shop.name }
+                            label { +"Address" }; textInput { name = "address"; value = shop.address ?: "" }
+                            label { +"Directions" }; textArea { name = "directions"; +(shop.directions ?: "") }
+                            label { +"Manager" }
+                            select {
+                                name = "managerId"
+                                option { value = ""; +"Unassigned" }
+                                for (m in managers) { option { value = m.id.toString(); if (m.id == shop.managerId) selected = true; +m.name } }
+                            }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Save changes" }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/shops/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(id, session.ownerId)) return@post call.respondRedirect("/owner/shops")
+                val name = params["name"]?.trim().orEmpty()
+                val address = params["address"]?.trim().orEmpty()
+                val directions = params["directions"]?.trim().orEmpty()
+                val managerId = params["managerId"]?.toIntOrNull()
+                    ?.takeIf { db.isManagerOwnedBy(it, session.ownerId) }
+                if (name.isNotBlank()) db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                call.respondRedirect("/owner/shops")
+            }
+
+            get("/owner/shops/delete") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/shops")
+                if (db.isShopOwnedBy(id, session.ownerId)) db.deleteShop(id)
+                call.respondRedirect("/owner/shops")
+            }
+
+            // ── Owner / Employees ────────────────────────────────────────────
+            get("/owner/employees") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val employees = db.getEmployeesByOwner(session.ownerId)
+                call.respondOwnerPage(session, "Employees", "/owner/employees") {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All employees" }
+                            table {
+                                thead { tr { th { +"ID" }; th { +"Name" }; th { +"Phone" }; th { +"Actions" } } }
+                                tbody {
+                                    for (e in employees) {
+                                        tr {
+                                            td { +e.id.toString() }; td { +e.name }; td { +(e.phone ?: "—") }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/owner/employees/edit?id=${e.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/owner/employees/delete?id=${e.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete employee?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Add employee" }
+                            form(action = "/owner/employees/add", method = FormMethod.post) {
+                                label { +"Name" }; textInput { name = "name"; placeholder = "Full name" }
+                                label { +"Phone (optional)" }; textInput { name = "phone"; placeholder = "+45 12 34 56 78" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add employee" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/employees/add") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val name = params["name"]?.trim().orEmpty()
+                val phone = params["phone"]?.trim().takeIf { !it.isNullOrBlank() }
+                if (name.isNotBlank()) db.addEmployeeForOwner(session.ownerId, name, phone)
+                call.respondRedirect("/owner/employees")
+            }
+
+            get("/owner/employees/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/employees")
+                val emp = db.getEmployeeById(id) ?: return@get call.respondRedirect("/owner/employees")
+                // Verify ownership via owner_id column
+                val isOwned = db.getEmployeesByOwner(session.ownerId).any { it.id == id }
+                if (!isOwned) return@get call.respondRedirect("/owner/employees")
+                val shops = db.getShopsByOwner(session.ownerId)
+                val currentShopId = db.getShopIdForEmployee(id)
+                call.respondOwnerPage(session, "Edit employee — ${emp.name}", "/owner/employees") {
+                    div("panel") {
+                        form(action = "/owner/employees/edit", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = id.toString() }
+                            label { +"Name" }; textInput { name = "name"; value = emp.name }
+                            label { +"Phone" }; textInput { name = "phone"; value = emp.phone ?: "" }
+                            label { +"Assigned shop" }
+                            select {
+                                name = "shopId"
+                                option { value = ""; +"— No shop —" }
+                                for (s in shops) { option { value = s.id.toString(); if (s.id == currentShopId) selected = true; +s.name } }
+                            }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Save" }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/employees/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/employees")
+                val isOwned = db.getEmployeesByOwner(session.ownerId).any { it.id == id }
+                if (!isOwned) return@post call.respondRedirect("/owner/employees")
+                val name = params["name"]?.trim().orEmpty()
+                val phone = params["phone"]?.trim().takeIf { !it.isNullOrBlank() }
+                val shopId = params["shopId"]?.toIntOrNull()
+                    ?.takeIf { db.isShopOwnedBy(it, session.ownerId) }
+                if (name.isNotBlank()) db.updateEmployee(id, name, phone)
+                if (shopId != null) db.assignEmployeeToShop(id, shopId, exclusive = true)
+                else db.removeEmployeeFromAllShops(id)
+                call.respondRedirect("/owner/employees")
+            }
+
+            get("/owner/employees/delete") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/employees")
+                val isOwned = db.getEmployeesByOwner(session.ownerId).any { it.id == id }
+                if (isOwned) db.deleteEmployee(id)
+                call.respondRedirect("/owner/employees")
+            }
+
+            // ── Owner / Services ─────────────────────────────────────────────
+            get("/owner/services") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val services = db.getServicesByOwner(session.ownerId)
+                call.respondOwnerPage(session, "Services", "/owner/services") {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All services" }
+                            table {
+                                thead { tr { th { +"ID" }; th { +"Name" }; th { +"Price" }; th { +"Duration" }; th { +"Actions" } } }
+                                tbody {
+                                    for (s in services) {
+                                        tr {
+                                            td { +s.id.toString() }; td { +s.name }
+                                            td { +"${"%.2f".format(s.price)} kr" }; td { +"${s.duration} min" }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/owner/services/edit?id=${s.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/owner/services/delete?id=${s.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete service?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Add service" }
+                            form(action = "/owner/services/add", method = FormMethod.post) {
+                                label { +"Name" }; textInput { name = "name"; placeholder = "Massage" }
+                                label { +"Price (kr)" }; numberInput { name = "price"; step = "0.01"; placeholder = "0.00" }
+                                label { +"Duration (min)" }; numberInput { name = "duration"; step = "5"; placeholder = "60" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add service" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/services/add") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val name = params["name"]?.trim().orEmpty()
+                val price = params["price"]?.toDoubleOrNull() ?: 0.0
+                val duration = params["duration"]?.toIntOrNull() ?: 0
+                if (name.isNotBlank()) db.addServiceForOwner(session.ownerId, name, price, duration)
+                call.respondRedirect("/owner/services")
+            }
+
+            get("/owner/services/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/services")
+                val svc = db.getServiceById(id) ?: return@get call.respondRedirect("/owner/services")
+                val isOwned = db.getServicesByOwner(session.ownerId).any { it.id == id }
+                if (!isOwned) return@get call.respondRedirect("/owner/services")
+                call.respondOwnerPage(session, "Edit service — ${svc.name}", "/owner/services") {
+                    div("panel") {
+                        form(action = "/owner/services/edit", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = id.toString() }
+                            label { +"Name" }; textInput { name = "name"; value = svc.name }
+                            label { +"Price (kr)" }; numberInput { name = "price"; value = "%.2f".format(svc.price); step = "0.01" }
+                            label { +"Duration (min)" }; numberInput { name = "duration"; value = "${svc.duration}"; step = "1" }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Save" }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/services/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/services")
+                val isOwned = db.getServicesByOwner(session.ownerId).any { it.id == id }
+                if (!isOwned) return@post call.respondRedirect("/owner/services")
+                val name = params["name"]?.trim().orEmpty()
+                val price = params["price"]?.toDoubleOrNull() ?: 0.0
+                val duration = params["duration"]?.toIntOrNull() ?: 0
+                if (name.isNotBlank()) db.updateService(id, name, price, duration)
+                call.respondRedirect("/owner/services")
+            }
+
+            get("/owner/services/delete") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/services")
+                val isOwned = db.getServicesByOwner(session.ownerId).any { it.id == id }
+                if (isOwned) db.deleteService(id)
+                call.respondRedirect("/owner/services")
+            }
+
+            // ── Owner / Managers ─────────────────────────────────────────────
+            get("/owner/managers") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val managers = db.getManagersByOwner(session.ownerId)
+                call.respondOwnerPage(session, "Managers", "/owner/managers") {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"All managers" }
+                            table {
+                                thead { tr { th { +"ID" }; th { +"Name" }; th { +"Username" }; th { +"Phone" }; th { +"Actions" } } }
+                                tbody {
+                                    for (m in managers) {
+                                        tr {
+                                            td { +m.id.toString() }; td { +m.name }; td { +m.username }; td { +(m.phone ?: "—") }
+                                            td {
+                                                div("actions") {
+                                                    a(href = "/owner/managers/edit?id=${m.id}", classes = "btn") { +"Edit" }
+                                                    a(href = "/owner/managers/delete?id=${m.id}", classes = "btn danger") {
+                                                        onClick = "return confirm('Delete manager?')"
+                                                        +"Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Add manager" }
+                            form(action = "/owner/managers/add", method = FormMethod.post) {
+                                label { +"Name" }; textInput { name = "name"; placeholder = "Jane Doe" }
+                                label { +"Username" }; textInput { name = "username"; placeholder = "manager01" }
+                                label { +"Password" }; passwordInput { name = "password" }
+                                label { +"Phone (optional)" }; textInput { name = "phone"; placeholder = "+45 12 34 56 78" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Add manager" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/managers/add") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val name = params["name"]?.trim().orEmpty()
+                val username = params["username"]?.trim().orEmpty()
+                val password = params["password"].orEmpty()
+                val phone = params["phone"]?.trim().takeIf { !it.isNullOrBlank() }
+                if (name.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
+                    db.addManagerForOwner(session.ownerId, name, username, password, phone)
+                }
+                call.respondRedirect("/owner/managers")
+            }
+
+            get("/owner/managers/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(id, session.ownerId)) return@get call.respondRedirect("/owner/managers")
+                val mgr = db.getManagerById(id) ?: return@get call.respondRedirect("/owner/managers")
+                call.respondOwnerPage(session, "Edit manager — ${mgr.name}", "/owner/managers") {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Details" }
+                            form(action = "/owner/managers/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"Name" }; textInput { name = "name"; value = mgr.name }
+                                label { +"Username" }; textInput { name = "username"; value = mgr.username }
+                                label { +"Phone" }; textInput { name = "phone"; value = mgr.phone ?: "" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"Reset password" }
+                            form(action = "/owner/managers/reset-password", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"New password" }; passwordInput { name = "password"; placeholder = "New password" }
+                                br()
+                                submitInput(classes = "btn danger") { value = "Reset password" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/owner/managers/edit") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(id, session.ownerId)) return@post call.respondRedirect("/owner/managers")
+                val name = params["name"]?.trim().orEmpty()
+                val username = params["username"]?.trim().orEmpty()
+                val phone = params["phone"]?.trim().orEmpty()
+                if (name.isNotBlank() && username.isNotBlank()) db.updateManager(id, name, phone, username)
+                call.respondRedirect("/owner/managers")
+            }
+
+            post("/owner/managers/reset-password") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(id, session.ownerId)) return@post call.respondRedirect("/owner/managers")
+                val password = params["password"].orEmpty()
+                if (password.isNotBlank()) db.updateManagerPassword(id, password)
+                call.respondRedirect("/owner/managers/edit?id=$id")
+            }
+
+            get("/owner/managers/delete") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respondRedirect("/owner/managers")
+                if (db.isManagerOwnedBy(id, session.ownerId)) db.deleteManager(id)
+                call.respondRedirect("/owner/managers")
+            }
+
         }
     }
-
-    // Old header removed in favor of sidebar navigation via adminPage().
-} 
+}
