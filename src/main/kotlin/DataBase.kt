@@ -357,7 +357,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 date_time INTEGER NOT NULL,
                 duration INTEGER NOT NULL,
                 price REAL NOT NULL,
-                customer_id INTEGER NOT NULL
+                customer_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Waiting',
+                ongoing_started_at INTEGER,
+                completed_at INTEGER,
+                actual_duration_minutes INTEGER
             );
             ""","""
             CREATE TABLE IF NOT EXISTS appointment_services (
@@ -1674,7 +1678,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // Add a new appointment with placeholder price (to be updated later)
     fun addAppointment(employeeId: Int, shopId: Int, customerId: Int, dateTime: Long, duration: Int): Int {
         val stmt = connection.prepareStatement(
-            "INSERT INTO appointments (employee_id, shop_id, customer_id, date_time, duration, price) VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO appointments (employee_id, shop_id, customer_id, date_time, duration, price, status) VALUES (?, ?, ?, ?, ?, ?, 'Waiting')"
         )
         stmt.setInt(1, employeeId)
         stmt.setInt(2, shopId)
