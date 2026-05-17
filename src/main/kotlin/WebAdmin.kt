@@ -459,6 +459,13 @@ class WebAdmin(private val db: DataBase) {
                                     br()
                                     submitInput(classes = "btn danger") { value = "Remove App Login" }
                                 }
+                                form(action = "/managers/force-logout", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = manager_id.toString() }
+                                    submitInput(classes = "btn danger") {
+                                        value = "🚨 Force Logout Phone"
+                                        attributes["onclick"] = "return confirm('Force logout the manager phone? The current session will be revoked immediately.')"
+                                    }
+                                }
                             }
                         }
                     }
@@ -478,6 +485,16 @@ class WebAdmin(private val db: DataBase) {
                 val params = call.receiveParameters()
                 val id = params["id"]?.toIntOrNull()
                 if (id != null) db.removeManagerAppAccount(id)
+                call.respondRedirect("/managers/edit?id=$id")
+            }
+
+            post("/managers/force-logout") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                if (id != null) {
+                    db.bumpAppAccountTokenVersion("manager", id)
+                    println("[WebAdmin/ForceLogout] Force-logged out manager $id")
+                }
                 call.respondRedirect("/managers/edit?id=$id")
             }
 
@@ -799,6 +816,13 @@ class WebAdmin(private val db: DataBase) {
                                 hiddenInput { name = "id"; value = id.toString() }
                                 submitInput(classes = "btn danger") { value = "Remove App Login" }
                             }
+                            form(action = "/shops/force-logout", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput(classes = "btn danger") {
+                                    value = "🚨 Force Logout Phone"
+                                    attributes["onclick"] = "return confirm('Force logout the shop phone? The current session will be revoked immediately.')"
+                                }
+                            }
                         }
                     }
                 }
@@ -817,6 +841,16 @@ class WebAdmin(private val db: DataBase) {
                 val params = call.receiveParameters()
                 val sid = params["id"]?.toIntOrNull()
                 if (sid != null) db.removeShopAppAccount(sid)
+                call.respondRedirect("/shops/edit?id=$sid")
+            }
+
+            post("/shops/force-logout") {
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull()
+                if (sid != null) {
+                    db.bumpAppAccountTokenVersion("shop", sid)
+                    println("[WebAdmin/ForceLogout] Force-logged out shop $sid")
+                }
                 call.respondRedirect("/shops/edit?id=$sid")
             }
 

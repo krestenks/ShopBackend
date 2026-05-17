@@ -106,7 +106,7 @@ object ShopBackend {
                 cookie<WebAdmin.AdminSession>("ADMIN_SESSION")
                 cookie<SetupAppRoutes.SetupAppSession>("SETUP_APP_SESSION")
             }
-            JwtConfig.install(this)
+            JwtConfig.install(this, db)
 
             routing {
                 route("/") {

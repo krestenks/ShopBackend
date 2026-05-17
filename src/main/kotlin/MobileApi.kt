@@ -237,8 +237,9 @@ class MobileApi(private val db: DataBase) {
                 if (appAccount != null) {
                     val (refType, refId) = appAccount
                     val role = if (refType == "shop") "shop" else "manager"
-                    val token = generateToken(refId, role = role)
-                    println("[MobileApi/login] OK via app_account: $role id=$refId")
+                    val tokenVersion = db.getAppAccountTokenVersion(role, refId)
+                    val token = generateToken(refId, role = role, tokenVersion = tokenVersion)
+                    println("[MobileApi/login] OK via app_account: $role id=$refId version=$tokenVersion")
                     call.respond(LoginResponse(token = token, managerId = refId, role = role, userId = refId))
                     return@post
                 }
@@ -1562,6 +1563,66 @@ class MobileApi(private val db: DataBase) {
                         body       = body,
                     )
                     call.respond(HttpStatusCode.Created, msg)
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // Force logout — remote session revocation
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * POST /api/mobile/manager/shops/{shopId}/force-logout
+                 *
+                 * Bumps the shop account's token_version so the next API call from
+                 * the shop phone returns 401 — effectively revoking the active session.
+                 *
+                 * Use case: stolen shop phone.
+                 * Caller must be a manager that owns the target shop.
+                 */
+                post("/api/mobile/manager/shops/{shopId}/force-logout") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Manager role required")
+                        return@post
+                    }
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    db.bumpAppAccountTokenVersion("shop", shopId)
+                    println("[ForceLogout] Manager ${loginInfo.managerId} force-logged out shop $shopId")
+                    call.respond(HttpStatusCode.OK, "Shop phone session revoked")
+                }
+
+                /**
+                 * POST /api/mobile/manager/force-logout/{managerId}
+                 *
+                 * Bumps a manager account's token_version.
+                 * Currently restricted to self (a manager cannot revoke another manager's session
+                 * from the phone app — use the web admin for that).
+                 *
+                 * Use case: manager wants to remotely sign out their own stolen phone.
+                 */
+                post("/api/mobile/manager/force-logout/{managerId}") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Manager role required")
+                        return@post
+                    }
+                    val targetManagerId = call.parameters["managerId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing managerId")
+
+                    if (loginInfo.managerId != targetManagerId) {
+                        call.respond(HttpStatusCode.Forbidden, "You can only force-logout your own account from the app. Use the web admin to revoke other sessions.")
+                        return@post
+                    }
+
+                    db.bumpAppAccountTokenVersion("manager", targetManagerId)
+                    println("[ForceLogout] Manager $targetManagerId force-logged out their own account")
+                    call.respond(HttpStatusCode.OK, "Manager session revoked")
                 }
 
             }

@@ -654,6 +654,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
             "ALTER TABLE appointments ADD COLUMN completed_at INTEGER",
             "ALTER TABLE appointments ADD COLUMN actual_duration_minutes INTEGER",
+            // Token revocation: bump this column to instantly invalidate all existing tokens
+            "ALTER TABLE app_account ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -3146,6 +3148,43 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
         }
         return null
+    }
+
+    // ─── Token revocation ─────────────────────────────────────────────────────
+
+    /**
+     * Returns the current token_version for a given app_account row.
+     * Used by the JWT validator to detect force-logged-out sessions.
+     * Returns 0 if no active app_account row exists for this role+id
+     * (e.g. fallback-authenticated managers that have no app_account row).
+     */
+    fun getAppAccountTokenVersion(refType: String, refId: Int): Int {
+        val sql = "SELECT token_version FROM app_account WHERE ref_type=? AND ref_id=? LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, refType)
+            stmt.setInt(2, refId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) {
+                try { rs.getInt("token_version") } catch (_: Exception) { 0 }
+            } else 0
+        }
+    }
+
+    /**
+     * Increments token_version, instantly invalidating every JWT previously issued
+     * for this app_account row.  The next API call from that phone gets a 401.
+     *
+     * Works for both active=1 and active=0 rows so a deactivated account can still
+     * be force-logged-out defensively.
+     */
+    fun bumpAppAccountTokenVersion(refType: String, refId: Int) {
+        connection.prepareStatement(
+            "UPDATE app_account SET token_version = token_version + 1 WHERE ref_type=? AND ref_id=?"
+        ).use { stmt ->
+            stmt.setString(1, refType)
+            stmt.setInt(2, refId)
+            stmt.executeUpdate()
+        }
     }
 
     // Complete JSON result for joint availability
