@@ -44,6 +44,11 @@ object ShopBackend {
         val db = if (!dbPath.isNullOrBlank()) DataBase(dbPath) else DataBase()
         println("Database initialized.")
 
+        // Ensure owner-scoped DB indexes (idempotent)
+        runCatching { db.ensureOwnerIndexes() }
+            .onSuccess { println("Owner indexes ensured.") }
+            .onFailure { e -> println("Owner index warning: ${e.message}") }
+
         // Defensive cleanup: terminate any stale active calls from a previous run.
         // We use a threshold to avoid killing truly ongoing calls during a restart.
         runCatching {
@@ -104,6 +109,8 @@ object ShopBackend {
             }
             install(Sessions) {
                 cookie<WebAdmin.AdminSession>("ADMIN_SESSION")
+                cookie<WebAdmin.OwnerSession>("OWNER_SESSION")
+                cookie<WebAdmin.ImpersonationSession>("IMPERSONATION_SESSION")
                 cookie<SetupAppRoutes.SetupAppSession>("SETUP_APP_SESSION")
             }
             JwtConfig.install(this, db)

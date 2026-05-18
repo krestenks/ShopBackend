@@ -36,3 +36,4 @@ build/*
 .env
 Test_credentials.txt
 *.apk
+dist/ShopBackend.jar

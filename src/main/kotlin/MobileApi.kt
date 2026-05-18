@@ -134,7 +134,7 @@ data class MeResponse(
 
 @Serializable
 data class CallCustomerResponse(val success: Boolean, val status: Int, val twilio: String)
-data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?)
+data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?, val ownerId: Int = 0)
 
 // ─── Availability screen models ───────────────────────────────────────────────
 
@@ -198,8 +198,10 @@ suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginI
     val userId = principal.payload.getClaim("userId")?.asInt()
     val role   = principal.payload.getClaim("role")?.asString()
 
-    if (role == "manager" && userId != null) return LoginInfo(role, userId, null)
-    if (role == "shop"    && userId != null) return LoginInfo(role, null, userId)
+    // Step 12: extract ownerId from JWT so owner-scoped calls can be enforced.
+    val ownerId = principal.payload.getClaim("ownerId")?.asInt() ?: 0
+    if (role == "manager" && userId != null) return LoginInfo(role, userId, null, ownerId)
+    if (role == "shop"    && userId != null) return LoginInfo(role, null, userId, ownerId)
 
     println("[Auth] FAIL — unrecognised role='$role' userId=$userId (${call.request.uri})")
     call.respond(HttpStatusCode.Unauthorized, "Invalid role")
@@ -238,8 +240,10 @@ class MobileApi(private val db: DataBase) {
                     val (refType, refId) = appAccount
                     val role = if (refType == "shop") "shop" else "manager"
                     val tokenVersion = db.getAppAccountTokenVersion(role, refId)
-                    val token = generateToken(refId, role = role, tokenVersion = tokenVersion)
-                    println("[MobileApi/login] OK via app_account: $role id=$refId version=$tokenVersion")
+                    val ownerId = if (role == "manager") db.getOwnerIdForManager(refId) ?: 0
+                                  else db.getOwnerIdForShop(refId) ?: 0
+                    val token = generateToken(refId, role = role, tokenVersion = tokenVersion, ownerId = ownerId)
+                    println("[MobileApi/login] OK via app_account: $role id=$refId version=$tokenVersion ownerId=$ownerId")
                     call.respond(LoginResponse(token = token, managerId = refId, role = role, userId = refId))
                     return@post
                 }
@@ -247,8 +251,9 @@ class MobileApi(private val db: DataBase) {
                 // ── 2. Fallback: manager table (backwards compat) ────────────
                 val manager = db.authenticateManager(username, password)
                 if (manager != null) {
-                    val token = generateToken(manager.id, role = "manager")
-                    println("[MobileApi/login] OK via managers table: id=${manager.id} name='${manager.name}'")
+                    val ownerId = db.getOwnerIdForManager(manager.id) ?: 0
+                    val token = generateToken(manager.id, role = "manager", ownerId = ownerId)
+                    println("[MobileApi/login] OK via managers table: id=${manager.id} name='${manager.name}' ownerId=$ownerId")
                     call.respond(LoginResponse(token = token, managerId = manager.id, role = "manager", userId = manager.id))
                     return@post
                 }
@@ -256,8 +261,9 @@ class MobileApi(private val db: DataBase) {
                 // ── 3. Fallback: shop table (legacy, rarely used) ────────────
                 val shop = db.authenticateShop(username, password)
                 if (shop != null) {
-                    val token = generateToken(shop.id, role = "shop")
-                    println("[MobileApi/login] OK via shops table: id=${shop.id} name='${shop.name}'")
+                    val ownerId = db.getOwnerIdForShop(shop.id) ?: 0
+                    val token = generateToken(shop.id, role = "shop", ownerId = ownerId)
+                    println("[MobileApi/login] OK via shops table: id=${shop.id} name='${shop.name}' ownerId=$ownerId")
                     call.respond(LoginResponse(token = token, managerId = shop.id, role = "shop", userId = shop.id))
                     return@post
                 }
@@ -1653,6 +1659,8 @@ private fun resolveManagerId(loginInfo: LoginInfo, db: DataBase): Int? = when (l
 }
 
 private fun isAuthorizedForShop(loginInfo: LoginInfo, shopId: Int, db: DataBase): Boolean {
+    // Step 12: owner-scope guard — if the JWT carries a non-zero ownerId the shop must belong to that owner.
+    if (loginInfo.ownerId != 0 && !db.isShopOwnedBy(shopId, loginInfo.ownerId)) return false
     return when (loginInfo.role) {
         "shop"    -> loginInfo.shopId == shopId
         "manager" -> loginInfo.managerId != null && db.isManagerOfShop(loginInfo.managerId, shopId)

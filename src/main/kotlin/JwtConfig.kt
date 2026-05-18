@@ -75,8 +75,12 @@ object JwtConfig {
      * [tokenVersion] should match the current [DataBase.getAppAccountTokenVersion] for the
      * account so the first request after a force-logout correctly fails validation.
      * Defaults to 0 for backwards-compatible / fallback-authenticated tokens.
+     *
+     * [ownerId] is embedded so mobile routes can enforce owner-scoped data isolation.
+     * Defaults to 0 (PLATFORM_ADMIN_OWNER_ID) for legacy/fallback tokens — the mobile
+     * API treats 0 as "no owner filter" during migration.
      */
-    fun generateToken(userId: Int, role: String, tokenVersion: Int = 0): String {
+    fun generateToken(userId: Int, role: String, tokenVersion: Int = 0, ownerId: Int = 0): String {
         val expiresAt = System.currentTimeMillis() + 1000L * 60 * 60 * 24 * 365 // 365 days
         return JWT.create()
             .withAudience(audience)
@@ -84,6 +88,7 @@ object JwtConfig {
             .withClaim("userId", userId)
             .withClaim("role", role)
             .withClaim("tokenVersion", tokenVersion)
+            .withClaim("ownerId", ownerId)
             .withExpiresAt(Date(expiresAt))
             .sign(Algorithm.HMAC256(secret))
     }

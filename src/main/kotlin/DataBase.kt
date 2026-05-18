@@ -12,6 +12,42 @@ import kotlinx.serialization.Serializable
 import java.util.UUID
 import kotlin.String
 
+// ─── Multi-tenant owner ───────────────────────────────────────────────────────
+
+/**
+ * Represents a shop-chain tenant (owner / SaaS customer).
+ * All operational entities (shops, managers, employees, services, customers, etc.)
+ * belong to exactly one owner, providing full domain isolation.
+ */
+@Serializable
+data class Owner(
+    val id: Int,
+    val name: String,
+    val slug: String? = null,
+    val active: Boolean = true,
+    val createdAt: Long = 0L,
+)
+
+/**
+ * Credentials + Twilio config for an owner admin web-login.
+ * One row per owner (UNIQUE on owner_id).
+ */
+@Serializable
+data class OwnerAccount(
+    val id: Int,
+    val ownerId: Int,
+    val username: String,
+    /** BCrypt hash — never sent to clients. */
+    val passwordHash: String,
+    val twilioNumber: String? = null,
+    val twilioAccountSid: String? = null,
+    val twilioAuthToken: String? = null,
+    val active: Boolean = true,
+    val createdAt: Long = 0L,
+)
+
+// ─── Existing entity models ───────────────────────────────────────────────────
+
 @Serializable
 data class SimpleEmployee(val id: Int, val name: String)
 @Serializable
@@ -401,6 +437,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun createTables() {
         val sqlStatements = listOf(
             """
+            CREATE TABLE IF NOT EXISTS owners (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL,
+                slug       TEXT UNIQUE,
+                active     INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS booking_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token TEXT NOT NULL UNIQUE,
@@ -656,9 +701,34 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE appointments ADD COLUMN actual_duration_minutes INTEGER",
             // Token revocation: bump this column to instantly invalidate all existing tokens
             "ALTER TABLE app_account ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+            // ── Multi-tenant owner_id columns (Step 1: nullable, backfilled later) ──
+            "ALTER TABLE shops     ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE managers  ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE employees ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE services  ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE customers ADD COLUMN owner_id INTEGER",
+            "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
+
+        // Owner foundation: ensure a default owner exists and backfill existing records
+        ensureDefaultOwnerAndBackfill()
+
+        // ── Step 4: owner_account table ──────────────────────────────────────
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS owner_account (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id            INTEGER NOT NULL UNIQUE,
+                username            TEXT    NOT NULL UNIQUE,
+                password_hash       TEXT    NOT NULL,
+                twilio_number       TEXT,
+                twilio_account_sid  TEXT,
+                twilio_auth_token   TEXT,
+                active              INTEGER NOT NULL DEFAULT 1,
+                created_at          INTEGER NOT NULL
+            )
+        """.trimIndent()) }
 
         // Dedicated mobile app accounts (separate from web-admin login)
         connection.createStatement().use { it.execute("""
@@ -2523,6 +2593,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         stmt.executeUpdate()
     }
 
+    /** Sets a new BCrypt-hashed password for a manager. Used from the owner portal. */
+    fun updateManagerPassword(id: Int, newPassword: String) {
+        val hash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+        connection.prepareStatement("UPDATE managers SET password_hash = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, hash)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
+        }
+    }
+
     fun deleteManager(id: Int) {
         val stmt = connection.prepareStatement("DELETE FROM managers WHERE id = ?")
         stmt.setInt(1, id)
@@ -4012,6 +4092,433 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.getInt("manager_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
+    // =========================================================================
+    // Multi-tenant owner helpers
+    // =========================================================================
+
+    /**
+     * Ensures a default owner (id=1, slug="default") exists and then backfills
+     * owner_id = 1 on all existing rows that still have owner_id IS NULL.
+     * Safe to call on every startup — all operations are idempotent.
+     */
+    private fun ensureDefaultOwnerAndBackfill() {
+        val now = System.currentTimeMillis()
+        connection.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT COUNT(*) FROM owners")
+            val count = if (rs.next()) rs.getInt(1) else 0
+            if (count == 0) {
+                connection.prepareStatement(
+                    "INSERT INTO owners (name, slug, active, created_at) VALUES ('Default Owner', 'default', 1, ?)"
+                ).use { ins -> ins.setLong(1, now); ins.executeUpdate() }
+                println("[Owner] Created default owner (id=1)")
+            }
+        }
+        listOf(
+            "UPDATE shops     SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE managers  SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE employees SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE services  SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE customers SET owner_id = 1 WHERE owner_id IS NULL",
+            "UPDATE app_account SET owner_id = 1 WHERE owner_id IS NULL",
+        ).forEach { sql ->
+            try {
+                val updated = connection.createStatement().use { it.executeUpdate(sql) }
+                if (updated > 0) println("[Owner] Backfilled $updated rows: $sql")
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun getAllOwners(): List<Owner> {
+        connection.prepareStatement("SELECT id, name, slug, active, created_at FROM owners ORDER BY name").use { stmt ->
+            val rs = stmt.executeQuery()
+            return buildList {
+                while (rs.next()) {
+                    add(Owner(
+                        id        = rs.getInt("id"),
+                        name      = rs.getString("name"),
+                        slug      = rs.getString("slug"),
+                        active    = rs.getInt("active") != 0,
+                        createdAt = rs.getLong("created_at"),
+                    ))
+                }
+            }
+        }
+    }
+
+    fun getOwnerById(id: Int): Owner? {
+        connection.prepareStatement("SELECT id, name, slug, active, created_at FROM owners WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return Owner(
+                id        = rs.getInt("id"),
+                name      = rs.getString("name"),
+                slug      = rs.getString("slug"),
+                active    = rs.getInt("active") != 0,
+                createdAt = rs.getLong("created_at"),
+            )
+        }
+    }
+
+    fun addOwner(name: String, slug: String?): Int {
+        val now = System.currentTimeMillis()
+        connection.prepareStatement(
+            "INSERT INTO owners (name, slug, active, created_at) VALUES (?, ?, 1, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, slug?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setLong(3, now)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    fun updateOwner(id: Int, name: String, slug: String?, active: Boolean) {
+        connection.prepareStatement(
+            "UPDATE owners SET name = ?, slug = ?, active = ? WHERE id = ?"
+        ).use { stmt ->
+            stmt.setString(1, name.trim())
+            stmt.setString(2, slug?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setInt(3, if (active) 1 else 0)
+            stmt.setInt(4, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun getOwnerIdForShop(shopId: Int): Int? {
+        connection.prepareStatement("SELECT owner_id FROM shops WHERE id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
+    fun getOwnerIdForManager(managerId: Int): Int? {
+        connection.prepareStatement("SELECT owner_id FROM managers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
+    // =========================================================================
+    // Owner-scoped read methods (Step 3)
+    // These are the safe replacements for the global getAllXxx() calls.
+    // Existing global methods are kept for now (Step 11 removes them).
+    // =========================================================================
+
+    fun getShopsByOwner(ownerId: Int): List<Shop> {
+        val shops = mutableListOf<Shop>()
+        connection.prepareStatement(
+            "SELECT id, name, address, directions, manager_id FROM shops WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                shops.add(Shop(
+                    id        = rs.getInt("id"),
+                    name      = rs.getString("name"),
+                    address   = rs.getString("address"),
+                    directions = rs.getString("directions"),
+                    managerId = rs.getInt("manager_id"),
+                ))
+            }
+        }
+        return shops
+    }
+
+    fun getManagersByOwner(ownerId: Int): List<Manager> {
+        val result = mutableListOf<Manager>()
+        connection.prepareStatement(
+            "SELECT id, name, username, password_hash, phone FROM managers WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Manager(
+                    id           = rs.getInt("id"),
+                    name         = rs.getString("name"),
+                    username     = rs.getString("username"),
+                    passwordHash = rs.getString("password_hash"),
+                    phone        = rs.getString("phone"),
+                ))
+            }
+        }
+        return result
+    }
+
+    fun getEmployeesByOwner(ownerId: Int): List<Employee> {
+        val result = mutableListOf<Employee>()
+        connection.prepareStatement(
+            "SELECT id, name, phone FROM employees WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Employee(
+                    id    = rs.getInt("id"),
+                    name  = rs.getString("name"),
+                    phone = rs.getString("phone"),
+                ))
+            }
+        }
+        return result
+    }
+
+    fun getServicesByOwner(ownerId: Int): List<Service> {
+        val result = mutableListOf<Service>()
+        connection.prepareStatement(
+            "SELECT id, name, price, duration FROM services WHERE owner_id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result.add(Service(
+                    id       = rs.getInt("id"),
+                    name     = rs.getString("name"),
+                    price    = rs.getDouble("price"),
+                    duration = rs.getInt("duration"),
+                ))
+            }
+        }
+        return result
+    }
+
+    // =========================================================================
+    // Owner-scoped insert methods (Step 3)
+    // These set owner_id on every new entity so new data is always scoped.
+    // =========================================================================
+
+    /** Adds a shop belonging to [ownerId]. Returns the new shop id. */
+    fun addShopForOwner(ownerId: Int, name: String, address: String?, directions: String?): Int {
+        connection.prepareStatement(
+            "INSERT INTO shops (name, address, directions, owner_id) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, address)
+            stmt.setString(3, directions)
+            stmt.setInt(4, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds a manager belonging to [ownerId]. Returns the new manager id. */
+    fun addManagerForOwner(ownerId: Int, name: String, username: String, password: String, phone: String?): Int {
+        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        connection.prepareStatement(
+            "INSERT INTO managers (name, username, password_hash, phone, owner_id) VALUES (?, ?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, username)
+            stmt.setString(3, hash)
+            stmt.setString(4, phone)
+            stmt.setInt(5, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds an employee belonging to [ownerId]. Returns the new employee id. */
+    fun addEmployeeForOwner(ownerId: Int, name: String, phone: String?): Int {
+        connection.prepareStatement(
+            "INSERT INTO employees (name, phone, owner_id) VALUES (?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setString(2, phone)
+            stmt.setInt(3, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Adds a service belonging to [ownerId]. Returns the new service id. */
+    fun addServiceForOwner(ownerId: Int, name: String, price: Double, duration: Int): Int {
+        connection.prepareStatement(
+            "INSERT INTO services (name, price, duration, owner_id) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, name)
+            stmt.setDouble(2, price)
+            stmt.setInt(3, duration)
+            stmt.setInt(4, ownerId)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /**
+     * Verifies that a shop belongs to the given owner.
+     * Used for owner-scoped authorization checks before any shop operation.
+     */
+    fun isShopOwnedBy(shopId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM shops WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
+    /**
+     * Verifies that a manager belongs to the given owner.
+     */
+    fun isManagerOwnedBy(managerId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM managers WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
+    // =========================================================================
+    // Step 4 — owner_account CRUD + authentication
+    // =========================================================================
+
+    /**
+     * Creates an owner account (web-login credentials + optional Twilio config).
+     * Returns the new row id, or -1 on failure.
+     */
+    fun addOwnerAccount(
+        ownerId: Int,
+        username: String,
+        password: String,
+        twilioNumber: String? = null,
+        twilioAccountSid: String? = null,
+        twilioAuthToken: String? = null,
+    ): Int {
+        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        val now  = System.currentTimeMillis()
+        connection.prepareStatement(
+            """INSERT INTO owner_account
+               (owner_id, username, password_hash, twilio_number, twilio_account_sid, twilio_auth_token, active, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?)"""
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            stmt.setString(2, username.trim())
+            stmt.setString(3, hash)
+            stmt.setString(4, twilioNumber?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(5, twilioAccountSid?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(6, twilioAuthToken?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setLong(7, now)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Updates non-password fields for an owner account. */
+    fun updateOwnerAccount(
+        id: Int,
+        username: String,
+        twilioNumber: String? = null,
+        twilioAccountSid: String? = null,
+        twilioAuthToken: String? = null,
+        active: Boolean = true,
+    ) {
+        connection.prepareStatement(
+            """UPDATE owner_account
+               SET username = ?, twilio_number = ?, twilio_account_sid = ?, twilio_auth_token = ?, active = ?
+               WHERE id = ?"""
+        ).use { stmt ->
+            stmt.setString(1, username.trim())
+            stmt.setString(2, twilioNumber?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(3, twilioAccountSid?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(4, twilioAuthToken?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setInt(5, if (active) 1 else 0)
+            stmt.setInt(6, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Sets a new password for an owner account (BCrypt-hashed). */
+    fun updateOwnerAccountPassword(id: Int, newPassword: String) {
+        val hash = BCrypt.hashpw(newPassword, BCrypt.gensalt())
+        connection.prepareStatement("UPDATE owner_account SET password_hash = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, hash)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Authenticates an owner web-login.
+     * Returns Pair(ownerId, accountId) on success, null on failure.
+     */
+    fun authenticateOwnerAccount(username: String, password: String): Pair<Int, Int>? {
+        val sql = "SELECT id, owner_id, password_hash FROM owner_account WHERE username = ? AND active = 1 LIMIT 1"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, username.trim())
+            val rs = stmt.executeQuery()
+            if (rs.next()) {
+                val hash = rs.getString("password_hash")
+                if (BCrypt.checkpw(password, hash)) {
+                    return Pair(rs.getInt("owner_id"), rs.getInt("id"))
+                }
+            }
+        }
+        return null
+    }
+
+    /** Fetch the owner_account for a given ownerId, or null if none exists. */
+    fun getOwnerAccountByOwnerId(ownerId: Int): OwnerAccount? {
+        val sql = """SELECT id, owner_id, username, password_hash,
+                            twilio_number, twilio_account_sid, twilio_auth_token, active, created_at
+                     FROM owner_account WHERE owner_id = ? LIMIT 1"""
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return OwnerAccount(
+                id               = rs.getInt("id"),
+                ownerId          = rs.getInt("owner_id"),
+                username         = rs.getString("username"),
+                passwordHash     = rs.getString("password_hash"),
+                twilioNumber     = rs.getString("twilio_number"),
+                twilioAccountSid = rs.getString("twilio_account_sid"),
+                twilioAuthToken  = rs.getString("twilio_auth_token"),
+                active           = rs.getInt("active") != 0,
+                createdAt        = rs.getLong("created_at"),
+            )
+        }
+    }
+
+    // =========================================================================
+    // Step 10 — DB indexes for owner_id columns
+    // (Called once; CREATE INDEX IF NOT EXISTS is idempotent)
+    // =========================================================================
+
+    fun ensureOwnerIndexes() {
+        listOf(
+            "CREATE INDEX IF NOT EXISTS idx_shops_owner     ON shops(owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_managers_owner  ON managers(owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_employees_owner ON employees(owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_services_owner  ON services(owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id)",
+        ).forEach { sql ->
+            try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
     }
 
