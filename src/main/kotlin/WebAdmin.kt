@@ -68,6 +68,7 @@ class WebAdmin(private val db: DataBase) {
                         NavItem("/twilio/setup", "Twilio setup", "📞"),
                         NavItem("/test-booking-link", "Booking link", "🔗"),
                         NavItem("/setup-app", "Install app", "📲"),
+                        NavItem("/admin/owners", "Owners", "🏢"),
                     )
 
                     div("nav") {
@@ -86,6 +87,20 @@ class WebAdmin(private val db: DataBase) {
                 }
 
                 div("main") {
+                    // ── Impersonation banner (shown on every admin page when active) ──
+                    val impersonating = call.sessions.get<ImpersonationSession>()
+                    if (impersonating != null) {
+                        div(classes = "panel") {
+                            style = "background:#fff3cd;border-left:4px solid #f0ad4e;margin-bottom:16px;padding:10px 16px;"
+                            p {
+                                span { style = "font-weight:bold"; +"🎭 Viewing as owner: ${impersonating.ownerName} (id=${impersonating.ownerId})" }
+                                +"  "
+                                a(href = "/admin/exit-owner", classes = "btn") { +"Exit impersonation" }
+                                +" "
+                                a(href = "/owner", classes = "btn") { +"Open Owner Portal →" }
+                            }
+                        }
+                    }
                     div("page-header") {
                         div {
                             h1("page-title") { +titleText }
@@ -305,18 +320,58 @@ class WebAdmin(private val db: DataBase) {
             }
 
             get("/") {
+                val owners = db.getAllOwners()
                 call.respondAdminPage(
                     titleText = "Dashboard",
-                    subtitle = "Manage shops, staff and services",
+                    subtitle = "Platform-admin view — manage all data and tenants",
                     activePath = "/",
                 ) {
-                    div("panel") {
-                        p { +"Use the navigation to manage your data." }
-                        ul {
-                            li { +"Shops: address, manager, voice config and opening hours" }
-                            li { +"Employees: assign shop + services" }
-                            li { +"Services: prices and duration" }
-                            li { +"Managers: admin + app logins" }
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"📋 Platform admin" }
+                            p { +"Use the navigation to manage global data." }
+                            ul {
+                                li { +"Shops: address, manager, voice config and opening hours" }
+                                li { +"Employees: assign shop + services" }
+                                li { +"Services: prices and duration" }
+                                li { +"Managers: admin + app logins" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"🏢 Owners (${owners.size} tenant${if (owners.size != 1) "s" else ""})" }
+                            p { +"Each owner is an isolated shop-chain tenant with their own logins." }
+                            if (owners.isEmpty()) {
+                                p("hint") { +"No owners yet. Create one below." }
+                            } else {
+                                table {
+                                    thead { tr { th { +"Name" }; th { +"Active" }; th { +"Login" }; th { +"Actions" } } }
+                                    tbody {
+                                        for (o in owners) {
+                                            val acct = db.getOwnerAccountByOwnerId(o.id)
+                                            tr {
+                                                td { +o.name }
+                                                td { span("badge ${if (o.active) "ok" else "warn"}") { +(if (o.active) "Yes" else "No") } }
+                                                td {
+                                                    if (acct != null) span("badge ok") { +acct.username }
+                                                    else span("badge warn") { +"No login" }
+                                                }
+                                                td {
+                                                    div("actions") {
+                                                        a(href = "/admin/owners/edit?id=${o.id}", classes = "btn") { +"Edit" }
+                                                        a(href = "/admin/switch-owner/${o.id}", classes = "btn") { +"View as owner" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            br()
+                            div("actions") {
+                                a(href = "/admin/owners", classes = "btn primary") { +"🏢 Manage owners" }
+                                +" "
+                                a(href = "/owner-login", classes = "btn") { +"Owner Portal login →" }
+                            }
                         }
                     }
                 }
