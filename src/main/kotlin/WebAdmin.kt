@@ -1211,7 +1211,7 @@ class WebAdmin(private val db: DataBase) {
                 val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
                 val currentShopId = db.getShopIdForEmployee(id)
 
-                val allServices = db.getAllServices()
+                val allServices = if (impOwnerId != null) db.getServicesByOwner(impOwnerId) else db.getAllServices()
                 val employeeServices = db.getServicesForEmployee(id).associateBy { it.id }
 
                 call.respondAdminPage(
@@ -2583,6 +2583,10 @@ class WebAdmin(private val db: DataBase) {
                 if (!db.isShopOwnedBy(id, session.ownerId)) return@get call.respondRedirect("/owner/shops")
                 val shop = db.getShopById(id) ?: return@get call.respondRedirect("/owner/shops")
                 val managers = db.getManagersByOwner(session.ownerId)
+                val voiceConfig = db.getShopVoiceConfig(id)
+                db.ensureDefaultShopOpeningHours(id)
+                val openingHours = db.getShopOpeningHours(id).associateBy { it.dayOfWeek }
+                fun fmtMin(min: Int): String { val h = min / 60; val m = min % 60; return "%02d:%02d".format(h, m) }
                 call.respondOwnerPage(session, "Edit shop — ${shop.name}", "/owner/shops") {
                     div("panel") {
                         form(action = "/owner/shops/edit", method = FormMethod.post) {
@@ -2596,11 +2600,111 @@ class WebAdmin(private val db: DataBase) {
                                 option { value = ""; +"Unassigned" }
                                 for (m in managers) { option { value = m.id.toString(); if (m.id == shop.managerId) selected = true; +m.name } }
                             }
+
+                            hr()
+                            h3 { +"Twilio Voice / Welcome message" }
+                            label { +"Shop Twilio number (E.164):" }; br()
+                            textInput { name = "twilio_number"; value = voiceConfig.twilioNumber ?: ""; placeholder = "+4512345678" }
+                            br(); br()
+                            label { +"Business name (spoken in whisper)" }
+                            textInput { name = "business_name"; value = voiceConfig.businessName ?: ""; placeholder = "My Salon" }
+                            br(); br()
+                            label { +"Welcome message (OPEN):" }; br()
+                            textArea { name = "welcome_open_message"; style = "width:100%;height:80px;"; +voiceConfig.welcomeOpenMessage }
+                            br(); br()
+                            label { +"Welcome message (CLOSED):" }; br()
+                            textArea { name = "welcome_closed_message"; style = "width:100%;height:80px;"; +voiceConfig.welcomeClosedMessage }
+                            br(); br()
+                            label { +"Price list SMS footer (appended after generated price list):" }; br()
+                            p("hint") { +"Leave blank for no footer." }
+                            textArea { name = "sms_price_list_footer"; style = "width:100%;height:60px;"; +(voiceConfig.smsPriceListFooter ?: "") }
+
+                            hr()
+                            h3 { +"Data retention" }
+                            label { +"Communication history — keep for (days)" }; br()
+                            numberInput { name = "communication_retention_days"; value = voiceConfig.communicationRetentionDays.toString(); min = "1"; max = "365"; step = "1" }
+                            p("hint") { +"Default: 5 days." }; br()
+                            label { +"Customer profile — keep for (days without activity)" }; br()
+                            numberInput { name = "customer_retention_days"; value = voiceConfig.customerRetentionDays.toString(); min = "1"; max = "3650"; step = "1" }
+                            p("hint") { +"Default: 90 days." }
+
+                            hr()
+                            h3 { +"Opening hours" }
+                            table {
+                                fun ohRow(dow: Int, label: String) {
+                                    val row = openingHours[dow]
+                                    tr {
+                                        td { +label }
+                                        td { checkBoxInput { name = "oh_${dow}_closed"; if (row?.closed == true) checked = true }; +" Closed" }
+                                        td { +"Open: "; textInput { name = "oh_${dow}_open"; value = fmtMin(row?.openMinute ?: (9 * 60)); placeholder = "09:00" } }
+                                        td { +"Close: "; textInput { name = "oh_${dow}_close"; value = fmtMin(row?.closeMinute ?: (17 * 60)); placeholder = "17:00" } }
+                                    }
+                                }
+                                ohRow(1, "Mon"); ohRow(2, "Tue"); ohRow(3, "Wed"); ohRow(4, "Thu")
+                                ohRow(5, "Fri"); ohRow(6, "Sat"); ohRow(7, "Sun")
+                            }
+
                             br()
                             submitInput(classes = "btn primary") { value = "Save changes" }
                         }
+
+                        hr()
+                        h3 { +"📱 Mobile App Login (in-shop use)" }
+                        val shopAppUser = db.getShopAppAccountUsername(id)
+                        if (shopAppUser != null) { p { +"App username: "; b { +shopAppUser } } }
+                        else { p { em { +"No in-shop app login set yet." } } }
+                        form(action = "/owner/shops/app-login", method = FormMethod.post) {
+                            hiddenInput { name = "id"; value = id.toString() }
+                            textInput { name = "app_username"; value = shopAppUser ?: ""; placeholder = "App username" }
+                            +" "
+                            passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
+                            +" "
+                            submitInput(classes = "btn primary") { value = "Save App Login" }
+                        }
+                        if (shopAppUser != null) {
+                            form(action = "/owner/shops/app-login/remove", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput(classes = "btn danger") { value = "Remove App Login" }
+                            }
+                            form(action = "/owner/shops/force-logout", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                submitInput(classes = "btn danger") {
+                                    value = "🚨 Force Logout Phone"
+                                    attributes["onclick"] = "return confirm('Force logout the shop phone?')"
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/owner/shops/app-login") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(sid, session.ownerId)) return@post call.respondRedirect("/owner/shops")
+                val u = params["app_username"]?.trim().orEmpty()
+                val p = params["app_password"].orEmpty()
+                if (u.isNotBlank() && p.isNotBlank()) db.setShopAppAccount(sid, u, p)
+                call.respondRedirect("/owner/shops/edit?id=$sid")
+            }
+
+            post("/owner/shops/app-login/remove") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(sid, session.ownerId)) return@post call.respondRedirect("/owner/shops")
+                db.removeShopAppAccount(sid)
+                call.respondRedirect("/owner/shops/edit?id=$sid")
+            }
+
+            post("/owner/shops/force-logout") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(sid, session.ownerId)) return@post call.respondRedirect("/owner/shops")
+                db.bumpAppAccountTokenVersion("shop", sid)
+                call.respondRedirect("/owner/shops/edit?id=$sid")
             }
 
             post("/owner/shops/edit") {
@@ -2613,7 +2717,40 @@ class WebAdmin(private val db: DataBase) {
                 val directions = params["directions"]?.trim().orEmpty()
                 val managerId = params["managerId"]?.toIntOrNull()
                     ?.takeIf { db.isManagerOwnedBy(it, session.ownerId) }
-                if (name.isNotBlank()) db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                if (name.isNotBlank()) {
+                    db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                    val voice = ShopVoiceConfig(
+                        shopId = id,
+                        twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
+                        businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },
+                        temporaryOperatorClosed = false,
+                        temporaryOperatorClosedMessage = ShopVoiceConfig(id).temporaryOperatorClosedMessage,
+                        welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
+                        welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
+                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
+                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
+                        smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
+                    )
+                    db.upsertShopVoiceConfig(voice)
+                    fun parseMin(s: String?): Int? {
+                        if (s.isNullOrBlank()) return null
+                        val parts = s.trim().split(":")
+                        if (parts.size != 2) return null
+                        val h = parts[0].toIntOrNull() ?: return null
+                        val m = parts[1].toIntOrNull() ?: return null
+                        if (h !in 0..23 || m !in 0..59) return null
+                        return h * 60 + m
+                    }
+                    val rows = (1..7).map { dow ->
+                        ShopOpeningHours(
+                            shopId = id, dayOfWeek = dow,
+                            openMinute = parseMin(params["oh_${dow}_open"]) ?: 9 * 60,
+                            closeMinute = parseMin(params["oh_${dow}_close"]) ?: 17 * 60,
+                            closed = params["oh_${dow}_closed"] != null,
+                        )
+                    }
+                    db.upsertShopOpeningHours(rows)
+                }
                 call.respondRedirect("/owner/shops")
             }
 
@@ -2680,28 +2817,91 @@ class WebAdmin(private val db: DataBase) {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
                     ?: return@get call.respondRedirect("/owner/employees")
                 val emp = db.getEmployeeById(id) ?: return@get call.respondRedirect("/owner/employees")
-                // Verify ownership via owner_id column
-                val isOwned = db.getEmployeesByOwner(session.ownerId).any { it.id == id }
+                val isOwned = db.isEmployeeOwnedBy(id, session.ownerId)
                 if (!isOwned) return@get call.respondRedirect("/owner/employees")
                 val shops = db.getShopsByOwner(session.ownerId)
                 val currentShopId = db.getShopIdForEmployee(id)
+                val allServices = db.getServicesByOwner(session.ownerId)
+                val employeeServices = db.getServicesForEmployee(id).associateBy { it.id }
                 call.respondOwnerPage(session, "Edit employee — ${emp.name}", "/owner/employees") {
-                    div("panel") {
-                        form(action = "/owner/employees/edit", method = FormMethod.post) {
-                            hiddenInput { name = "id"; value = id.toString() }
-                            label { +"Name" }; textInput { name = "name"; value = emp.name }
-                            label { +"Phone" }; textInput { name = "phone"; value = emp.phone ?: "" }
-                            label { +"Assigned shop" }
-                            select {
-                                name = "shopId"
-                                option { value = ""; +"— No shop —" }
-                                for (s in shops) { option { value = s.id.toString(); if (s.id == currentShopId) selected = true; +s.name } }
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"Details" }
+                            form(action = "/owner/employees/edit", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"Name" }; textInput { name = "name"; value = emp.name }
+                                label { +"Phone" }; textInput { name = "phone"; value = emp.phone ?: "" }
+                                label { +"Assigned shop" }
+                                select {
+                                    name = "shopId"
+                                    option { value = ""; +"— No shop —" }
+                                    for (s in shops) { option { value = s.id.toString(); if (s.id == currentShopId) selected = true; +s.name } }
+                                }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save" }
                             }
-                            br()
-                            submitInput(classes = "btn primary") { value = "Save" }
+                        }
+                        div("panel") {
+                            h3 { +"Services" }
+                            p("hint") { +"Assign services this employee can perform." }
+                            form(action = "/owner/employees/services/assign", method = FormMethod.post) {
+                                hiddenInput { name = "employee_id"; value = id.toString() }
+                                label { +"Add service" }
+                                select {
+                                    name = "service_id"
+                                    for (svc in allServices) {
+                                        if (svc.id !in employeeServices) {
+                                            option { value = svc.id.toString(); +"${svc.name} (${"%.0f".format(svc.price)} kr)" }
+                                        }
+                                    }
+                                }
+                                br()
+                                submitInput(classes = "btn") { value = "Assign service" }
+                            }
+                            hr()
+                            if (employeeServices.isEmpty()) {
+                                p("hint") { +"No services assigned yet." }
+                            } else {
+                                table {
+                                    thead { tr { th { +"Service" }; th { +"Price" }; th { +"Duration" }; th { +"Actions" } } }
+                                    tbody {
+                                        for (svc in employeeServices.values) {
+                                            tr {
+                                                td { +svc.name }
+                                                td { +"${"%.0f".format(svc.price)} kr" }
+                                                td { +"${svc.duration} min" }
+                                                td {
+                                                    a(href = "/owner/employees/services/unassign?employee_id=$id&service_id=${svc.id}", classes = "btn danger") { +"Unassign" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+            }
+
+            post("/owner/employees/services/assign") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val empId = params["employee_id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/employees")
+                val svcId = params["service_id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/employees")
+                if (db.isEmployeeOwnedBy(empId, session.ownerId) && db.isServiceOwnedBy(svcId, session.ownerId)) {
+                    db.assignServiceToEmployee(empId, svcId)
+                }
+                call.respondRedirect("/owner/employees/edit?id=$empId")
+            }
+
+            get("/owner/employees/services/unassign") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val empId = call.request.queryParameters["employee_id"]?.toIntOrNull() ?: return@get call.respondRedirect("/owner/employees")
+                val svcId = call.request.queryParameters["service_id"]?.toIntOrNull() ?: return@get call.respondRedirect("/owner/employees")
+                if (db.isEmployeeOwnedBy(empId, session.ownerId) && db.isServiceOwnedBy(svcId, session.ownerId)) {
+                    db.removeServiceFromEmployee(empId, svcId)
+                }
+                call.respondRedirect("/owner/employees/edit?id=$empId")
             }
 
             post("/owner/employees/edit") {
@@ -2887,6 +3087,7 @@ class WebAdmin(private val db: DataBase) {
                     ?: return@get call.respondRedirect("/owner/managers")
                 if (!db.isManagerOwnedBy(id, session.ownerId)) return@get call.respondRedirect("/owner/managers")
                 val mgr = db.getManagerById(id) ?: return@get call.respondRedirect("/owner/managers")
+                val appUser = db.getManagerAppAccountUsername(id)
                 call.respondOwnerPage(session, "Edit manager — ${mgr.name}", "/owner/managers") {
                     div("grid-2") {
                         div("panel") {
@@ -2899,8 +3100,7 @@ class WebAdmin(private val db: DataBase) {
                                 br()
                                 submitInput(classes = "btn primary") { value = "Save" }
                             }
-                        }
-                        div("panel") {
+                            hr()
                             h3 { +"Reset password" }
                             form(action = "/owner/managers/reset-password", method = FormMethod.post) {
                                 hiddenInput { name = "id"; value = id.toString() }
@@ -2909,8 +3109,65 @@ class WebAdmin(private val db: DataBase) {
                                 submitInput(classes = "btn danger") { value = "Reset password" }
                             }
                         }
+                        div("panel") {
+                            h3 { +"📱 Mobile App Login" }
+                            if (appUser != null) { p { +"App username: "; b { +appUser } } }
+                            else { p { em { +"No app login set yet." } } }
+                            form(action = "/owner/managers/app-login", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                label { +"App username" }
+                                textInput { name = "app_username"; value = appUser ?: ""; placeholder = "App username" }
+                                label { +"New password" }
+                                passwordInput { name = "app_password"; placeholder = "New password (required to change)" }
+                                br()
+                                submitInput(classes = "btn primary") { value = "Save App Login" }
+                            }
+                            if (appUser != null) {
+                                form(action = "/owner/managers/app-login/remove", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = id.toString() }
+                                    br()
+                                    submitInput(classes = "btn danger") { value = "Remove App Login" }
+                                }
+                                form(action = "/owner/managers/force-logout", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = id.toString() }
+                                    submitInput(classes = "btn danger") {
+                                        value = "🚨 Force Logout Phone"
+                                        attributes["onclick"] = "return confirm('Force logout the manager phone? Current session revoked immediately.')"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/owner/managers/app-login") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val mid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(mid, session.ownerId)) return@post call.respondRedirect("/owner/managers")
+                val u = params["app_username"]?.trim().orEmpty()
+                val p = params["app_password"].orEmpty()
+                if (u.isNotBlank() && p.isNotBlank()) db.setManagerAppAccount(mid, u, p)
+                call.respondRedirect("/owner/managers/edit?id=$mid")
+            }
+
+            post("/owner/managers/app-login/remove") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val mid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(mid, session.ownerId)) return@post call.respondRedirect("/owner/managers")
+                db.removeManagerAppAccount(mid)
+                call.respondRedirect("/owner/managers/edit?id=$mid")
+            }
+
+            post("/owner/managers/force-logout") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val mid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/managers")
+                if (!db.isManagerOwnedBy(mid, session.ownerId)) return@post call.respondRedirect("/owner/managers")
+                db.bumpAppAccountTokenVersion("manager", mid)
+                call.respondRedirect("/owner/managers/edit?id=$mid")
             }
 
             post("/owner/managers/edit") {

@@ -4391,6 +4391,32 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Verifies that an employee belongs to the given owner.
+     */
+    fun isEmployeeOwnedBy(employeeId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM employees WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, employeeId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
+    /**
+     * Verifies that a service belongs to the given owner.
+     */
+    fun isServiceOwnedBy(serviceId: Int, ownerId: Int): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM services WHERE id = ? AND owner_id = ? LIMIT 1"
+        ).use { stmt ->
+            stmt.setInt(1, serviceId)
+            stmt.setInt(2, ownerId)
+            return stmt.executeQuery().next()
+        }
+    }
+
     // =========================================================================
     // Step 4 — owner_account CRUD + authentication
     // =========================================================================
