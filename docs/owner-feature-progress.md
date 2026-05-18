@@ -113,15 +113,21 @@ CREATE TABLE IF NOT EXISTS owner_account (
 - Registered in `ShopBackend.kt`: `OWNER_SESSION`, `IMPERSONATION_SESSION` cookies
 - `GET /owner-login` + `POST /owner-login` — authenticates via `authenticateOwnerAccount`
 - `GET /owner-logout` — clears `OwnerSession`
-- `GET /owner` — owner dashboard page (scoped stats: shops, managers, employees, services)
+- `GET /owner` — owner dashboard (4-panel layout with live counts + "Manage →" links for
+  Shops, Employees, Services, Managers); uses full `respondOwnerPage` layout with sidebar
 - Intercept updated: `/owner/...` paths require `OwnerSession`, redirect to `/owner-login`
   if missing; other paths still require `AdminSession` as before
 
 ### Step 6 — Platform-admin impersonation (`WebAdmin.kt`) ✅
-- `GET /admin/switch-owner/{ownerId}` — sets `ImpersonationSession` cookie, redirects to
-  `/admin/owners` with impersonation banner visible
-- `GET /admin/exit-owner` — clears `ImpersonationSession`, returns to normal admin view
-- `/admin/owners` page shows banner when impersonating: "Viewing as owner X [Exit]"
+- `GET /admin/switch-owner/{ownerId}` — sets `ImpersonationSession` cookie
+- `GET /admin/exit-owner` — clears `ImpersonationSession`
+- **Impersonation banner shown on EVERY admin page** (rendered inside `adminPage` helper):
+  - Shows "🎭 Viewing as owner: Name (id=X)"
+  - "Exit impersonation" and "Open Owner Portal →" buttons always visible
+- **`impersonatedOwnerId()` private helper** on `ApplicationCall` → `ImpersonationSession?.ownerId`
+- **All admin asset pages now respect impersonation** — when impersonating owner X,
+  `/shops`, `/managers`, `/employees`, `/services` list/add/edit/delete are scoped to that
+  owner; cross-tenant reads and mutations are blocked
 
 ### Step 7 — JWT extended with `ownerId` (`JwtConfig.kt` + `MobileApi.kt`) ✅
 - `JwtConfig.generateToken(userId, role, tokenVersion, ownerId)` — new `ownerId` parameter
@@ -140,13 +146,13 @@ CREATE TABLE IF NOT EXISTS owner_account (
 ### Step 9 — Platform-admin owner management UI (`WebAdmin.kt`) ✅
 - `GET /admin/owners` — lists all owners with id, name, slug, active status, login username,
   and action buttons (Edit / Impersonate)
-- "Add owner" form on the same page: name, slug, username, password → calls `addOwner` +
-  `addOwnerAccount` in one form submit
-- `GET /admin/owners/edit?id=X` — two-panel edit page: owner details + login credentials
+- "Add owner" form on the same page: name, slug, username, password
+- `GET /admin/owners/edit?id=X` — two-panel edit: owner details + login credentials
 - `POST /admin/owners/edit` — saves name, slug, active
-- `POST /admin/owners/set-login` — creates or updates `owner_account` row; updates password
-  if provided
-- `/admin/owners` nav item can be added to the sidebar manually if desired
+- `POST /admin/owners/set-login` — creates or updates `owner_account`; updates password if provided
+- **"Owners 🏢" nav item added to the platform-admin sidebar** (always visible)
+- **Platform-admin `/` dashboard shows a live Owners panel** with table of all tenants,
+  active status, login info, and "Edit" / "View as owner" action buttons
 
 ### Step 10 — DB indexes ✅
 ```sql
@@ -158,6 +164,16 @@ CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
 ```
 - `ensureOwnerIndexes()` method added to `DataBase.kt`
 - Called at startup in `ShopBackend.main()` (idempotent — `CREATE INDEX IF NOT EXISTS`)
+
+### Step 13 — Owner-scoped portal pages (full self-service) ✅ Done
+- `ownerPage(session, titleText, activePath, bodyContent)` HTML layout +
+  `respondOwnerPage` helper — full sidebar with nav: Dashboard / Shops / Employees /
+  Services / Managers / Logout
+- Full CRUD under `/owner/shops`, `/owner/employees`, `/owner/services`, `/owner/managers`:
+  list, add (GET+POST), edit (GET+POST), delete (GET)
+- All routes enforce `OwnerSession` and use owner-scoped DB methods (no cross-tenant leak)
+- Owner can reset manager passwords via `POST /owner/managers/reset-password`
+- Owner cannot see or edit other owners' data (guarded by `isShopOwnedBy`, `isManagerOwnedBy`, etc.)
 
 ---
 
@@ -175,15 +191,6 @@ CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
 - Before every shop/manager/employee operation, call `isShopOwnedBy(shopId, ownerId)` → 403
 - Replace `loginInfo` helpers with full `TenantContext` to make enforcement consistent
 
-### Step 13 — Owner-scoped admin pages (full self-service) ✅ Done
-- Added `ownerPage(session, titleText, activePath, bodyContent)` HTML layout and
-  `respondOwnerPage` helper in `WebAdmin.kt`
-- Added full CRUD routes under `/owner/shops`, `/owner/employees`, `/owner/services`,
-  `/owner/managers` — each with list, add (GET+POST), edit (GET+POST), delete (GET)
-- All routes enforce `OwnerSession` and use owner-scoped DB methods (no cross-tenant leak)
-- Owner can reset manager passwords via `POST /owner/managers/reset-password`
-- Owner cannot see or edit other owners' data (guarded by `isShopOwnedBy`, `isManagerOwnedBy`, etc.)
-
 ---
 
 ## How to continue in a new chat
@@ -192,8 +199,8 @@ Paste this into your next message:
 
 > "Please continue implementing the multi-tenant Owner feature on branch `feature/owners`.
 > See `docs/owner-feature-progress.md` for full context.
-> We completed Steps 1-10. Please start with Step 11 (NOT NULL migration +
-> removing global getAllXxx() methods)."
+> We completed Steps 1-10 and 13. Please start with Step 11 (NOT NULL migration +
+> removing global getAllXxx() methods), then Step 12 (mobile API ownerId enforcement)."
 
 ---
 
@@ -203,7 +210,7 @@ Paste this into your next message:
 |------|-------------|
 | `src/main/kotlin/DataBase.kt` | Steps 1, 3, 4, 10: schema, backfill, scoped methods, indexes |
 | `src/main/kotlin/TenantContext.kt` | Step 2: new file — tenant context model |
-| `src/main/kotlin/WebAdmin.kt` | Steps 5, 6, 9: owner login portal, impersonation, owners page |
+| `src/main/kotlin/WebAdmin.kt` | Steps 5, 6, 9, 13: owner portal, impersonation, owners page, owner CRUD |
 | `src/main/kotlin/JwtConfig.kt` | Step 7: `ownerId` claim in JWT |
 | `src/main/kotlin/MobileApi.kt` | Step 7: `ownerId` resolved and embedded in mobile tokens |
 | `src/main/kotlin/ShopBackend.kt` | Steps 5 (session cookies), 10 (index startup call) |
@@ -214,7 +221,6 @@ Paste this into your next message:
 | File | Steps |
 |------|-------|
 | `src/main/kotlin/DataBase.kt` | Step 11 (NOT NULL migration, remove global getAllXxx) |
-| `src/main/kotlin/WebAdmin.kt` | Step 13 (owner-scoped admin pages) |
 | `src/main/kotlin/MobileApi.kt` | Step 12 (mobile API owner enforcement) |
 | `src/main/kotlin/twilio/SmsRoutes.kt` | Step 12 (minor, if needed) |
 | `src/main/kotlin/twilio/VoiceRoutes.kt` | Step 12 (minor, if needed) |

@@ -190,6 +190,13 @@ class WebAdmin(private val db: DataBase) {
         respondHtml { ownerPage(session, titleText, activePath, bodyContent) }
     }
 
+    /**
+     * When the platform admin is impersonating an owner, returns that owner's id.
+     * Null means the admin is viewing the global (unfiltered) platform view.
+     */
+    private fun ApplicationCall.impersonatedOwnerId(): Int? =
+        sessions.get<ImpersonationSession>()?.ownerId
+
     fun setupRoutes(routing: Route) {
         routing {
             static("/static") {
@@ -446,7 +453,8 @@ class WebAdmin(private val db: DataBase) {
             }
 
             get("/managers") {
-                val managers = db.getAllManagers()
+                val impOwnerId = call.impersonatedOwnerId()
+                val managers = if (impOwnerId != null) db.getManagersByOwner(impOwnerId) else db.getAllManagers()
                 call.respondAdminPage(
                     titleText = "Managers",
                     subtitle = "Admin users and mobile app credentials",
@@ -517,14 +525,23 @@ class WebAdmin(private val db: DataBase) {
                 val username = params["username"] ?: ""
                 val password = params["password"] ?: ""
                 val phone = params["phone"]
-
-                db.addManager(name, username, password, phone)
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null) {
+                    db.addManagerForOwner(impOwnerId, name, username, password, phone)
+                } else {
+                    db.addManager(name, username, password, phone)
+                }
                 call.respondRedirect("/managers")
             }
 
             get("/managers/edit") {
                 val manager_id = call.request.queryParameters["id"]?.toIntOrNull()
                 if (manager_id == null) {
+                    call.respondRedirect("/managers")
+                    return@get
+                }
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null && !db.isManagerOwnedBy(manager_id, impOwnerId)) {
                     call.respondRedirect("/managers")
                     return@get
                 }
@@ -639,17 +656,22 @@ class WebAdmin(private val db: DataBase) {
                 val name = params["name"] ?: ""
                 val phone = params["phone"] ?: ""
                 val username = params["username"] ?: ""
-
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.updateManager(id, name, phone, username)
+                    if (impOwnerId == null || db.isManagerOwnedBy(id, impOwnerId)) {
+                        db.updateManager(id, name, phone, username)
+                    }
                 }
                 call.respondRedirect("/managers")
             }
 
             get("/managers/delete") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.deleteManager(id)
+                    if (impOwnerId == null || db.isManagerOwnedBy(id, impOwnerId)) {
+                        db.deleteManager(id)
+                    }
                 }
                 call.respondRedirect("/managers")
             }
@@ -657,8 +679,9 @@ class WebAdmin(private val db: DataBase) {
 
             // Code for shops
             get("/shops") {
-                val shops = db.getAllShops()
-                val managers = db.getAllManagers().associateBy { it.id }
+                val impOwnerId = call.impersonatedOwnerId()
+                val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
+                val managers = (if (impOwnerId != null) db.getManagersByOwner(impOwnerId) else db.getAllManagers()).associateBy { it.id }
 
                 call.respondAdminPage(
                     titleText = "Shops",
@@ -748,15 +771,22 @@ class WebAdmin(private val db: DataBase) {
                 val name = params["name"] ?: ""
                 val address = params["address"] ?: ""
                 val directions = params["directions"] ?: ""
-
-                db.addShop(name, address, directions)
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null) {
+                    db.addShopForOwner(impOwnerId, name, address, directions)
+                } else {
+                    db.addShop(name, address, directions)
+                }
                 call.respondRedirect("/shops")
             }
 
             get("/shops/delete") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.deleteShop(id)
+                    if (impOwnerId == null || db.isShopOwnedBy(id, impOwnerId)) {
+                        db.deleteShop(id)
+                    }
                 }
                 call.respondRedirect("/shops")
             }
@@ -767,8 +797,12 @@ class WebAdmin(private val db: DataBase) {
                     call.respondRedirect("/shops")
                     return@get
                 }
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null && !db.isShopOwnedBy(id, impOwnerId)) {
+                    return@get call.respondRedirect("/shops")
+                }
                 val shop = db.getShopById(id) ?: return@get call.respondRedirect("/shops")
-                val managers = db.getAllManagers()
+                val managers = if (impOwnerId != null) db.getManagersByOwner(impOwnerId) else db.getAllManagers()
                 val voiceConfig = db.getShopVoiceConfig(id)
                 db.ensureDefaultShopOpeningHours(id)
                 val openingHours = db.getShopOpeningHours(id).associateBy { it.dayOfWeek }
@@ -1046,9 +1080,10 @@ class WebAdmin(private val db: DataBase) {
 
             // Employees
             get("/employees") {
-                val employees = db.getAllEmployees()
-                val shops = db.getAllShops()
-                val services = db.getAllServices()
+                val impOwnerId = call.impersonatedOwnerId()
+                val employees = if (impOwnerId != null) db.getEmployeesByOwner(impOwnerId) else db.getAllEmployees()
+                val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
+                val services = if (impOwnerId != null) db.getServicesByOwner(impOwnerId) else db.getAllServices()
                 val employeeShopMap = employees.associateWith { emp -> db.getShopIdForEmployee(emp.id) }
                 val shopsById = shops.associateBy { it.id }
                 val employeeServicesMap = employees.associateWith { emp -> db.getServicesForEmployee(emp.id) }
@@ -1135,15 +1170,21 @@ class WebAdmin(private val db: DataBase) {
                 val params = call.receiveParameters()
                 val name = params["name"] ?: ""
                 val phone = params["phone"]
-
-                db.addEmployee(name, phone)
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null) {
+                    db.addEmployeeForOwner(impOwnerId, name, phone)
+                } else {
+                    db.addEmployee(name, phone)
+                }
                 call.respondRedirect("/employees")
             }
 
             get("/employees/delete") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.deleteEmployee(id)
+                    val isOwned = impOwnerId == null || db.getEmployeesByOwner(impOwnerId).any { it.id == id }
+                    if (isOwned) db.deleteEmployee(id)
                 }
                 call.respondRedirect("/employees")
             }
@@ -1155,13 +1196,19 @@ class WebAdmin(private val db: DataBase) {
                     return@get
                 }
 
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null && !db.getEmployeesByOwner(impOwnerId).any { it.id == id }) {
+                    call.respondRedirect("/employees")
+                    return@get
+                }
+
                 val employee = db.getEmployeeById(id)
                 if (employee == null) {
                     call.respondRedirect("/employees")
                     return@get
                 }
 
-                val shops = db.getAllShops()
+                val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
                 val currentShopId = db.getShopIdForEmployee(id)
 
                 val allServices = db.getAllServices()
@@ -1267,13 +1314,18 @@ class WebAdmin(private val db: DataBase) {
                 val name = params["name"] ?: ""
                 val phone = params["phone"]
                 val shopId = params["shopId"]?.toIntOrNull()
+                val impOwnerId = call.impersonatedOwnerId()
 
                 if (id != null) {
-                    db.updateEmployee(id, name, phone)
-                    if (shopId != null) {
-                        db.assignEmployeeToShop(id, shopId, exclusive = true)
-                    } else {
-                        db.removeEmployeeFromAllShops(id)
+                    val isOwned = impOwnerId == null || db.getEmployeesByOwner(impOwnerId).any { it.id == id }
+                    if (isOwned) {
+                        db.updateEmployee(id, name, phone)
+                        val validShopId = if (impOwnerId != null && shopId != null && !db.isShopOwnedBy(shopId, impOwnerId)) null else shopId
+                        if (validShopId != null) {
+                            db.assignEmployeeToShop(id, validShopId, exclusive = true)
+                        } else {
+                            db.removeEmployeeFromAllShops(id)
+                        }
                     }
                 }
 
@@ -1302,7 +1354,8 @@ class WebAdmin(private val db: DataBase) {
 
             // Services
             get("/services") {
-                val services = db.getAllServices()
+                val impOwnerId = call.impersonatedOwnerId()
+                val services = if (impOwnerId != null) db.getServicesByOwner(impOwnerId) else db.getAllServices()
                 call.respondAdminPage(
                     titleText = "Services",
                     subtitle = "Manage service catalog (price + duration)",
@@ -1373,15 +1426,21 @@ class WebAdmin(private val db: DataBase) {
                 val name = params["name"] ?: ""
                 val price = params["price"]?.toDoubleOrNull() ?: 0.0
                 val duration = params["duration"]?.toIntOrNull() ?: 0
-
-                db.addService(name, price, duration)
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null) {
+                    db.addServiceForOwner(impOwnerId, name, price, duration)
+                } else {
+                    db.addService(name, price, duration)
+                }
                 call.respondRedirect("/services")
             }
 
             get("/services/delete") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.deleteService(id)
+                    val isOwned = impOwnerId == null || db.getServicesByOwner(impOwnerId).any { it.id == id }
+                    if (isOwned) db.deleteService(id)
                 }
                 call.respondRedirect("/services")
             }
@@ -1389,6 +1448,11 @@ class WebAdmin(private val db: DataBase) {
             get("/services/edit") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
                 if (id == null) {
+                    call.respondRedirect("/services")
+                    return@get
+                }
+                val impOwnerId = call.impersonatedOwnerId()
+                if (impOwnerId != null && !db.getServicesByOwner(impOwnerId).any { it.id == id }) {
                     call.respondRedirect("/services")
                     return@get
                 }
@@ -1432,9 +1496,10 @@ class WebAdmin(private val db: DataBase) {
                 val name = params["name"] ?: ""
                 val price = params["price"]?.toDoubleOrNull() ?: 0.0
                 val duration = params["duration"]?.toInt() ?: 0
-
+                val impOwnerId = call.impersonatedOwnerId()
                 if (id != null) {
-                    db.updateService(id, name, price, duration)
+                    val isOwned = impOwnerId == null || db.getServicesByOwner(impOwnerId).any { it.id == id }
+                    if (isOwned) db.updateService(id, name, price, duration)
                 }
                 call.respondRedirect("/services")
             }
@@ -2194,48 +2259,63 @@ class WebAdmin(private val db: DataBase) {
             }
 
             get("/owner") {
-                val session = call.sessions.get<OwnerSession>()
-                    ?: return@get call.respondRedirect("/owner-login")
+                val session = call.sessions.get<OwnerSession>()!!
                 val shops = db.getShopsByOwner(session.ownerId)
                 val managers = db.getManagersByOwner(session.ownerId)
                 val employees = db.getEmployeesByOwner(session.ownerId)
                 val services = db.getServicesByOwner(session.ownerId)
-                call.respondHtml {
-                    head {
-                        meta { charset = "utf-8" }
-                        meta { name = "viewport"; content = "width=device-width, initial-scale=1" }
-                        title { +"Owner Dashboard — ${session.ownerName}" }
-                        link(rel = "stylesheet", href = "/static/admin.css", type = "text/css")
-                    }
-                    body {
-                        div("layout") {
-                            div("sidebar") {
-                                div("brand") {
-                                    div { div("brand-title") { +"ShopManager" }; div("brand-sub") { +"Owner Portal" } }
-                                }
-                                div("nav") {
-                                    a(href = "/owner") { span { +"🏠" }; span { +"Dashboard" } }
-                                    div("spacer") {}
-                                    a(href = "/owner-logout") { span { +"🚪" }; span { +"Logout" } }
+                call.respondOwnerPage(session, "Dashboard", "/owner") {
+                    div("grid-2") {
+                        div("panel") {
+                            h3 { +"🏪 Shops (${shops.size})" }
+                            if (shops.isEmpty()) {
+                                p("hint") { +"No shops yet." }
+                            } else {
+                                ul {
+                                    for (s in shops) { li { +s.name } }
                                 }
                             }
-                            div("main") {
-                                div("page-header") {
-                                    div {
-                                        h1("page-title") { +"Owner Dashboard" }
-                                        p("page-subtitle") { +"Welcome, ${session.ownerName}" }
-                                    }
+                            div("actions") {
+                                a(href = "/owner/shops", classes = "btn primary") { +"Manage shops →" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"👥 Employees (${employees.size})" }
+                            if (employees.isEmpty()) {
+                                p("hint") { +"No employees yet." }
+                            } else {
+                                ul {
+                                    for (e in employees) { li { +e.name } }
                                 }
-                                div("panel") {
-                                    h3 { +"Your tenancy at a glance" }
-                                    ul {
-                                        li { +"Shops: ${shops.size}" }
-                                        li { +"Managers: ${managers.size}" }
-                                        li { +"Employees: ${employees.size}" }
-                                        li { +"Services: ${services.size}" }
-                                    }
-                                    p("hint") { +"Full management pages (shops, employees, etc.) will be added in a future release." }
+                            }
+                            div("actions") {
+                                a(href = "/owner/employees", classes = "btn primary") { +"Manage employees →" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"🧾 Services (${services.size})" }
+                            if (services.isEmpty()) {
+                                p("hint") { +"No services yet." }
+                            } else {
+                                ul {
+                                    for (s in services) { li { +"${s.name} — ${"%.0f".format(s.price)} kr / ${s.duration} min" } }
                                 }
+                            }
+                            div("actions") {
+                                a(href = "/owner/services", classes = "btn primary") { +"Manage services →" }
+                            }
+                        }
+                        div("panel") {
+                            h3 { +"🧑‍💼 Managers (${managers.size})" }
+                            if (managers.isEmpty()) {
+                                p("hint") { +"No managers yet." }
+                            } else {
+                                ul {
+                                    for (m in managers) { li { +m.name } }
+                                }
+                            }
+                            div("actions") {
+                                a(href = "/owner/managers", classes = "btn primary") { +"Manage managers →" }
                             }
                         }
                     }
