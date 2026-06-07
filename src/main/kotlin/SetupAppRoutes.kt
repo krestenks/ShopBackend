@@ -153,7 +153,9 @@ class SetupAppRoutes(
                         path == "/setup-app/login" ||
                         path.startsWith("/setup-app/install/t/") ||
                         path.startsWith("/static/")
-                if (!isPublic && call.sessions.get<SetupAppSession>() == null) {
+                // Also accept a platform AdminSession as valid auth for all /setup-app pages
+                val hasAdminSession = call.sessions.get<WebAdmin.AdminSession>() != null
+                if (!isPublic && call.sessions.get<SetupAppSession>() == null && !hasAdminSession) {
                     call.respondRedirect("/setup-app")
                     finish()
                 }
@@ -162,6 +164,14 @@ class SetupAppRoutes(
             // ── GET /setup-app — login form ────────────────────────────────────
             get("/setup-app") {
                 if (call.sessions.get<SetupAppSession>() != null) {
+                    call.respondRedirect("/setup-app/download")
+                    return@get
+                }
+                // Platform admin is already authenticated — auto-create a SetupAppSession
+                // so they can access the install page without a separate login.
+                val adminSession = call.sessions.get<WebAdmin.AdminSession>()
+                if (adminSession != null) {
+                    call.sessions.set(SetupAppSession(role = "admin", userId = 0, username = adminSession.username))
                     call.respondRedirect("/setup-app/download")
                     return@get
                 }
@@ -231,6 +241,14 @@ class SetupAppRoutes(
 
             // ── GET /setup-app/download — version info + QR generator ──────────
             get("/setup-app/download") {
+                // Ensure a SetupAppSession exists — auto-create one for platform admins
+                // who navigated here directly (e.g. via a bookmarked URL).
+                if (call.sessions.get<SetupAppSession>() == null) {
+                    val adminSession = call.sessions.get<WebAdmin.AdminSession>()
+                    if (adminSession != null) {
+                        call.sessions.set(SetupAppSession(role = "admin", userId = 0, username = adminSession.username))
+                    }
+                }
                 val session = call.sessions.get<SetupAppSession>()!!
                 val v = readVersionInfo()
                 val tokenParam = call.request.queryParameters["token"]
