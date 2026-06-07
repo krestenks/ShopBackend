@@ -992,8 +992,51 @@ class WebAdmin(private val db: DataBase) {
                                 }
                             }
                         }
+
+                        // ── Owner / Tenant reassignment (platform admin only, not when impersonating) ──
+                        if (impOwnerId == null) {
+                            hr {}
+                            h3 { +"🏢 Owner / Tenant" }
+                            val currentOwnerId = db.getOwnerIdForShop(id)
+                            val currentOwner = currentOwnerId?.let { db.getOwnerById(it) }
+                            val allOwners = db.getAllOwners()
+                            p {
+                                +"Currently owned by: "
+                                b { +(currentOwner?.name ?: "Unknown (id=$currentOwnerId)") }
+                            }
+                            form(action = "/admin/shops/reassign", method = FormMethod.post) {
+                                hiddenInput { name = "shopId"; value = id.toString() }
+                                select {
+                                    name = "newOwnerId"
+                                    for (owner in allOwners) {
+                                        option {
+                                            value = owner.id.toString()
+                                            if (owner.id == currentOwnerId) selected = true
+                                            +"${owner.name} (id=${owner.id})"
+                                        }
+                                    }
+                                }
+                                +" "
+                                submitInput(classes = "btn") {
+                                    value = "Move to owner"
+                                    attributes["onclick"] = "return confirm('Move shop to selected owner? This will change which tenant owns this shop.')"
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/admin/shops/reassign") {
+                // Platform admin only — not available to impersonated owner sessions
+                val params = call.receiveParameters()
+                val shopId = params["shopId"]?.toIntOrNull()
+                val newOwnerId = params["newOwnerId"]?.toIntOrNull()
+                if (shopId != null && newOwnerId != null) {
+                    val ok = db.reassignShopToOwner(shopId, newOwnerId)
+                    println("[WebAdmin] Shop $shopId reassigned → owner $newOwnerId (ok=$ok)")
+                }
+                call.respondRedirect("/shops/edit?id=$shopId")
             }
 
             post("/shops/app-login") {

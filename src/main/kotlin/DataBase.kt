@@ -4207,6 +4207,25 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Moves a shop to a different owner tenant by updating its [owner_id].
+     * Only the platform admin should call this — not scoped owner sessions.
+     * Returns true if a row was actually updated.
+     */
+    fun reassignShopToOwner(shopId: Int, newOwnerId: Int): Boolean {
+        val updated = connection.prepareStatement(
+            "UPDATE shops SET owner_id = ? WHERE id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, newOwnerId)
+            stmt.setInt(2, shopId)
+            stmt.executeUpdate()
+        }
+        if (updated > 0) {
+            println("[DataBase] Reassigned shop $shopId → owner $newOwnerId")
+        }
+        return updated > 0
+    }
+
     // =========================================================================
     // Owner-scoped read methods (Step 3)
     // These are the safe replacements for the global getAllXxx() calls.

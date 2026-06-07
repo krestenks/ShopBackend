@@ -202,6 +202,34 @@ class SetupAppRoutes(
                 val username = params["username"]?.trim().orEmpty()
                 val password = params["password"].orEmpty()
 
+                // ── 1. Check platform admin credentials first ──────────────────
+                val envUser = System.getenv("ADMIN_USERNAME")?.trim()?.takeIf { it.isNotBlank() }
+                val envPass = System.getenv("ADMIN_PASSWORD")?.trim()?.takeIf { it.isNotBlank() }
+                val allowedAdminUsername = envUser ?: "admin"
+                val expectedHash = "\$2a\$12\$bRyq/lqNzQbmYGAzS2V2qexIOd3es/8.URdwPmcamFTBGieqsodpW"
+                val isAdminLogin = username == allowedAdminUsername && (
+                    if (envPass != null) password == envPass
+                    else org.mindrot.jbcrypt.BCrypt.checkpw(password, expectedHash)
+                )
+                if (isAdminLogin) {
+                    println("[SetupApp/login] Platform admin signed in — creating SetupAppSession")
+                    call.sessions.set(SetupAppSession(role = "admin", userId = 0, username = username))
+                    call.respondRedirect("/setup-app/download")
+                    return@post
+                }
+
+                // ── 2. Check owner account credentials ─────────────────────────
+                val ownerResult = db.authenticateOwnerAccount(username, password)
+                if (ownerResult != null) {
+                    val (ownerId, _) = ownerResult
+                    val owner = db.getOwnerById(ownerId)
+                    println("[SetupApp/login] Owner '${owner?.name}' signed in — creating SetupAppSession")
+                    call.sessions.set(SetupAppSession(role = "owner", userId = ownerId, username = username))
+                    call.respondRedirect("/setup-app/download")
+                    return@post
+                }
+
+                // ── 3. Check manager / shop / app-account credentials ──────────
                 val appAccount = db.authenticateAppAccount(username, password)
                 val manager = if (appAccount == null) db.authenticateManager(username, password) else null
                 val shop = if (appAccount == null && manager == null) db.authenticateShop(username, password) else null
