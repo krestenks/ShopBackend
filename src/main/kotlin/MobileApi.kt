@@ -28,6 +28,10 @@ import twilio.TwilioSmsService
 @Serializable
 data class AddBlacklistRequest(val phone: String, val reason: String? = null)
 
+/** Body for PATCH /api/mobile/appointments/{id}/start — available to both manager and shop roles. */
+@Serializable
+data class StartAppointmentRequest(val duration: Int)
+
 @Serializable
 data class UpdateAppointmentStatusRequest(
     /** "Waiting" | "Ongoing" | "Done" */
@@ -537,6 +541,42 @@ class MobileApi(private val db: DataBase) {
                  * Body: { "appointmentIds": [1,2,...], "status": "..." }
                  * Updates all listed appointments to the same status.
                  */
+                /**
+                 * PATCH /api/mobile/appointments/{appointmentId}/start
+                 *
+                 * Sets the appointment's start time to now and updates the duration.
+                 * Available to BOTH manager and shop roles (unlike the full PUT edit endpoint).
+                 * Called by the Start button so the calendar block shifts to actual arrival time.
+                 *
+                 * Body: { "duration": 60 }
+                 */
+                patch("/api/mobile/appointments/{appointmentId}/start") {
+                    val loginInfo = authenticateManager() ?: return@patch
+                    val appointmentId = call.parameters["appointmentId"]?.toIntOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing appointmentId")
+
+                    val appt = db.getAppointmentById(appointmentId)
+                        ?: return@patch call.respond(HttpStatusCode.NotFound, "Appointment not found")
+
+                    if (!isAuthorizedForShop(loginInfo, appt.shopId, db)) {
+                        return@patch call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
+
+                    val body = runCatching { call.receive<StartAppointmentRequest>() }.getOrNull()
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    db.updateAppointmentStartTime(
+                        appointmentId  = appointmentId,
+                        dateTimeMillis = System.currentTimeMillis(),
+                        duration       = body.duration.coerceAtLeast(1),
+                    )
+
+                    val updated = (db.getAppointmentWithServicesById(appointmentId)
+                        ?: return@patch call.respond(HttpStatusCode.InternalServerError, "Failed to read updated appointment"))
+                        .enrichWithStatusActions()
+                    call.respond(updated)
+                }
+
                 patch("/api/mobile/manager/appointments/status-bulk") {
                     val loginInfo = authenticateManager() ?: return@patch
                     val body = runCatching { call.receive<UpdateAppointmentBulkStatusRequest>() }.getOrNull()

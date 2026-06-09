@@ -1979,6 +1979,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      *
      * NOTE: This writes directly to `appointments.price`.
      */
+    /**
+     * Updates only the appointment start time and duration — used when a treatment is started
+     * to record the actual arrival time and any adjusted duration.
+     * Does NOT touch status, price, or any other field.
+     */
+    fun updateAppointmentStartTime(appointmentId: Int, dateTimeMillis: Long, duration: Int) {
+        val stmt = connection.prepareStatement(
+            "UPDATE appointments SET date_time = ?, duration = ? WHERE id = ?"
+        )
+        stmt.setLong(1, dateTimeMillis)
+        stmt.setInt(2, duration)
+        stmt.setInt(3, appointmentId)
+        stmt.executeUpdate()
+        stmt.close()
+    }
+
     fun updateAppointmentPrice(appointmentId: Int, price: Double) {
         val updateStmt = connection.prepareStatement("UPDATE appointments SET price = ? WHERE id = ?")
         updateStmt.setDouble(1, price)
