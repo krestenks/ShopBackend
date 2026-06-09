@@ -91,7 +91,7 @@ class WebAdmin(private val db: DataBase) {
                     val impersonating = call.sessions.get<ImpersonationSession>()
                     if (impersonating != null) {
                         div(classes = "panel") {
-                            style = "background:#fff3cd;border-left:4px solid #f0ad4e;margin-bottom:16px;padding:10px 16px;"
+                            style = "background:#33122a;border-left:4px solid #f0ad4e;margin-bottom:16px;padding:10px 16px;"
                             p {
                                 span { style = "font-weight:bold"; +"🎭 Viewing as owner: ${impersonating.ownerName} (id=${impersonating.ownerId})" }
                                 +"  "
