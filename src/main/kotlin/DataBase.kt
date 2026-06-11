@@ -2010,7 +2010,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         SELECT COUNT(*) FROM appointments 
         WHERE employee_id = ? 
           AND date_time < ? 
-          AND (date_time + duration * 60000) > ?
+          AND (date_time + (duration + 5) * 60000) > ?
     """
         val stmt = connection.prepareStatement(sql)
         stmt.setInt(1, employeeId)
@@ -3023,7 +3023,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 val apptStart = Instant.ofEpochMilli(startEpoch)
                     .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
                     .toLocalDateTime()
-                val apptEnd = apptStart.plusMinutes(rs.getInt("duration").toLong())
+                val apptEnd = apptStart.plusMinutes(rs.getInt("duration").toLong() + 5L)
                 println("  Loaded appointment: $apptStart to $apptEnd")
                 appointments.add(Pair(apptStart, apptEnd))
             }
