@@ -62,10 +62,28 @@ object BookingConfirmationSms {
             appointmentCount = appointmentCount,
         )
 
-        return smsService.sendSms(
+        val result = smsService.sendSms(
             fromNumberE164 = fromNumber,
             toNumberE164 = toPhoneE164,
             bodyText = body,
         )
+
+        // Persist the outbound confirmation so it appears in the Messages view.
+        // We do this regardless of Twilio success so the manager can see it was attempted.
+        runCatching {
+            val customerId = db.getCustomerIdByPhone(toPhoneE164)
+            db.insertSmsMessage(
+                shopId            = shopId,
+                customerId        = customerId,
+                counterpartyPhone = toPhoneE164,
+                fromPhone         = fromNumber,
+                toPhone           = toPhoneE164,
+                body              = body,
+                direction         = "outbound",
+                status            = if (result.success) "sent" else "failed",
+            )
+        }
+
+        return result
     }
 }
