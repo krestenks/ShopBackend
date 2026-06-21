@@ -909,6 +909,62 @@ class MobileApi(private val db: DataBase) {
                     ))
                 }
 
+                /**
+                 * Direct two-way call from the SMS/message thread.
+                 * Accepts shopId (path) + customerPhone (query) directly — no call-log entry needed.
+                 * Manager role only.
+                 */
+                post("/api/mobile/manager/shops/{shopId}/direct-call-phone") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager") {
+                        call.respond(HttpStatusCode.Forbidden, "Manager role required")
+                        return@post
+                    }
+
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val customerPhone = call.request.queryParameters["customerPhone"]?.trim().orEmpty()
+                    if (customerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.BadRequest, "Missing customerPhone query parameter")
+                        return@post
+                    }
+
+                    val voice = db.getShopVoiceConfig(shopId)
+                    val managerPhone = db.getManagerPhoneForShop(shopId)?.trim().orEmpty()
+                    if (managerPhone.isBlank()) {
+                        call.respond(HttpStatusCode.UnprocessableEntity, "No operator phone configured for this shop")
+                        return@post
+                    }
+
+                    val fromNumber = voice.twilioNumber?.takeIf { it.isNotBlank() }
+                        ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "")
+
+                    val svc = TwilioVoiceCallService(
+                        accountSid    = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
+                        authToken     = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
+                        fromNumber    = fromNumber,
+                        publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
+                    )
+
+                    println("[DirectCall/sms] calling manager=$managerPhone → customer=$customerPhone (shop=$shopId)")
+                    val result = svc.directCallCustomer(
+                        managerPhoneE164  = managerPhone,
+                        customerPhoneE164 = customerPhone,
+                    )
+
+                    call.respond(CallCustomerResponse(
+                        success = result.success,
+                        status  = result.status,
+                        twilio  = result.body,
+                    ))
+                }
+
                 // ── 🤝 Accept whisper: manager taps button to accept a new-customer inbound call ──
                 // Redirects the operator-leg Twilio call to /auto-accept TwiML which bridges it.
                 post("/api/mobile/manager/shops/{shopId}/calls/{callId}/accept-whisper") {
