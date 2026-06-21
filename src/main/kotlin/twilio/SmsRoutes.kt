@@ -306,8 +306,16 @@ private suspend fun handleInboundSms(
 
     println("[SmsRoutes] Matched shopId=$shopId — saving message")
 
-    // Resolve optional customer id
-    val customerId = db.getCustomerIdByPhone(from)
+    // Auto-create a customer record if none exists yet — mirrors the behaviour of inbound
+    // voice calls so that every new SMS sender immediately gets a profile (status "New").
+    val customerId: Int? = if (from.isNotBlank()) {
+        val id = db.ensureCustomerByPhone(from)
+        // Retroactively link any prior SMS messages that arrived before the record existed
+        db.linkSmsMessagesToCustomer(shopId, from, id)
+        id
+    } else {
+        null
+    }
 
     // Trigger an immediate background CallApp lookup for customers that have never been
     // screened. Fires and forgets — does not delay the Twilio webhook response at all.
