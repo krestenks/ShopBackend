@@ -8,6 +8,9 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import PublicBaseUrl
 
 /**
@@ -30,7 +33,10 @@ import PublicBaseUrl
  * Operator whisper: customer hears ringing via answerOnBridge="true";
  * operator hears whisper and must press 1 to accept.
  */
-fun Route.twilioVoiceRoutes(db: DataBase) {
+fun Route.twilioVoiceRoutes(
+    db: DataBase,
+    callAppScreening: callapp.CallAppScreeningService? = null,
+) {
 
     val smsService = TwilioSmsService(
         accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
@@ -243,6 +249,18 @@ fun Route.twilioVoiceRoutes(db: DataBase) {
             } catch (e: Exception) {
                 println("[VoiceRoutes/welcome] Failed to auto-create customer for phone=$from: ${e.message}")
                 null
+            }
+        }
+
+        // Trigger an immediate background CallApp lookup for customers that have never been
+        // screened. Fires and forgets — does not delay the Twilio webhook response at all.
+        // This ensures the CallApp name is available for the NEXT interaction (seconds later)
+        // rather than waiting up to 6 hours for the batch scheduler.
+        if (customerId != null && from.isNotBlank() && callAppScreening != null &&
+            db.getCustomerCallAppScreening(customerId) == null) {
+            @Suppress("OPT_IN_USAGE")
+            GlobalScope.launch(Dispatchers.IO) {
+                callAppScreening.screenCustomerNow(customerId, from)
             }
         }
 

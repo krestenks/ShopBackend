@@ -1,0 +1,427 @@
+# Task: Add Softphone Feature to Existing Kotlin Android App
+
+## Context
+
+The existing Android app is native Kotlin with classic XML views.
+
+Project details:
+
+* Gradle Kotlin DSL: `build.gradle.kts`
+* minSdk: 24
+* targetSdk: 36
+* compileSdk: 36
+* Current SaaS already has secure JWT login
+* Firebase is not currently installed
+* SIP server will be our own Asterisk server
+* Calls must be bidirectional
+* Calls must work when app is in background and when phone is locked
+* In-app call screen is preferred
+* Start with plain SIP/RTP for MVP
+* SIP credentials must be provisioned by backend from day one
+* GPLv3 is acceptable
+* Use Linphone SDK as SIP/media SDK
+
+## Goal
+
+Implement softphone functionality inside the existing Android app.
+
+The app should support:
+
+1. Fetching SIP credentials from the backend using the existing JWT login.
+2. Registering with Asterisk using Linphone SDK.
+3. Making outbound SIP calls.
+4. Receiving inbound SIP calls.
+5. Showing an in-app incoming call screen.
+6. Answering, rejecting, muting, speaker toggle, and hanging up.
+7. Receiving FCM push notifications to wake the app for incoming calls.
+8. Running a foreground service during active calls.
+9. Persisting call state safely across app background/foreground transitions.
+
+## Phase 1: Add Dependencies
+
+Update root and app Gradle Kotlin DSL files.
+
+Add:
+
+* Linphone Maven repository
+* Linphone Android SDK dependency
+* Google Services Gradle plugin
+* Firebase Messaging dependency
+
+Add Firebase setup:
+
+* Add `google-services.json` to the app module.
+* Apply `com.google.gms.google-services`.
+* Add Firebase Messaging.
+
+Use the current recommended Linphone Android SDK version from Linphone Maven documentation.
+
+## Phase 2: Add Android Permissions and Services
+
+Update `AndroidManifest.xml`.
+
+Required permissions:
+
+* `android.permission.INTERNET`
+* `android.permission.RECORD_AUDIO`
+* `android.permission.POST_NOTIFICATIONS`
+* `android.permission.FOREGROUND_SERVICE`
+* `android.permission.FOREGROUND_SERVICE_MICROPHONE`
+* `android.permission.WAKE_LOCK`
+* `android.permission.MODIFY_AUDIO_SETTINGS`
+* `android.permission.BLUETOOTH_CONNECT` for Android 12+
+* `android.permission.VIBRATE`
+
+Add:
+
+* `FirebaseMessagingService` implementation
+* `CallForegroundService`
+* Incoming call activity with lock-screen support
+* Main softphone activity/fragment
+
+The foreground service must use the correct foreground service type for microphone/call audio on targetSdk 36.
+
+## Phase 3: Backend API Contract
+
+Add Android client calls for these backend endpoints.
+
+### Register FCM token
+
+`POST /api/mobile/device-token`
+
+Request:
+
+```json
+{
+  "platform": "android",
+  "fcmToken": "token",
+  "deviceName": "Samsung A15",
+  "appVersion": "1.0.29"
+}
+```
+
+### Fetch SIP credentials
+
+`GET /api/mobile/sip/account`
+
+Response:
+
+```json
+{
+  "enabled": true,
+  "username": "shop_123_manager_1",
+  "password": "generated_secret",
+  "domain": "pbx.example.com",
+  "port": 5060,
+  "transport": "udp",
+  "displayName": "Manager",
+  "extension": "1001"
+}
+```
+
+### Optional call event reporting
+
+`POST /api/mobile/sip/call-event`
+
+Request:
+
+```json
+{
+  "event": "incoming|answered|rejected|ended|failed|outgoing",
+  "callId": "local-call-id",
+  "remoteNumber": "1002",
+  "timestamp": "2026-06-11T12:00:00Z"
+}
+```
+
+## Phase 4: Implement SIP Account Manager
+
+Create:
+
+```text
+SoftphoneManager.kt
+SipAccountRepository.kt
+LinphoneCoreService.kt
+```
+
+Responsibilities:
+
+### `SipAccountRepository`
+
+* Fetch SIP credentials using existing JWT authentication.
+* Store credentials securely.
+* Use Android EncryptedSharedPreferences if already available; otherwise add secure storage.
+* Expose current SIP account state.
+
+### `LinphoneCoreService`
+
+* Initialize Linphone SDK.
+* Configure SIP account.
+* Register/unregister account.
+* Keep Linphone Core lifecycle isolated from Activities.
+* Expose events using Kotlin Flow or LiveData.
+
+### `SoftphoneManager`
+
+High-level API:
+
+```kotlin
+interface SoftphoneManager {
+  fun initialize()
+  fun register()
+  fun unregister()
+  fun makeCall(destination: String)
+  fun answerCall()
+  fun rejectCall()
+  fun endCall()
+  fun mute(enabled: Boolean)
+  fun speaker(enabled: Boolean)
+  val callState: StateFlow<CallState>
+  val registrationState: StateFlow<RegistrationState>
+}
+```
+
+## Phase 5: Implement Call State Model
+
+Create sealed classes:
+
+```kotlin
+sealed class CallState {
+  object Idle : CallState()
+  data class Incoming(val remoteAddress: String, val displayName: String?) : CallState()
+  data class Outgoing(val remoteAddress: String) : CallState()
+  data class Connected(val remoteAddress: String, val durationSeconds: Long) : CallState()
+  data class Ended(val reason: String?) : CallState()
+  data class Failed(val reason: String?) : CallState()
+}
+```
+
+```kotlin
+sealed class RegistrationState {
+  object Unregistered : RegistrationState()
+  object Registering : RegistrationState()
+  object Registered : RegistrationState()
+  data class Failed(val reason: String?) : RegistrationState()
+}
+```
+
+## Phase 6: Add In-App Call UI
+
+Create XML layouts and Kotlin controller code for:
+
+### Incoming call screen
+
+Features:
+
+* Show caller name/number
+* Answer button
+* Reject button
+* Works over lock screen
+* Starts full-screen activity from high-priority notification when needed
+
+### Active call screen
+
+Features:
+
+* Remote party display
+* Duration timer
+* Mute
+* Speaker
+* End call
+* Optional keypad button for DTMF later
+
+### Outgoing call screen
+
+Features:
+
+* Destination display
+* Calling/ringing/connected state
+* Hang up button
+
+## Phase 7: Add Firebase Cloud Messaging
+
+Create:
+
+```text
+AppFirebaseMessagingService.kt
+```
+
+Responsibilities:
+
+1. Receive and upload FCM token to backend.
+2. Handle incoming call push payload.
+3. Wake/init Linphone service.
+4. Show incoming call notification.
+5. Trigger SIP registration if needed.
+
+Expected FCM payload:
+
+```json
+{
+  "type": "incoming_call",
+  "callId": "abc123",
+  "sipExtension": "1001",
+  "caller": "+4512345678",
+  "displayName": "Customer"
+}
+```
+
+Important behavior:
+
+* FCM does not carry the audio call.
+* FCM only wakes the app.
+* The real call still arrives through SIP/Linphone.
+* If SIP registration takes too long, show a notification saying “Incoming call” while registration completes.
+
+## Phase 8: Foreground Service During Calls
+
+Create:
+
+```text
+CallForegroundService.kt
+```
+
+Behavior:
+
+* Start when incoming/outgoing call begins.
+* Show persistent notification:
+
+  * Caller name/number
+  * Hang up action
+  * Tap opens active call screen
+* Stop when call ends.
+* Must satisfy targetSdk 36 foreground service rules.
+
+## Phase 9: Audio Handling
+
+Implement:
+
+* Microphone permission request
+* Speaker toggle
+* Mute toggle
+* Bluetooth routing if available
+* Earpiece/speaker default behavior
+
+For MVP:
+
+* Use speaker toggle and normal earpiece.
+* Bluetooth support can be basic initially.
+
+## Phase 10: MVP Test Scenarios
+
+Test with Asterisk and two SIP extensions.
+
+### Registration
+
+* Login app
+* Backend returns SIP credentials
+* App registers with Asterisk
+* Asterisk shows endpoint as registered
+
+### Outbound call
+
+* App calls another SIP extension
+* Other softphone rings
+* Audio works both ways
+* Hangup works
+
+### Inbound call, app open
+
+* Other extension calls app
+* In-app incoming screen appears
+* Answer works
+* Audio works
+
+### Inbound call, app background
+
+* Backend sends FCM
+* App wakes
+* SIP registration happens if needed
+* Incoming call screen/notification appears
+* Answer works
+
+### Inbound call, phone locked
+
+* Backend sends FCM
+* Full-screen incoming call UI or high-priority notification appears
+* Answer works after unlocking or directly if allowed
+
+### Active call
+
+* Mute works
+* Speaker works
+* Hangup works
+* Foreground notification remains during call
+
+## Phase 11: Asterisk Test Configuration Assumptions
+
+Use simple SIP extensions first:
+
+```text
+1001 = Android app
+1002 = Linphone desktop/mobile test client
+```
+
+Plain SIP/RTP for MVP:
+
+* UDP 5060
+* RTP range configured in Asterisk
+* NAT configured correctly
+
+Later hardening:
+
+* SIP TLS
+* SRTP
+* stronger firewall rules
+* fail2ban
+* per-shop endpoint isolation
+
+## Phase 12: Implementation Order
+
+Implement in this order:
+
+1. Add Linphone SDK dependency and verify app builds.
+2. Create `LinphoneCoreService`.
+3. Hardcode SIP account locally for first smoke test.
+4. Register to Asterisk.
+5. Make outbound call to test extension.
+6. Receive inbound call while app is foreground.
+7. Add basic call UI.
+8. Replace hardcoded SIP account with backend-provisioned credentials.
+9. Add Firebase setup and token upload.
+10. Add incoming-call push handling.
+11. Add foreground service.
+12. Add locked/background call handling.
+13. Add call event reporting.
+14. Add cleanup, error handling, and UI polish.
+
+## Phase 13: Non-Goals for MVP
+
+Do not implement these yet:
+
+* SIP TLS
+* SRTP
+* video calls
+* conference calls
+* call transfer
+* Android Telecom framework integration
+* native system dialer integration
+* contact sync
+* voicemail UI
+* advanced Bluetooth support
+* WebRTC
+
+## Acceptance Criteria
+
+The task is complete when:
+
+1. The app can register to Asterisk using backend-provisioned SIP credentials.
+2. The app can call another SIP extension.
+3. The app can receive SIP calls while open.
+4. The app can receive calls when backgrounded using FCM wake-up.
+5. The app displays an in-app incoming call screen.
+6. The app supports answer, reject, hangup, mute, and speaker.
+7. Active calls run under a foreground service.
+8. Call events are reported to the backend.
+9. SIP credentials are not hardcoded.
+10. The app still builds with targetSdk 36.

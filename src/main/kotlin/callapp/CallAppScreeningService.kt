@@ -7,22 +7,36 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Screens customers against the CallApp RapidAPI, caching results in the DB.
  *
+ * ## Two screening modes
+ *
+ * ### Background batch ([screenPendingCustomers])
+ * - Runs on a scheduler (every 6 hours).
+ * - Processes all customers that are unscreened, have stale results, or whose
+ *   exponential-backoff retry window has passed.
+ *
+ * ### On-contact immediate lookup ([screenCustomerNow])
+ * - Called from Twilio webhook handlers the moment a new (or previously unscreened)
+ *   customer is first seen on an inbound call or SMS.
+ * - Runs in a background coroutine — the Twilio webhook response is never delayed.
+ * - Ensures the CallApp name is available for the *next* interaction, not 6 hours later.
+ *
  * ## Failure robustness
- * - Lookups run in a **background scheduler** — never on the hot path of a call or SMS.
- * - A short HTTP timeout (default 1.2s) prevents a slow API from blocking the thread.
+ * - A short HTTP timeout (default 1.2s) prevents a slow API from blocking.
  * - On network/HTTP error: the **previous CallApp name is preserved** in the DB; only the
  *   error fields and retry schedule are updated.
  * - **Exponential backoff**: failed rows are retried after 2h, 4h, 8h … capped at 24h.
  * - **Circuit breaker**: if [circuitBreakerThreshold] consecutive API failures occur the
- *   breaker opens and all lookups are skipped for [circuitBreakerPauseMs] (default 30 min).
- *   The breaker resets automatically when the pause expires.
- * - Non-Danish phone numbers ([InvalidPhoneNumberException]) are recorded as a benign error
- *   and never retried via the API.
+ *   breaker opens and all *batch* lookups are skipped for [circuitBreakerPauseMs] (default
+ *   30 min). The breaker resets automatically when the pause expires.
+ *   [screenCustomerNow] bypasses the circuit breaker so new contacts always get a best-effort
+ *   immediate lookup.
+ * - Unrecognised phone numbers ([InvalidPhoneNumberException]) are recorded as a benign error
+ *   and never retried via the API (e.g. numbers without a standard country-code prefix).
  */
 class CallAppScreeningService(
     private val db: DataBase,
     private val client: CallAppLookupClient,
-    private val maxAgeMs: Long = 30L * 24 * 60 * 60 * 1000,   // 30 days cache for successes
+    private val maxAgeMs: Long = 30L * 24 * 60 * 60 * 1000,   // 30 days cache for found=1 results
     private val batchSize: Int = 50,
     /** How many consecutive API failures before the circuit opens. */
     private val circuitBreakerThreshold: Int = 5,
@@ -83,13 +97,13 @@ class CallAppScreeningService(
                 )
 
             } catch (e: InvalidPhoneNumberException) {
-                // Not a Danish number — store benign error; backoff won't trigger a real API call.
+                // Unrecognised phone format — store benign error; backoff won't trigger a real API call.
                 db.upsertCustomerCallAppScreeningError(
                     customerId = customer.id,
                     error      = "InvalidPhone: ${e.message}",
                 )
                 skipped++
-                println("[CallAppScreening] ⚠ customerId=${customer.id} phone=$phone — not a Danish number, skipped")
+                println("[CallAppScreening] ⚠ customerId=${customer.id} phone=$phone — unrecognised number format, skipped")
 
             } catch (e: Exception) {
                 // Real API/network failure
@@ -117,7 +131,46 @@ class CallAppScreeningService(
             }
         }
 
-        println("[CallAppScreening] Done — API queries: $queried, skipped (non-Danish): $skipped, total candidates: ${customers.size}")
+        println("[CallAppScreening] Done — API queries: $queried, skipped (bad format): $skipped, total candidates: ${customers.size}")
         return queried
+    }
+
+    /**
+     * Performs an immediate CallApp lookup for a single customer.
+     *
+     * Intended to be called (inside a background coroutine) from Twilio webhook handlers
+     * the first time a customer contacts the shop, so their CallApp name is available for
+     * the manager within seconds rather than waiting up to 6 hours for the batch scheduler.
+     *
+     * Unlike [screenPendingCustomers], this method **bypasses the circuit breaker** so a
+     * new-contact lookup always gets a best-effort attempt regardless of recent batch failures.
+     *
+     * Errors are stored in the DB (with backoff) so the batch scheduler picks up retries.
+     */
+    suspend fun screenCustomerNow(customerId: Int, phone: String) {
+        val trimmedPhone = phone.trim()
+        if (trimmedPhone.isBlank()) return
+        try {
+            val result = client.lookup(trimmedPhone)
+            db.upsertCustomerCallAppScreening(customerId = customerId, result = result)
+            println(
+                "[CallAppScreening] Immediate ✓ customerId=$customerId phone=$trimmedPhone " +
+                "found=${result.found} name=${result.name ?: "(none)"}"
+            )
+        } catch (e: InvalidPhoneNumberException) {
+            // Unrecognised format — store benign error so the batch scheduler won't retry it.
+            db.upsertCustomerCallAppScreeningError(
+                customerId = customerId,
+                error      = "InvalidPhone: ${e.message}",
+            )
+            println("[CallAppScreening] Immediate ⚠ customerId=$customerId phone=$trimmedPhone — unrecognised format, skipped")
+        } catch (e: Exception) {
+            val msg = e.message?.take(300) ?: e.javaClass.simpleName
+            db.upsertCustomerCallAppScreeningError(
+                customerId = customerId,
+                error      = "Error: $msg",
+            )
+            println("[CallAppScreening] Immediate ✗ customerId=$customerId phone=$trimmedPhone — ${e.javaClass.simpleName}: $msg")
+        }
     }
 }

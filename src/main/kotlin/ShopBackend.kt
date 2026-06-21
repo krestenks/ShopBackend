@@ -87,14 +87,16 @@ object ShopBackend {
 
         // Optional CallApp phone-name screening (set CALLAPP_RAPIDAPI_KEY env var to enable)
         val callAppApiKey = System.getenv("CALLAPP_RAPIDAPI_KEY")
-        if (!callAppApiKey.isNullOrBlank()) {
+        val callAppScreening: CallAppScreeningService? = if (!callAppApiKey.isNullOrBlank()) {
             val callAppConfig = CallAppRapidApiConfig(apiKey = callAppApiKey)
             val callAppClient = CallAppRapidApiClient(callAppConfig)
-            val callAppScreening = CallAppScreeningService(db = db, client = callAppClient)
-            startCallAppScreeningScheduler(callAppScreening)
-            println("[CallApp] Screening enabled. host=${callAppConfig.host} timeout=${callAppConfig.timeoutMs}ms — scheduler: first run in 30s, then every 6h.")
+            CallAppScreeningService(db = db, client = callAppClient).also { svc ->
+                startCallAppScreeningScheduler(svc)
+                println("[CallApp] Screening enabled. host=${callAppConfig.host} timeout=${callAppConfig.timeoutMs}ms — scheduler: first run in 30s, then every 6h.")
+            }
         } else {
             println("[CallApp] Screening DISABLED — CALLAPP_RAPIDAPI_KEY not set.")
+            null
         }
 
         // Server
@@ -135,10 +137,10 @@ object ShopBackend {
                 SetupAppRoutes(db).install(this)
 
                 twilioRoutes(db, chatbotService)
-                twilioVoiceRoutes(db)
+                twilioVoiceRoutes(db, callAppScreening)
                 chatTestRoutes(db, chatbotService)
                 chatApiRoutes(db, chatbotService)
-                smsRoutes(db, smsService)
+                smsRoutes(db, smsService, callAppScreening)
             }
         }.start(wait = true)
     }

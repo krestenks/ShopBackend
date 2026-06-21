@@ -3708,34 +3708,40 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Returns customers that need a CallApp lookup:
      * - Never screened (no row).
-     * - Successful row older than [maxAgeMs] (default 30 days).
+     * - Previously found (found=1) row older than [maxAgeMs] (default 30 days) — name unlikely to change.
+     * - Previously not-found (found=0, no error) row older than [notFoundMaxAgeMs] (default 3 days) —
+     *   retry aggressively because the person may have recently added themselves to CallApp.
      * - Failed row whose [next_retry_at] has passed (exponential backoff).
      *
      * Ordered ASC so oldest customers are processed first.
      */
     fun getCustomersNeedingCallAppScreening(
-        maxAgeMs: Long = 30L * 24 * 60 * 60 * 1000,
+        maxAgeMs: Long        = 30L * 24 * 60 * 60 * 1000,   // 30 days for found=1 entries
+        notFoundMaxAgeMs: Long =  3L * 24 * 60 * 60 * 1000,  //  3 days for found=0 entries
         limit: Int = 50,
     ): List<Customer> {
-        val now    = System.currentTimeMillis()
-        val cutoff = now - maxAgeMs
+        val now              = System.currentTimeMillis()
+        val foundCutoff      = now - maxAgeMs
+        val notFoundCutoff   = now - notFoundMaxAgeMs
         val sql = """
             SELECT c.id, c.phone, c.name, c.status, c.payment, c.language
             FROM customers c
             LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id
             WHERE c.phone IS NOT NULL AND c.phone != ''
               AND (
-                s.customer_id IS NULL                            -- never screened
-                OR (s.error IS NULL     AND s.screened_at < ?)  -- stale success (>30 days)
+                s.customer_id IS NULL                                            -- never screened
+                OR (s.error IS NULL AND s.found = 1 AND s.screened_at < ?)      -- stale hit  (>30 days)
+                OR (s.error IS NULL AND s.found = 0 AND s.screened_at < ?)      -- stale miss (> 3 days) — retry sooner
                 OR (s.error IS NOT NULL AND (s.next_retry_at IS NULL OR s.next_retry_at <= ?))  -- backoff elapsed
               )
             ORDER BY c.id ASC
             LIMIT ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
-            stmt.setLong(1, cutoff)
-            stmt.setLong(2, now)
-            stmt.setInt(3, limit)
+            stmt.setLong(1, foundCutoff)
+            stmt.setLong(2, notFoundCutoff)
+            stmt.setLong(3, now)
+            stmt.setInt(4, limit)
             val rs = stmt.executeQuery()
             val result = mutableListOf<Customer>()
             while (rs.next()) {

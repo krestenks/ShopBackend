@@ -11,6 +11,9 @@ import io.ktor.server.auth.jwt.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
 // ─── Request / response models ────────────────────────────────────────────────
@@ -49,7 +52,11 @@ data class MarkHandledRequest(val shopId: Int, val phone: String)
 
 // ─── Route installer ──────────────────────────────────────────────────────────
 
-fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
+fun Routing.smsRoutes(
+    db: DataBase,
+    smsService: TwilioSmsService,
+    callAppScreening: callapp.CallAppScreeningService? = null,
+) {
 
     println("[SmsRoutes] Inbound SMS webhook registered at:")
     println("  POST /api/twilio/sms/inbound   (canonical — matches Twilio console)")
@@ -59,11 +66,11 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
     // Canonical URL: https://your-backend/api/twilio/sms/inbound
     // (Consistent with the existing voice routes at /api/twilio/voice/*)
     post("/api/twilio/sms/inbound") {
-        handleInboundSms(call, db)
+        handleInboundSms(call, db, callAppScreening)
     }
     // Backward-compat alias so the old URL still works too
     post("/twilio/sms/inbound") {
-        handleInboundSms(call, db)
+        handleInboundSms(call, db, callAppScreening)
     }
 
     // ── Manager API endpoints (JWT authenticated) ─────────────────────────────
@@ -275,7 +282,11 @@ fun Routing.smsRoutes(db: DataBase, smsService: TwilioSmsService) {
 
 // ─── Inbound SMS handler (shared by both URL aliases) ────────────────────────
 
-private suspend fun handleInboundSms(call: ApplicationCall, db: DataBase) {
+private suspend fun handleInboundSms(
+    call: ApplicationCall,
+    db: DataBase,
+    callAppScreening: callapp.CallAppScreeningService? = null,
+) {
     val params = call.receiveParameters()
 
     val from       = params["From"]       ?: ""
@@ -297,6 +308,16 @@ private suspend fun handleInboundSms(call: ApplicationCall, db: DataBase) {
 
     // Resolve optional customer id
     val customerId = db.getCustomerIdByPhone(from)
+
+    // Trigger an immediate background CallApp lookup for customers that have never been
+    // screened. Fires and forgets — does not delay the Twilio webhook response at all.
+    if (customerId != null && from.isNotBlank() && callAppScreening != null &&
+        db.getCustomerCallAppScreening(customerId) == null) {
+        @Suppress("OPT_IN_USAGE")
+        GlobalScope.launch(Dispatchers.IO) {
+            callAppScreening.screenCustomerNow(customerId, from)
+        }
+    }
 
     // Persist
     db.insertSmsMessage(

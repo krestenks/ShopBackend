@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+EXT1001_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)"
+EXT1002_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)"
+
+PUBLIC_IP="$(curl -s https://api.ipify.org || true)"
+LOCAL_NET="192.168.0.0/16"
+
+echo "Installing Asterisk..."
+apt update
+apt install -y asterisk ufw fail2ban curl openssl
+
+systemctl enable asterisk
+
+echo "Backing up existing config..."
+mkdir -p /etc/asterisk/backup-before-softphone-test
+cp -a /etc/asterisk/pjsip.conf /etc/asterisk/backup-before-softphone-test/pjsip.conf.bak || true
+cp -a /etc/asterisk/extensions.conf /etc/asterisk/backup-before-softphone-test/extensions.conf.bak || true
+cp -a /etc/asterisk/rtp.conf /etc/asterisk/backup-before-softphone-test/rtp.conf.bak || true
+
+cat > /etc/asterisk/pjsip.conf <<EOF
+[global]
+type=global
+user_agent=BookingPBX
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+external_media_address=${PUBLIC_IP}
+external_signaling_address=${PUBLIC_IP}
+local_net=${LOCAL_NET}
+
+[endpoint-basic](!)
+type=endpoint
+context=internal
+disallow=all
+allow=ulaw,alaw,opus
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+transport=transport-udp
+
+[auth-basic](!)
+type=auth
+auth_type=userpass
+
+[aor-basic](!)
+type=aor
+max_contacts=5
+remove_existing=yes
+
+[1001](endpoint-basic)
+auth=1001
+aors=1001
+callerid=Manager 1001 <1001>
+
+[1001](auth-basic)
+username=1001
+password=${EXT1001_PASS}
+
+[1001](aor-basic)
+
+[1002](endpoint-basic)
+auth=1002
+aors=1002
+callerid=Test User 1002 <1002>
+
+[1002](auth-basic)
+username=1002
+password=${EXT1002_PASS}
+
+[1002](aor-basic)
+EOF
+
+cat > /etc/asterisk/extensions.conf <<'EOF'
+[general]
+static=yes
+writeprotect=no
+clearglobalvars=no
+
+[internal]
+exten => 1001,1,Dial(PJSIP/1001,30)
+ same => n,Hangup()
+
+exten => 1002,1,Dial(PJSIP/1002,30)
+ same => n,Hangup()
+
+; Echo test
+exten => 600,1,Answer()
+ same => n,Playback(demo-echotest)
+ same => n,Echo()
+ same => n,Playback(demo-echodone)
+ same => n,Hangup()
+
+; Simple IVR test
+exten => 700,1,Answer()
+ same => n,Playback(hello-world)
+ same => n,WaitExten(10)
+
+exten => 1,1,Playback(digits/1)
+ same => n,Hangup()
+
+exten => 2,1,Dial(PJSIP/1001,30)
+ same => n,Hangup()
+
+exten => i,1,Playback(pbx-invalid)
+ same => n,Hangup()
+
+exten => t,1,Playback(vm-goodbye)
+ same => n,Hangup()
+EOF
+
+cat > /etc/asterisk/rtp.conf <<'EOF'
+[general]
+rtpstart=10000
+rtpend=20000
+EOF
+
+echo "Configuring firewall..."
+ufw allow 22/tcp
+ufw allow 5060/udp
+ufw allow 10000:20000/udp
+ufw --force enable
+
+echo "Restarting Asterisk..."
+systemctl restart asterisk
+
+echo ""
+echo "Asterisk installed."
+echo ""
+echo "SIP server: ${PUBLIC_IP}"
+echo "Extension 1001 password: ${EXT1001_PASS}"
+echo "Extension 1002 password: ${EXT1002_PASS}"
+echo ""
+echo "Test:"
+echo "  1001 calls 1002"
+echo "  1002 calls 1001"
+echo "  Call 600 for echo test"
+echo "  Call 700 for simple IVR test"
+echo ""
+echo "Asterisk CLI:"
+echo "  sudo asterisk -rvvv"
+echo ""
+echo "Useful CLI commands:"
+echo "  pjsip show endpoints"
+echo "  pjsip show contacts"
+echo "  core set verbose 5"
