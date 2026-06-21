@@ -48,6 +48,9 @@ object ShopBackend {
         runCatching { db.ensureOwnerIndexes() }
             .onSuccess { println("Owner indexes ensured.") }
             .onFailure { e -> println("Owner index warning: ${e.message}") }
+        // Retroactively link historical SMS messages that pre-date the auto-create logic.
+        runCatching { db.backfillSmsCustomers() }
+            .onFailure { e -> println("SMS customer backfill warning: ${e.message}") }
 
         // Defensive cleanup: terminate any stale active calls from a previous run.
         // We use a threshold to avoid killing truly ongoing calls during a restart.

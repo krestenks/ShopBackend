@@ -3567,6 +3567,31 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * One-time backfill: finds every (shop_id, counterparty_phone) pair in sms_messages that has
+     * no customer_id yet, auto-creates a customer record for each unique phone number, and links
+     * all their messages.  Safe to call on every startup — ensureCustomerByPhone is idempotent
+     * and the UPDATE only touches rows that are still unlinked.
+     */
+    fun backfillSmsCustomers() {
+        val selectSql = """
+            SELECT DISTINCT shop_id, counterparty_phone
+            FROM sms_message
+            WHERE customer_id IS NULL AND counterparty_phone != ''
+        """.trimIndent()
+        var linked = 0
+        connection.prepareStatement(selectSql).executeQuery().use { rs ->
+            while (rs.next()) {
+                val shopId = rs.getInt("shop_id")
+                val phone  = rs.getString("counterparty_phone")
+                val cid    = ensureCustomerByPhone(phone)
+                linkSmsMessagesToCustomer(shopId, phone, cid)
+                linked++
+            }
+        }
+        if (linked > 0) println("[DB] backfillSmsCustomers: linked $linked phone(s) to customer records.")
+    }
+
     /** Retroactively link existing sms_message rows to a customer once created. */
     fun linkSmsMessagesToCustomer(shopId: Int, phone: String, customerId: Int) {
         val sql = """
