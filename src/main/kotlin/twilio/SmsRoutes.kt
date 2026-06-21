@@ -306,6 +306,13 @@ private suspend fun handleInboundSms(
 
     println("[SmsRoutes] Matched shopId=$shopId — saving message")
 
+    // Blacklist check — silently drop messages from blocked senders (same behaviour as voice calls)
+    if (from.isNotBlank() && db.isPhoneBlacklisted(shopId, from)) {
+        println("[SmsRoutes] Blacklisted sender $from — dropping message silently")
+        call.respondText("<Response/>", ContentType.Application.Xml)
+        return
+    }
+
     // Auto-create a customer record if none exists yet — mirrors the behaviour of inbound
     // voice calls so that every new SMS sender immediately gets a profile (status "New").
     val customerId: Int? = if (from.isNotBlank()) {
