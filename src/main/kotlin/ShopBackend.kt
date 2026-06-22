@@ -124,6 +124,7 @@ object ShopBackend {
                 route("/") {
                     webAdmin.setupRoutes(this)
                     financialReportRoutes(db)
+                    twilioCostReportRoutes(db)
                 }
                 route("/api") { customerApi.setupRoutes(this) }
                 // MobileApi defines its own absolute paths like /api/mobile/...
@@ -132,6 +133,7 @@ object ShopBackend {
 
                 // Mobile financial reports (JWT token in query param for WebView)
                 mobileFinancialReportRoutes(db)
+                mobileTwilioCostReportRoutes(db)
 
                 // Self-hosted Android APK update endpoints (JWT authenticated)
                 appUpdateRoutes()

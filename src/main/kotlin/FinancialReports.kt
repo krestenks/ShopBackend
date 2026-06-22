@@ -393,13 +393,15 @@ fun Route.financialReportRoutes(db: DataBase) {
                         }
                         val nav = listOf(
                             "/", "/shops", "/employees", "/services", "/managers",
-                            "/appointments", "/customers", "/reports", "/twilio/setup",
+                            "/appointments", "/customers", "/reports",
+                            "/reports/twilio-costs", "/twilio/setup",
                         )
                         val navLabels = mapOf(
                             "/" to ("Dashboard" to "🏠"), "/shops" to ("Shops" to "🏪"),
                             "/employees" to ("Employees" to "👥"), "/services" to ("Services" to "🧾"),
                             "/managers" to ("Managers" to "🧑‍💼"), "/appointments" to ("Appointments" to "📅"),
                             "/customers" to ("Customers" to "👤"), "/reports" to ("Reports" to "💰"),
+                            "/reports/twilio-costs" to ("Twilio Costs" to "📡"),
                             "/twilio/setup" to ("Twilio setup" to "📞"),
                         )
                         div("nav") {
