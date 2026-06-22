@@ -9,6 +9,7 @@ import kotlinx.html.*
 import java.net.URL
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Base64
@@ -118,6 +119,133 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
         val (callsCount, callsCost) = callsData[d] ?: (0 to 0.0)
         val (smsCount,   smsCost  ) = smsData[d]   ?: (0 to 0.0)
         rows += TwilioDayRow(d, callsCount, callsCost, smsCount, smsCost)
+        d = d.plusDays(1)
+    }
+
+    return TwilioCostData(
+        rows            = rows,
+        totalCallsCount = rows.sumOf { it.callsCount },
+        totalCallsCost  = rows.sumOf { it.callsCost },
+        totalSmsCount   = rows.sumOf { it.smsCount },
+        totalSmsCost    = rows.sumOf { it.smsCost },
+        grandTotal      = rows.sumOf { it.total },
+        priceUnit       = "USD",
+        accountSid      = accountSid,
+    )
+}
+
+// ─── Per-number cost fetch (Calls + Messages list APIs) ──────────────────────
+
+/**
+ * Fetches daily costs for a single Twilio phone number by querying the Calls and
+ * Messages list resources with a phone-number filter.  This is the only way to get
+ * truly per-shop numbers because the Usage Records Daily API returns account-wide totals.
+ *
+ * Paginates automatically using Twilio's next_page_uri.
+ * Dates are converted to Copenhagen local time so day-boundaries match business hours.
+ */
+fun fetchTwilioCostsByNumber(
+    accountSid: String,
+    authToken: String,
+    yearMonth: YearMonth,
+    twilioNumber: String,
+): TwilioCostData {
+    val credentials  = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray())
+    val startDateStr = yearMonth.atDay(1).format(DateTimeFormatter.ISO_LOCAL_DATE)
+    val endDateStr   = yearMonth.atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE)
+    val copenhagenTz = java.time.ZoneId.of("Europe/Copenhagen")
+
+    // Twilio timestamps come in RFC-2822 format, e.g. "Thu, 29 Jun 2023 12:00:00 +0000"
+    val rfc2822 = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH)
+
+    fun parseTwilioDate(s: String?): LocalDate? {
+        if (s.isNullOrBlank()) return null
+        return try {
+            ZonedDateTime.parse(s.trim(), rfc2822).withZoneSameInstant(copenhagenTz).toLocalDate()
+        } catch (_: Exception) { null }
+    }
+
+    data class DayAccum(var count: Int = 0, var cost: Double = 0.0)
+
+    /**
+     * Fetches all pages from a Calls or Messages list endpoint filtered by a phone number.
+     * Keys in the returned map are Copenhagen-local dates.
+     */
+    fun fetchPages(
+        resource: String,     // "Calls" or "Messages"
+        dateGe: String,       // e.g. "StartTime>="
+        dateLe: String,       // e.g. "StartTime<="
+        filterKey: String,    // "To" or "From"
+        filterVal: String,
+        arrayKey: String,     // "calls" or "messages"
+        dateJsonKey: String,  // "start_time" or "date_sent"
+    ): Map<LocalDate, DayAccum> {
+        val accum = mutableMapOf<LocalDate, DayAccum>()
+
+        // Build initial URL with URL-encoded param names so ">=" is transmitted correctly
+        fun buildInitialUrl(): String {
+            val params = listOf(
+                filterKey to filterVal,
+                dateGe    to startDateStr,
+                dateLe    to endDateStr,
+                "PageSize" to "1000",
+            )
+            val qs = params.joinToString("&") { (k, v) ->
+                "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
+            }
+            return "https://api.twilio.com/2010-04-01/Accounts/$accountSid/$resource.json?$qs"
+        }
+
+        var url: String? = buildInitialUrl()
+        while (url != null) {
+            val conn = URL(url).openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("Authorization", "Basic $credentials")
+            conn.connectTimeout = 15_000
+            conn.readTimeout    = 15_000
+
+            if (conn.responseCode != 200) {
+                val err = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP ${conn.responseCode}"
+                throw RuntimeException("Twilio $resource API error (${filterKey}=$filterVal): $err")
+            }
+
+            val root  = Json.parseToJsonElement(conn.inputStream.bufferedReader().readText()).jsonObject
+            val items = root[arrayKey]?.jsonArray ?: break
+
+            for (item in items) {
+                val obj   = item.jsonObject
+                val date  = parseTwilioDate(obj[dateJsonKey]?.jsonPrimitive?.content) ?: continue
+                // Twilio prices are negative (cost to you); take abs value
+                val price = obj["price"]?.jsonPrimitive?.content
+                    ?.toDoubleOrNull()?.let { kotlin.math.abs(it) } ?: 0.0
+                val day   = accum.getOrPut(date) { DayAccum() }
+                day.count++
+                day.cost += price
+            }
+
+            // Follow pagination
+            url = root["next_page_uri"]?.jsonPrimitive?.content
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "https://api.twilio.com$it" }
+        }
+        return accum
+    }
+
+    // Fetch both directions (inbound + outbound) for calls and SMS
+    val callsTo   = try { fetchPages("Calls",    "StartTime>=", "StartTime<=", "To",   twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val callsFrom = try { fetchPages("Calls",    "StartTime>=", "StartTime<=", "From", twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val smsTo     = try { fetchPages("Messages", "DateSent>=",  "DateSent<=",  "To",   twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    val smsFrom   = try { fetchPages("Messages", "DateSent>=",  "DateSent<=",  "From", twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+
+    val rows = mutableListOf<TwilioDayRow>()
+    var d = yearMonth.atDay(1)
+    val lastDay = yearMonth.atEndOfMonth()
+    while (!d.isAfter(lastDay)) {
+        val callCount = (callsTo[d]?.count ?: 0) + (callsFrom[d]?.count ?: 0)
+        val callCost  = (callsTo[d]?.cost  ?: 0.0) + (callsFrom[d]?.cost ?: 0.0)
+        val smsCount  = (smsTo[d]?.count   ?: 0) + (smsFrom[d]?.count   ?: 0)
+        val smsCost   = (smsTo[d]?.cost    ?: 0.0) + (smsFrom[d]?.cost  ?: 0.0)
+        rows += TwilioDayRow(d, callCount, callCost, smsCount, smsCost)
         d = d.plusDays(1)
     }
 
@@ -263,11 +391,21 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
             sid to tok
         }
 
-        val (costData, fetchError) = if (accountSid.isNotBlank() && authToken.isNotBlank()) {
-            try { fetchTwilioCosts(accountSid, authToken, ym) to null }
-            catch (e: Exception) { null to e.message }
-        } else {
-            null to "No Twilio credentials configured (set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN env vars)"
+        // Fetch cost data: per-number API for a specific shop, account-wide for All Shops
+        val shopTwilioNumber: String? = selectedShop?.let {
+            db.getShopVoiceConfig(it.id).twilioNumber?.takeIf { n -> n.isNotBlank() }
+        }
+        val (costData, fetchError) = when {
+            accountSid.isBlank() || authToken.isBlank() ->
+                null to "No Twilio credentials configured (set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN env vars)"
+            selectedShop != null && shopTwilioNumber == null ->
+                null to "Shop '${selectedShop.name}' has no Twilio number configured — add one in Twilio Setup"
+            selectedShop != null ->
+                try { fetchTwilioCostsByNumber(accountSid, authToken, ym, shopTwilioNumber!!) to null }
+                catch (e: Exception) { null to e.message }
+            else ->
+                try { fetchTwilioCosts(accountSid, authToken, ym) to null }
+                catch (e: Exception) { null to e.message }
         }
 
         // Currency display
@@ -488,11 +626,21 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
             sid to tok
         }
 
-        val (costData, fetchError) = if (accountSid.isNotBlank() && authToken.isNotBlank()) {
-            try { fetchTwilioCosts(accountSid, authToken, ym) to null }
-            catch (e: Exception) { null to e.message }
-        } else {
-            null to "No Twilio credentials configured"
+        // Fetch cost data: per-number API for a specific shop, account-wide for All Shops
+        val shopTwilioNumber: String? = selectedShop?.let {
+            db.getShopVoiceConfig(it.id).twilioNumber?.takeIf { n -> n.isNotBlank() }
+        }
+        val (costData, fetchError) = when {
+            accountSid.isBlank() || authToken.isBlank() ->
+                null to "No Twilio credentials configured"
+            selectedShop != null && shopTwilioNumber == null ->
+                null to "Shop '${selectedShop.name}' has no Twilio number configured"
+            selectedShop != null ->
+                try { fetchTwilioCostsByNumber(accountSid, authToken, ym, shopTwilioNumber!!) to null }
+                catch (e: Exception) { null to e.message }
+            else ->
+                try { fetchTwilioCosts(accountSid, authToken, ym) to null }
+                catch (e: Exception) { null to e.message }
         }
 
         // Currency display
