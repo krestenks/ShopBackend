@@ -156,6 +156,16 @@ fun fetchTwilioCostsByNumber(
     val monthStart   = yearMonth.atDay(1)
     val monthEnd     = yearMonth.atEndOfMonth()
 
+    // Normalize to E.164 format (+XXXXXXXXXXX) that Twilio uses in all call/message records.
+    // Common variations stored in DB: "004512345678" (00-prefix) or "4512345678" (no prefix at all).
+    val number = twilioNumber.trim().let { n ->
+        when {
+            n.startsWith("+") -> n               // already E.164
+            n.startsWith("00") -> "+" + n.drop(2) // 00-prefix → +
+            else -> n                              // unknown format; pass as-is
+        }
+    }
+
     // Twilio timestamps: RFC-2822 format, e.g. "Thu, 1 Jun 2023 12:00:00 +0000"
     // Java's built-in RFC_1123_DATE_TIME handles single-digit days and varying zone formats.
     fun parseTwilioDate(s: String?): LocalDate? {
@@ -248,18 +258,20 @@ fun fetchTwilioCostsByNumber(
             // If all dates were null we can't be sure we've gone past the month → keep paginating.
             if (seenAnyParsedDate && allBeforeMonth) break
 
-            url = root["next_page_uri"]?.jsonPrimitive?.content
+            // IMPORTANT: next_page_uri is JSON null (not missing) when there are no more pages.
+            // Using ".jsonPrimitive" on JsonNull throws; use "as? JsonPrimitive" instead.
+            url = (root["next_page_uri"] as? JsonPrimitive)?.content
                 ?.takeIf { it.isNotBlank() }
                 ?.let { "https://api.twilio.com$it" }
         }
         return accum
     }
 
-    // Fetch both directions (inbound + outbound) for calls and SMS
-    val callsTo   = try { fetchPages("Calls",    "To",   twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val callsFrom = try { fetchPages("Calls",    "From", twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val smsTo     = try { fetchPages("Messages", "To",   twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
-    val smsFrom   = try { fetchPages("Messages", "From", twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    // Fetch both directions (inbound + outbound) for calls and SMS — use normalized number
+    val callsTo   = try { fetchPages("Calls",    "To",   number, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val callsFrom = try { fetchPages("Calls",    "From", number, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val smsTo     = try { fetchPages("Messages", "To",   number, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    val smsFrom   = try { fetchPages("Messages", "From", number, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
 
     val rows = mutableListOf<TwilioDayRow>()
     var d = monthStart
@@ -578,9 +590,10 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                             }
 
                             div("panel") {
-                                val activeRows = costData.rows.count { it.callsCount > 0 || it.smsCount > 0 }
+                        val activeRows = costData.rows.count { it.callsCount > 0 || it.smsCount > 0 }
                                 if (activeRows == 0) {
-                                    p("hint") { +"No Twilio usage recorded for this month." }
+                                    val numNote = shopTwilioNumber?.let { " (queried number: $it)" } ?: ""
+                                    p("hint") { +"No Twilio usage recorded for this month$numNote." }
                                 } else {
                                     renderCostTable(costData, cur)
                                 }
@@ -794,7 +807,8 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
 
                         val activeRows = costData.rows.count { it.callsCount > 0 || it.smsCount > 0 }
                         if (activeRows == 0) {
-                            p("hint") { +"No Twilio usage recorded for this month." }
+                            val numNote = shopTwilioNumber?.let { " (queried: $it)" } ?: ""
+                            p("hint") { +"No Twilio usage recorded for this month$numNote." }
                         } else {
                             div("wrap") {
                                 table {
