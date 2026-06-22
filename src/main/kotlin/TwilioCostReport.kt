@@ -232,21 +232,36 @@ private fun HtmlBlockTag.renderCostTable(data: TwilioCostData, cur: CurrencyDisp
 fun Route.twilioCostReportRoutes(db: DataBase) {
 
     get("/reports/twilio-costs") {
-        val now          = java.time.YearMonth.now(DK_TC)
-        val yearParam    = call.request.queryParameters["year"]?.toIntOrNull()     ?: now.year
-        val monParam     = call.request.queryParameters["month"]?.toIntOrNull()    ?: now.monthValue
-        val currencyParam = call.request.queryParameters["currency"]?.lowercase() ?: "usd"
-        val ym           = YearMonth.of(yearParam, monParam)
-        val prevYm       = ym.minusMonths(1)
-        val nextYm       = ym.plusMonths(1)
+        val now           = java.time.YearMonth.now(DK_TC)
+        val yearParam     = call.request.queryParameters["year"]?.toIntOrNull()     ?: now.year
+        val monParam      = call.request.queryParameters["month"]?.toIntOrNull()    ?: now.monthValue
+        val currencyParam = call.request.queryParameters["currency"]?.lowercase()  ?: "usd"
+        val shopIdParam   = call.request.queryParameters["shop_id"]                 // null/"all" = all shops
+        val ym            = YearMonth.of(yearParam, monParam)
+        val prevYm        = ym.minusMonths(1)
+        val nextYm        = ym.plusMonths(1)
 
-        // Resolve Twilio credentials: prefer env vars, then first owner_account found
-        val accountSid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
-            ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAccountSid }
-            ?: ""
-        val authToken  = System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() }
-            ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAuthToken }
-            ?: ""
+        // Load all shops for the filter dropdown
+        val allShops  = db.getAllShops()
+        val shopIdInt = shopIdParam?.toIntOrNull()
+        val selectedShop = allShops.find { it.id == shopIdInt }
+
+        // Resolve Twilio credentials based on selected shop (or global fallback)
+        val (accountSid, authToken) = if (selectedShop != null) {
+            val ownerId = db.getOwnerIdForShop(selectedShop.id)
+            val acct    = ownerId?.let { db.getOwnerAccountByOwnerId(it) }
+            val sid     = acct?.twilioAccountSid?.takeIf { it.isNotBlank() }
+                ?: System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() } ?: ""
+            val tok     = acct?.twilioAuthToken?.takeIf { it.isNotBlank() }
+                ?: System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() } ?: ""
+            sid to tok
+        } else {
+            val sid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
+                ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAccountSid } ?: ""
+            val tok = System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() }
+                ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAuthToken } ?: ""
+            sid to tok
+        }
 
         val (costData, fetchError) = if (accountSid.isNotBlank() && authToken.isNotBlank()) {
             try { fetchTwilioCosts(accountSid, authToken, ym) to null }
@@ -263,8 +278,11 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
             CurrencyDisplay("$", "USD", 1.0)
         }
 
+        val shopQs   = if (shopIdInt != null) "&shop_id=$shopIdInt" else ""
         fun pageUrl(y: Int, m: Int) =
-            "/reports/twilio-costs?year=$y&month=$m&currency=$currencyParam"
+            "/reports/twilio-costs?year=$y&month=$m&currency=$currencyParam$shopQs"
+        fun curUrl(c: String) =
+            "/reports/twilio-costs?year=$yearParam&month=$monParam&currency=$c$shopQs"
 
         val nav = listOf(
             "/" to ("Dashboard" to "🏠"), "/shops" to ("Shops" to "🏪"),
@@ -294,6 +312,10 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                         .period-nav { display:flex; align-items:center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
                         .period-nav a.btn { min-width: 36px; text-align: center; }
                         .period-title { font-size: 1.1em; font-weight: 600; flex: 1; }
+                        .filter-bar { display:flex; gap:10px; align-items:center; margin-bottom: 16px; flex-wrap: wrap; }
+                        .filter-bar label { font-size: 0.8em; color: rgba(255,255,255,0.55); }
+                        .filter-bar select { background:#1c1c2e; color:#e8e8f0; border:1px solid rgba(255,255,255,0.15);
+                            border-radius:6px; padding:6px 10px; font-size:0.9em; }
                         .cur-toggle { display:flex; gap:6px; margin-bottom: 16px; }
                         .cur-toggle a { padding: 6px 14px; border-radius: 6px; text-decoration:none; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.2); color:#ccc; }
                         .cur-toggle a.active { background: #4f46e5; color: #fff; border-color: #4f46e5; }
@@ -334,12 +356,30 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                             }
                         }
 
+                        // Shop filter
+                        div("filter-bar") {
+                            label { +"Shop:" }
+                            select {
+                                attributes["onchange"] = "location.href='/reports/twilio-costs?year=$yearParam&month=$monParam&currency=$currencyParam&shop_id='+this.value"
+                                option {
+                                    value = "all"
+                                    if (shopIdInt == null) selected = true
+                                    +"All Shops"
+                                }
+                                for (s in allShops) {
+                                    option {
+                                        value = s.id.toString()
+                                        if (s.id == shopIdInt) selected = true
+                                        +s.name
+                                    }
+                                }
+                            }
+                        }
+
                         // Currency toggle
                         div("cur-toggle") {
-                            a(href = "/reports/twilio-costs?year=$yearParam&month=$monParam&currency=usd",
-                                classes = if (currencyParam == "usd") "active" else null) { +"USD $" }
-                            a(href = "/reports/twilio-costs?year=$yearParam&month=$monParam&currency=dkk",
-                                classes = if (currencyParam == "dkk") "active" else null) { +"DKK kr" }
+                            a(href = curUrl("usd"), classes = if (currencyParam == "usd") "active" else null) { +"USD $" }
+                            a(href = curUrl("dkk"), classes = if (currencyParam == "dkk") "active" else null) { +"DKK kr" }
                         }
 
                         // Month navigation
@@ -350,9 +390,7 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                         }
 
                         if (fetchError != null) {
-                            div("error-box") {
-                                +"⚠ Could not fetch Twilio data: $fetchError"
-                            }
+                            div("error-box") { +"⚠ Could not fetch Twilio data: $fetchError" }
                         } else if (costData != null) {
                             // Summary cards
                             div("summary-cards") {
@@ -389,8 +427,9 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
 
                             p("hint") {
                                 style = "margin-top: 10px; font-size: 0.8em; color: rgba(255,255,255,0.35);"
+                                val shopNote = selectedShop?.let { " · Shop: ${it.name}" } ?: " · All Shops"
                                 val rateNote = if (cur.label == "DKK") " · Rate: 1 USD = ${"%.4f".format(cur.rate)} DKK (live)" else ""
-                                +"Account SID: ${costData.accountSid.take(12)}… · Source: Twilio Usage Records API$rateNote"
+                                +"Account SID: ${costData.accountSid.take(12)}… · Source: Twilio Usage Records API$shopNote$rateNote"
                             }
                         }
                     }
@@ -417,23 +456,37 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
         val yearParam     = call.request.queryParameters["year"]?.toIntOrNull()     ?: now.year
         val monParam      = call.request.queryParameters["month"]?.toIntOrNull()    ?: now.monthValue
         val currencyParam = call.request.queryParameters["currency"]?.lowercase()  ?: "usd"
+        val shopIdParam   = call.request.queryParameters["shop_id"]                 // null/"all" = all shops
         val ym            = YearMonth.of(yearParam, monParam)
         val prevYm        = ym.minusMonths(1)
         val nextYm        = ym.plusMonths(1)
 
-        // Resolve credentials: try each manager shop's owner, fall back to env
-        val accountSid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
-            ?: managerShops.firstNotNullOfOrNull { shop ->
-                db.getOwnerIdForShop(shop.id)?.let { db.getOwnerAccountByOwnerId(it)?.twilioAccountSid }
-            }
-            ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAccountSid }
-            ?: ""
-        val authToken = System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() }
-            ?: managerShops.firstNotNullOfOrNull { shop ->
-                db.getOwnerIdForShop(shop.id)?.let { db.getOwnerAccountByOwnerId(it)?.twilioAuthToken }
-            }
-            ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAuthToken }
-            ?: ""
+        // Determine selected shop (restricted to manager's shops)
+        val shopIdInt    = shopIdParam?.toIntOrNull()
+        val selectedShop = managerShops.find { it.id == shopIdInt }
+
+        // Resolve credentials based on selected shop or global fallback
+        val (accountSid, authToken) = if (selectedShop != null) {
+            val ownerId = db.getOwnerIdForShop(selectedShop.id)
+            val acct    = ownerId?.let { db.getOwnerAccountByOwnerId(it) }
+            val sid     = acct?.twilioAccountSid?.takeIf { it.isNotBlank() }
+                ?: System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() } ?: ""
+            val tok     = acct?.twilioAuthToken?.takeIf { it.isNotBlank() }
+                ?: System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() } ?: ""
+            sid to tok
+        } else {
+            val sid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
+                ?: managerShops.firstNotNullOfOrNull { shop ->
+                    db.getOwnerIdForShop(shop.id)?.let { db.getOwnerAccountByOwnerId(it)?.twilioAccountSid }
+                }
+                ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAccountSid } ?: ""
+            val tok = System.getenv("TWILIO_AUTH_TOKEN")?.takeIf { it.isNotBlank() }
+                ?: managerShops.firstNotNullOfOrNull { shop ->
+                    db.getOwnerIdForShop(shop.id)?.let { db.getOwnerAccountByOwnerId(it)?.twilioAuthToken }
+                }
+                ?: db.getAllOwners().firstNotNullOfOrNull { db.getOwnerAccountByOwnerId(it.id)?.twilioAuthToken } ?: ""
+            sid to tok
+        }
 
         val (costData, fetchError) = if (accountSid.isNotBlank() && authToken.isNotBlank()) {
             try { fetchTwilioCosts(accountSid, authToken, ym) to null }
@@ -450,10 +503,13 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
             CurrencyDisplay("$", "USD", 1.0)
         }
 
+        val shopQs = if (shopIdInt != null) "&shop_id=$shopIdInt" else ""
         fun navUrl(y: Int, m: Int) =
-            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$y&month=$m&currency=$currencyParam"
+            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$y&month=$m&currency=$currencyParam$shopQs"
         fun toggleUrl(c: String) =
-            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$yearParam&month=$monParam&currency=$c"
+            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$yearParam&month=$monParam&currency=$c$shopQs"
+        fun shopUrl(sid: String) =
+            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$yearParam&month=$monParam&currency=$currencyParam&shop_id=$sid"
 
         call.respondHtml {
             head {
@@ -468,6 +524,9 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                                background: #13131f; color: #e8e8f0; font-size: 15px; }
                         .toolbar { background: #1e2a5e; padding: 14px 16px; font-size: 18px; font-weight: 700; }
                         .container { padding: 14px 12px; }
+                        .filter-select { width: 100%; background: #1c1c2e; color: #e8e8f0;
+                            border: 1px solid #4f46e5; border-radius: 8px; padding: 10px 12px;
+                            font-size: 15px; margin-bottom: 12px; }
                         .cur-toggle { display:flex; gap:6px; margin-bottom: 12px; }
                         .cur-toggle a { flex:1; text-align:center; padding: 8px 0; border-radius: 8px;
                             text-decoration:none; font-size: 0.9em; border: 1px solid #4f46e5; color: #a78bfa; }
@@ -503,6 +562,25 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
             body {
                 div("toolbar") { +"📡 Twilio Costs" }
                 div("container") {
+                    // Shop filter (only show if manager has more than one shop)
+                    if (managerShops.size > 1) {
+                        select(classes = "filter-select") {
+                            attributes["onchange"] = "location.href=this.value"
+                            option {
+                                value = shopUrl("all")
+                                if (shopIdInt == null) selected = true
+                                +"All Shops"
+                            }
+                            for (s in managerShops) {
+                                option {
+                                    value = shopUrl(s.id.toString())
+                                    if (s.id == shopIdInt) selected = true
+                                    +s.name
+                                }
+                            }
+                        }
+                    }
+
                     // Currency toggle
                     div("cur-toggle") {
                         a(href = toggleUrl("usd"), classes = if (currencyParam == "usd") "active" else null) { +"USD $" }
@@ -586,8 +664,9 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                             }
                         }
 
+                        val shopNote = selectedShop?.let { " · ${it.name}" } ?: ""
                         val rateNote = if (cur.label == "DKK") " · 1 USD = ${"%.4f".format(cur.rate)} DKK" else ""
-                        p("hint") { +"Twilio Usage Records API$rateNote" }
+                        p("hint") { +"Twilio Usage Records API$shopNote$rateNote" }
                     }
                 }
             }
