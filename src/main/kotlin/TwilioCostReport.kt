@@ -41,6 +41,26 @@ data class TwilioCostData(
     val accountSid: String,
 )
 
+// ─── Live exchange rate ───────────────────────────────────────────────────────
+
+/**
+ * Fetches the current USD → DKK exchange rate from open.er-api.com (free, no key needed).
+ * Returns the rate, or 7.0 as a safe fallback if the fetch fails.
+ */
+fun fetchUsdToDkk(): Double {
+    return try {
+        val url  = "https://open.er-api.com/v6/latest/USD"
+        val conn = URL(url).openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 8_000
+        conn.readTimeout    = 8_000
+        if (conn.responseCode != 200) return 7.0
+        val body = conn.inputStream.bufferedReader().readText()
+        val root = Json.parseToJsonElement(body).jsonObject
+        root["rates"]?.jsonObject?.get("DKK")?.jsonPrimitive?.content?.toDoubleOrNull() ?: 7.0
+    } catch (_: Exception) { 7.0 }
+}
+
 // ─── Twilio Usage Records API fetch ──────────────────────────────────────────
 
 /**
@@ -148,9 +168,25 @@ private fun validateTwilioReportToken(tokenParam: String?): Pair<Int, String>? {
     } catch (_: Exception) { null }
 }
 
+// ─── Currency helpers ─────────────────────────────────────────────────────────
+
+/** All display info for a chosen currency. */
+data class CurrencyDisplay(
+    val symbol: String,    // e.g. "$" or "kr"
+    val label: String,     // e.g. "USD" or "DKK"
+    val rate: Double,      // multiply USD amounts by this
+)
+
+private fun fmtMoney(usd: Double, cur: CurrencyDisplay): String {
+    val v = usd * cur.rate
+    return if (v == 0.0) "–"
+    else if (cur.label == "DKK") "%.2f kr".format(v)
+    else "$%.4f".format(v)
+}
+
 // ─── Shared HTML rendering helper ────────────────────────────────────────────
 
-private fun HtmlBlockTag.renderCostTable(data: TwilioCostData) {
+private fun HtmlBlockTag.renderCostTable(data: TwilioCostData, cur: CurrencyDisplay) {
     div {
         style = "overflow-x: auto;"
         table(classes = "cost-table") {
@@ -158,22 +194,22 @@ private fun HtmlBlockTag.renderCostTable(data: TwilioCostData) {
                 tr {
                     th { +"Date" }
                     th { +"Calls" }
-                    th { +"Calls (USD)" }
+                    th { +"Calls (${cur.label})" }
                     th { +"SMS" }
-                    th { +"SMS (USD)" }
-                    th { +"Total (USD)" }
+                    th { +"SMS (${cur.label})" }
+                    th { +"Total (${cur.label})" }
                 }
             }
             tbody {
                 for (row in data.rows) {
-                    if (row.callsCount == 0 && row.smsCount == 0) continue  // skip empty days
+                    if (row.callsCount == 0 && row.smsCount == 0) continue
                     tr {
                         td { +dayLabel(row.date) }
                         td { +fmtCount(row.callsCount) }
-                        td { +fmtCost(row.callsCost) }
+                        td { +fmtMoney(row.callsCost, cur) }
                         td { +fmtCount(row.smsCount) }
-                        td { +fmtCost(row.smsCost) }
-                        td { +fmtCost(row.total) }
+                        td { +fmtMoney(row.smsCost, cur) }
+                        td { +fmtMoney(row.total, cur) }
                     }
                 }
             }
@@ -181,10 +217,10 @@ private fun HtmlBlockTag.renderCostTable(data: TwilioCostData) {
                 tr(classes = "totals-row") {
                     td { +"TOTAL" }
                     td { +data.totalCallsCount.toString() }
-                    td { +"$%.4f".format(data.totalCallsCost) }
+                    td { +fmtMoney(data.totalCallsCost, cur) }
                     td { +data.totalSmsCount.toString() }
-                    td { +"$%.4f".format(data.totalSmsCost) }
-                    td { +"$%.4f".format(data.grandTotal) }
+                    td { +fmtMoney(data.totalSmsCost, cur) }
+                    td { +fmtMoney(data.grandTotal, cur) }
                 }
             }
         }
@@ -196,13 +232,13 @@ private fun HtmlBlockTag.renderCostTable(data: TwilioCostData) {
 fun Route.twilioCostReportRoutes(db: DataBase) {
 
     get("/reports/twilio-costs") {
-        val now       = java.time.YearMonth.now(DK_TC)
-        val yearParam = call.request.queryParameters["year"]?.toIntOrNull()  ?: now.year
-        val monParam  = call.request.queryParameters["month"]?.toIntOrNull() ?: now.monthValue
-        val ym        = YearMonth.of(yearParam, monParam)
-
-        val prevYm = ym.minusMonths(1)
-        val nextYm = ym.plusMonths(1)
+        val now          = java.time.YearMonth.now(DK_TC)
+        val yearParam    = call.request.queryParameters["year"]?.toIntOrNull()     ?: now.year
+        val monParam     = call.request.queryParameters["month"]?.toIntOrNull()    ?: now.monthValue
+        val currencyParam = call.request.queryParameters["currency"]?.lowercase() ?: "usd"
+        val ym           = YearMonth.of(yearParam, monParam)
+        val prevYm       = ym.minusMonths(1)
+        val nextYm       = ym.plusMonths(1)
 
         // Resolve Twilio credentials: prefer env vars, then first owner_account found
         val accountSid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
@@ -218,6 +254,17 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
         } else {
             null to "No Twilio credentials configured (set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN env vars)"
         }
+
+        // Currency display
+        val cur = if (currencyParam == "dkk") {
+            val rate = fetchUsdToDkk()
+            CurrencyDisplay("kr", "DKK", rate)
+        } else {
+            CurrencyDisplay("$", "USD", 1.0)
+        }
+
+        fun pageUrl(y: Int, m: Int) =
+            "/reports/twilio-costs?year=$y&month=$m&currency=$currencyParam"
 
         val nav = listOf(
             "/" to ("Dashboard" to "🏠"), "/shops" to ("Shops" to "🏪"),
@@ -244,9 +291,12 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                         .cost-table td:first-child { text-align: left; font-weight: 500; }
                         .cost-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
                         .cost-table tr.totals-row td { font-weight: 700; background: rgba(124,92,255,0.12); border-top: 2px solid rgba(124,92,255,0.4); }
-                        .period-nav { display:flex; align-items:center; gap: 10px; margin-bottom: 16px; }
+                        .period-nav { display:flex; align-items:center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
                         .period-nav a.btn { min-width: 36px; text-align: center; }
                         .period-title { font-size: 1.1em; font-weight: 600; flex: 1; }
+                        .cur-toggle { display:flex; gap:6px; margin-bottom: 16px; }
+                        .cur-toggle a { padding: 6px 14px; border-radius: 6px; text-decoration:none; font-size: 0.85em; border: 1px solid rgba(255,255,255,0.2); color:#ccc; }
+                        .cur-toggle a.active { background: #4f46e5; color: #fff; border-color: #4f46e5; }
                         .summary-cards { display:flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
                         .summary-card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
                             border-radius: 8px; padding: 14px 20px; min-width: 160px; }
@@ -284,13 +334,19 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                             }
                         }
 
+                        // Currency toggle
+                        div("cur-toggle") {
+                            a(href = "/reports/twilio-costs?year=$yearParam&month=$monParam&currency=usd",
+                                classes = if (currencyParam == "usd") "active" else null) { +"USD $" }
+                            a(href = "/reports/twilio-costs?year=$yearParam&month=$monParam&currency=dkk",
+                                classes = if (currencyParam == "dkk") "active" else null) { +"DKK kr" }
+                        }
+
                         // Month navigation
                         div("period-nav") {
-                            a(href = "/reports/twilio-costs?year=${prevYm.year}&month=${prevYm.monthValue}",
-                                classes = "btn") { +"‹ Prev" }
+                            a(href = pageUrl(prevYm.year, prevYm.monthValue), classes = "btn") { +"‹ Prev" }
                             span("period-title") { +monthTitle(ym) }
-                            a(href = "/reports/twilio-costs?year=${nextYm.year}&month=${nextYm.monthValue}",
-                                classes = "btn") { +"Next ›" }
+                            a(href = pageUrl(nextYm.year, nextYm.monthValue), classes = "btn") { +"Next ›" }
                         }
 
                         if (fetchError != null) {
@@ -301,24 +357,24 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                             // Summary cards
                             div("summary-cards") {
                                 div("summary-card") {
-                                    div("card-label") { +"Grand Total" }
-                                    div("card-value") { +"${"$%.4f".format(costData.grandTotal)} USD" }
+                                    div("card-label") { +"Grand Total (${cur.label})" }
+                                    div("card-value") { +fmtMoney(costData.grandTotal, cur) }
                                 }
                                 div("summary-card") {
                                     div("card-label") { +"Calls" }
                                     div("card-value") { +"${costData.totalCallsCount}" }
                                 }
                                 div("summary-card") {
-                                    div("card-label") { +"Calls Cost" }
-                                    div("card-value") { +"${"$%.4f".format(costData.totalCallsCost)} USD" }
+                                    div("card-label") { +"Calls (${cur.label})" }
+                                    div("card-value") { +fmtMoney(costData.totalCallsCost, cur) }
                                 }
                                 div("summary-card") {
                                     div("card-label") { +"SMS" }
                                     div("card-value") { +"${costData.totalSmsCount}" }
                                 }
                                 div("summary-card") {
-                                    div("card-label") { +"SMS Cost" }
-                                    div("card-value") { +"${"$%.4f".format(costData.totalSmsCost)} USD" }
+                                    div("card-label") { +"SMS (${cur.label})" }
+                                    div("card-value") { +fmtMoney(costData.totalSmsCost, cur) }
                                 }
                             }
 
@@ -327,13 +383,14 @@ fun Route.twilioCostReportRoutes(db: DataBase) {
                                 if (activeRows == 0) {
                                     p("hint") { +"No Twilio usage recorded for this month." }
                                 } else {
-                                    renderCostTable(costData)
+                                    renderCostTable(costData, cur)
                                 }
                             }
 
                             p("hint") {
                                 style = "margin-top: 10px; font-size: 0.8em; color: rgba(255,255,255,0.35);"
-                                +"Account SID: ${costData.accountSid.take(12)}… · Prices in USD · Source: Twilio Usage Records API"
+                                val rateNote = if (cur.label == "DKK") " · Rate: 1 USD = ${"%.4f".format(cur.rate)} DKK (live)" else ""
+                                +"Account SID: ${costData.accountSid.take(12)}… · Source: Twilio Usage Records API$rateNote"
                             }
                         }
                     }
@@ -356,12 +413,13 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
         val (userId, role) = principal
         val managerShops = if (role == "manager") db.getShopsForManager(userId) else emptyList()
 
-        val now       = java.time.YearMonth.now(DK_TC)
-        val yearParam = call.request.queryParameters["year"]?.toIntOrNull()  ?: now.year
-        val monParam  = call.request.queryParameters["month"]?.toIntOrNull() ?: now.monthValue
-        val ym        = YearMonth.of(yearParam, monParam)
-        val prevYm    = ym.minusMonths(1)
-        val nextYm    = ym.plusMonths(1)
+        val now           = java.time.YearMonth.now(DK_TC)
+        val yearParam     = call.request.queryParameters["year"]?.toIntOrNull()     ?: now.year
+        val monParam      = call.request.queryParameters["month"]?.toIntOrNull()    ?: now.monthValue
+        val currencyParam = call.request.queryParameters["currency"]?.lowercase()  ?: "usd"
+        val ym            = YearMonth.of(yearParam, monParam)
+        val prevYm        = ym.minusMonths(1)
+        val nextYm        = ym.plusMonths(1)
 
         // Resolve credentials: try each manager shop's owner, fall back to env
         val accountSid = System.getenv("TWILIO_ACCOUNT_SID")?.takeIf { it.isNotBlank() }
@@ -384,8 +442,18 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
             null to "No Twilio credentials configured"
         }
 
+        // Currency display
+        val cur = if (currencyParam == "dkk") {
+            val rate = fetchUsdToDkk()
+            CurrencyDisplay("kr", "DKK", rate)
+        } else {
+            CurrencyDisplay("$", "USD", 1.0)
+        }
+
         fun navUrl(y: Int, m: Int) =
-            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$y&month=$m"
+            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$y&month=$m&currency=$currencyParam"
+        fun toggleUrl(c: String) =
+            "/api/mobile/manager/twilio-costs?token=$tokenParam&year=$yearParam&month=$monParam&currency=$c"
 
         call.respondHtml {
             head {
@@ -400,6 +468,10 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                                background: #13131f; color: #e8e8f0; font-size: 15px; }
                         .toolbar { background: #1e2a5e; padding: 14px 16px; font-size: 18px; font-weight: 700; }
                         .container { padding: 14px 12px; }
+                        .cur-toggle { display:flex; gap:6px; margin-bottom: 12px; }
+                        .cur-toggle a { flex:1; text-align:center; padding: 8px 0; border-radius: 8px;
+                            text-decoration:none; font-size: 0.9em; border: 1px solid #4f46e5; color: #a78bfa; }
+                        .cur-toggle a.active { background: #4f46e5; color: #fff; }
                         .period-nav { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; }
                         .period-nav a { flex: 0 0 auto; }
                         .period-title { flex: 1; text-align: center; font-weight: 600; font-size: 1em; }
@@ -421,7 +493,7 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                         tr.totals-row td { font-weight: 700; background: rgba(124,92,255,0.12);
                             border-top: 2px solid rgba(124,92,255,0.4); }
                         .wrap { overflow-x: auto; }
-                        .hint { color: #888; font-size: 0.8em; padding: 10px 0; }
+                        .hint { color: #888; font-size: 0.75em; padding: 10px 0; }
                         .error-box { background: rgba(220,50,50,0.15); border: 1px solid rgba(220,50,50,0.35);
                             border-radius: 8px; padding: 12px 14px; color: #f87171; margin-bottom: 12px; font-size: 0.85em; }
                         """.trimIndent()
@@ -431,6 +503,12 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
             body {
                 div("toolbar") { +"📡 Twilio Costs" }
                 div("container") {
+                    // Currency toggle
+                    div("cur-toggle") {
+                        a(href = toggleUrl("usd"), classes = if (currencyParam == "usd") "active" else null) { +"USD $" }
+                        a(href = toggleUrl("dkk"), classes = if (currencyParam == "dkk") "active" else null) { +"DKK kr" }
+                    }
+
                     // Month navigation
                     div("period-nav") {
                         a(href = navUrl(prevYm.year, prevYm.monthValue), classes = "btn btn-outline") { +"‹" }
@@ -444,24 +522,24 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                         // Summary cards
                         div("summary-cards") {
                             div("summary-card") {
-                                div("card-label") { +"Total" }
-                                div("card-value") { +"${"$%.4f".format(costData.grandTotal)}" }
+                                div("card-label") { +"Total ${cur.label}" }
+                                div("card-value") { +fmtMoney(costData.grandTotal, cur) }
                             }
                             div("summary-card") {
                                 div("card-label") { +"Calls" }
                                 div("card-value") { +"${costData.totalCallsCount}" }
                             }
                             div("summary-card") {
-                                div("card-label") { +"Calls $" }
-                                div("card-value") { +"${"$%.4f".format(costData.totalCallsCost)}" }
+                                div("card-label") { +"Calls ${cur.label}" }
+                                div("card-value") { +fmtMoney(costData.totalCallsCost, cur) }
                             }
                             div("summary-card") {
                                 div("card-label") { +"SMS" }
                                 div("card-value") { +"${costData.totalSmsCount}" }
                             }
                             div("summary-card") {
-                                div("card-label") { +"SMS $" }
-                                div("card-value") { +"${"$%.4f".format(costData.totalSmsCost)}" }
+                                div("card-label") { +"SMS ${cur.label}" }
+                                div("card-value") { +fmtMoney(costData.totalSmsCost, cur) }
                             }
                         }
 
@@ -475,10 +553,10 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                                         tr {
                                             th { +"Date" }
                                             th { +"Calls" }
-                                            th { +"Calls $" }
+                                            th { +"Calls ${cur.label}" }
                                             th { +"SMS" }
-                                            th { +"SMS $" }
-                                            th { +"Total $" }
+                                            th { +"SMS ${cur.label}" }
+                                            th { +"Total ${cur.label}" }
                                         }
                                     }
                                     tbody {
@@ -487,10 +565,10 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                                             tr {
                                                 td { +dayLabel(row.date) }
                                                 td { +fmtCount(row.callsCount) }
-                                                td { +fmtCost(row.callsCost) }
+                                                td { +fmtMoney(row.callsCost, cur) }
                                                 td { +fmtCount(row.smsCount) }
-                                                td { +fmtCost(row.smsCost) }
-                                                td { +fmtCost(row.total) }
+                                                td { +fmtMoney(row.smsCost, cur) }
+                                                td { +fmtMoney(row.total, cur) }
                                             }
                                         }
                                     }
@@ -498,17 +576,18 @@ fun Route.mobileTwilioCostReportRoutes(db: DataBase) {
                                         tr(classes = "totals-row") {
                                             td { +"TOTAL" }
                                             td { +costData.totalCallsCount.toString() }
-                                            td { +"${"$%.4f".format(costData.totalCallsCost)}" }
+                                            td { +fmtMoney(costData.totalCallsCost, cur) }
                                             td { +costData.totalSmsCount.toString() }
-                                            td { +"${"$%.4f".format(costData.totalSmsCost)}" }
-                                            td { +"${"$%.4f".format(costData.grandTotal)}" }
+                                            td { +fmtMoney(costData.totalSmsCost, cur) }
+                                            td { +fmtMoney(costData.grandTotal, cur) }
                                         }
                                     }
                                 }
                             }
                         }
 
-                        p("hint") { +"Prices in USD · Twilio Usage Records API" }
+                        val rateNote = if (cur.label == "DKK") " · 1 USD = ${"%.4f".format(cur.rate)} DKK" else ""
+                        p("hint") { +"Twilio Usage Records API$rateNote" }
                     }
                 }
             }
