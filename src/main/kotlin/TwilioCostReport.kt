@@ -15,6 +15,7 @@ import java.time.format.TextStyle
 import java.util.Base64
 import java.util.Locale
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -210,31 +211,42 @@ fun fetchTwilioCostsByNumber(
             val items = root[arrayKey]?.jsonArray ?: break
             if (items.isEmpty()) break
 
+            // safeStr: use "as? JsonPrimitive" cast instead of .jsonPrimitive extension — when a
+            // JSON field is present but null, kotlinx.serialization returns JsonNull (a non-null
+            // Kotlin object), so the safe-call ?. passes right through and .jsonPrimitive throws
+            // IllegalArgumentException on JsonNull. The "as?" cast safely returns null instead.
+            fun safeStr(obj: kotlinx.serialization.json.JsonObject, key: String): String? =
+                (obj[key] as? JsonPrimitive)?.content
+
+            var seenAnyParsedDate = false
             var allBeforeMonth = true
             for (item in items) {
-                val obj  = item.jsonObject
-                val date = parseTwilioDate(obj[dateJsonKey]?.jsonPrimitive?.content)
+                val obj = item.jsonObject
+                // Primary date field; for inbound SMS date_sent can be null → fall back to date_created
+                val rawDate = safeStr(obj, dateJsonKey) ?: safeStr(obj, "date_created")
+                val date    = parseTwilioDate(rawDate)
 
                 if (date != null) {
+                    seenAnyParsedDate = true
                     if (!date.isBefore(monthStart) && !date.isAfter(monthEnd)) {
-                        // Record is within our target month — accumulate it
-                        val price = obj["price"]?.jsonPrimitive?.content
-                            ?.toDoubleOrNull()?.let { kotlin.math.abs(it) } ?: 0.0
+                        // Within target month — accumulate it
+                        // price is often null for inbound records; safe cast handles JsonNull
+                        val price = safeStr(obj, "price")?.toDoubleOrNull()?.let { kotlin.math.abs(it) } ?: 0.0
                         val day = accum.getOrPut(date) { DayAccum() }
                         day.count++
                         day.cost += price
                         allBeforeMonth = false
                     } else if (!date.isBefore(monthStart)) {
-                        // Record is from after our month (newer) — keep scanning
+                        // After our month (newer record) — keep scanning
                         allBeforeMonth = false
                     }
-                    // Records before monthStart: leave allBeforeMonth as-is
+                    // Before monthStart → allBeforeMonth stays as-is
                 }
             }
 
-            // Twilio returns newest-first. Once an entire page has no records >= monthStart,
-            // all subsequent pages will also be before our target month — stop early.
-            if (allBeforeMonth) break
+            // Only stop early if we've seen at least one parseable date AND all are before the month.
+            // If all dates were null we can't be sure we've gone past the month → keep paginating.
+            if (seenAnyParsedDate && allBeforeMonth) break
 
             url = root["next_page_uri"]?.jsonPrimitive?.content
                 ?.takeIf { it.isNotBlank() }
