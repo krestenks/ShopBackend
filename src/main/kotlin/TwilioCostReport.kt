@@ -205,20 +205,30 @@ fun fetchTwilioCostsByNumber(
             "https://api.twilio.com/2010-04-01/Accounts/$accountSid/$resource.json" +
             "?$filterKey=$encodedNumber&PageSize=1000"
 
+        System.err.println("[TwilioCost] fetchPages START: $resource $filterKey=$filterVal")
+
         while (url != null) {
+            System.err.println("[TwilioCost] GET $url")
             val conn = URL(url).openConnection() as java.net.HttpURLConnection
             conn.requestMethod = "GET"
             conn.setRequestProperty("Authorization", "Basic $credentials")
             conn.connectTimeout = 15_000
             conn.readTimeout    = 15_000
 
-            if (conn.responseCode != 200) {
-                val err = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP ${conn.responseCode}"
+            val status = conn.responseCode
+            System.err.println("[TwilioCost] HTTP $status for $resource $filterKey=$filterVal")
+            if (status != 200) {
+                val err = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $status"
+                System.err.println("[TwilioCost] ERROR: $err")
                 throw RuntimeException("Twilio $resource API error ($filterKey=$filterVal): $err")
             }
 
             val root  = Json.parseToJsonElement(conn.inputStream.bufferedReader().readText()).jsonObject
-            val items = root[arrayKey]?.jsonArray ?: break
+            val items = root[arrayKey]?.jsonArray ?: run {
+                System.err.println("[TwilioCost] No '$arrayKey' key in response — keys: ${root.keys}")
+                break
+            }
+            System.err.println("[TwilioCost] Page has ${items.size} items")
             if (items.isEmpty()) break
 
             // safeStr: use "as? JsonPrimitive" cast instead of .jsonPrimitive extension — when a
@@ -268,10 +278,11 @@ fun fetchTwilioCostsByNumber(
     }
 
     // Fetch both directions (inbound + outbound) for calls and SMS — use normalized number
-    val callsTo   = try { fetchPages("Calls",    "To",   number, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val callsFrom = try { fetchPages("Calls",    "From", number, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val smsTo     = try { fetchPages("Messages", "To",   number, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
-    val smsFrom   = try { fetchPages("Messages", "From", number, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    val callsTo   = try { fetchPages("Calls",    "To",   number, "calls",    "start_time") } catch (e: Exception) { System.err.println("[TwilioCost] CAUGHT callsTo: $e");   emptyMap() }
+    val callsFrom = try { fetchPages("Calls",    "From", number, "calls",    "start_time") } catch (e: Exception) { System.err.println("[TwilioCost] CAUGHT callsFrom: $e"); emptyMap() }
+    val smsTo     = try { fetchPages("Messages", "To",   number, "messages", "date_sent")  } catch (e: Exception) { System.err.println("[TwilioCost] CAUGHT smsTo: $e");    emptyMap() }
+    val smsFrom   = try { fetchPages("Messages", "From", number, "messages", "date_sent")  } catch (e: Exception) { System.err.println("[TwilioCost] CAUGHT smsFrom: $e");  emptyMap() }
+    System.err.println("[TwilioCost] Results — callsTo:${callsTo.values.sumOf{it.count}} callsFrom:${callsFrom.values.sumOf{it.count}} smsTo:${smsTo.values.sumOf{it.count}} smsFrom:${smsFrom.values.sumOf{it.count}}")
 
     val rows = mutableListOf<TwilioDayRow>()
     var d = monthStart
