@@ -151,52 +151,49 @@ fun fetchTwilioCostsByNumber(
     twilioNumber: String,
 ): TwilioCostData {
     val credentials  = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray())
-    val startDateStr = yearMonth.atDay(1).format(DateTimeFormatter.ISO_LOCAL_DATE)
-    val endDateStr   = yearMonth.atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE)
     val copenhagenTz = java.time.ZoneId.of("Europe/Copenhagen")
+    val monthStart   = yearMonth.atDay(1)
+    val monthEnd     = yearMonth.atEndOfMonth()
 
-    // Twilio timestamps come in RFC-2822 format, e.g. "Thu, 29 Jun 2023 12:00:00 +0000"
-    val rfc2822 = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH)
-
+    // Twilio timestamps: RFC-2822 format, e.g. "Thu, 1 Jun 2023 12:00:00 +0000"
+    // Java's built-in RFC_1123_DATE_TIME handles single-digit days and varying zone formats.
     fun parseTwilioDate(s: String?): LocalDate? {
         if (s.isNullOrBlank()) return null
+        // Try the standard RFC-1123 formatter first (handles both "1 Jun" and "01 Jun")
         return try {
-            ZonedDateTime.parse(s.trim(), rfc2822).withZoneSameInstant(copenhagenTz).toLocalDate()
-        } catch (_: Exception) { null }
+            ZonedDateTime.parse(s.trim(), DateTimeFormatter.RFC_1123_DATE_TIME)
+                .withZoneSameInstant(copenhagenTz).toLocalDate()
+        } catch (_: Exception) {
+            // Fallback: try with explicit pattern allowing 1 or 2 digit day
+            try {
+                val fmt = DateTimeFormatter.ofPattern("EEE, d MMM yyyy HH:mm:ss Z", Locale.ENGLISH)
+                ZonedDateTime.parse(s.trim(), fmt).withZoneSameInstant(copenhagenTz).toLocalDate()
+            } catch (_: Exception) { null }
+        }
     }
 
     data class DayAccum(var count: Int = 0, var cost: Double = 0.0)
 
     /**
-     * Fetches all pages from a Calls or Messages list endpoint filtered by a phone number.
-     * Keys in the returned map are Copenhagen-local dates.
+     * Fetches pages from a Calls or Messages list endpoint filtered by a phone number.
+     * Date filtering is done CLIENT-SIDE to avoid URL-encoding issues with ">=" operators.
+     * Twilio returns records newest-first; pagination stops once all records on a page
+     * predate the target month (no point continuing further back in history).
      */
     fun fetchPages(
-        resource: String,     // "Calls" or "Messages"
-        dateGe: String,       // e.g. "StartTime>="
-        dateLe: String,       // e.g. "StartTime<="
-        filterKey: String,    // "To" or "From"
+        resource: String,    // "Calls" or "Messages"
+        filterKey: String,   // "To" or "From"
         filterVal: String,
-        arrayKey: String,     // "calls" or "messages"
-        dateJsonKey: String,  // "start_time" or "date_sent"
+        arrayKey: String,    // "calls" or "messages"
+        dateJsonKey: String, // "start_time" or "date_sent"
     ): Map<LocalDate, DayAccum> {
         val accum = mutableMapOf<LocalDate, DayAccum>()
 
-        // Build initial URL with URL-encoded param names so ">=" is transmitted correctly
-        fun buildInitialUrl(): String {
-            val params = listOf(
-                filterKey to filterVal,
-                dateGe    to startDateStr,
-                dateLe    to endDateStr,
-                "PageSize" to "1000",
-            )
-            val qs = params.joinToString("&") { (k, v) ->
-                "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
-            }
-            return "https://api.twilio.com/2010-04-01/Accounts/$accountSid/$resource.json?$qs"
-        }
+        val encodedNumber = java.net.URLEncoder.encode(filterVal, "UTF-8")
+        var url: String? =
+            "https://api.twilio.com/2010-04-01/Accounts/$accountSid/$resource.json" +
+            "?$filterKey=$encodedNumber&PageSize=1000"
 
-        var url: String? = buildInitialUrl()
         while (url != null) {
             val conn = URL(url).openConnection() as java.net.HttpURLConnection
             conn.requestMethod = "GET"
@@ -206,24 +203,39 @@ fun fetchTwilioCostsByNumber(
 
             if (conn.responseCode != 200) {
                 val err = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP ${conn.responseCode}"
-                throw RuntimeException("Twilio $resource API error (${filterKey}=$filterVal): $err")
+                throw RuntimeException("Twilio $resource API error ($filterKey=$filterVal): $err")
             }
 
             val root  = Json.parseToJsonElement(conn.inputStream.bufferedReader().readText()).jsonObject
             val items = root[arrayKey]?.jsonArray ?: break
+            if (items.isEmpty()) break
 
+            var allBeforeMonth = true
             for (item in items) {
-                val obj   = item.jsonObject
-                val date  = parseTwilioDate(obj[dateJsonKey]?.jsonPrimitive?.content) ?: continue
-                // Twilio prices are negative (cost to you); take abs value
-                val price = obj["price"]?.jsonPrimitive?.content
-                    ?.toDoubleOrNull()?.let { kotlin.math.abs(it) } ?: 0.0
-                val day   = accum.getOrPut(date) { DayAccum() }
-                day.count++
-                day.cost += price
+                val obj  = item.jsonObject
+                val date = parseTwilioDate(obj[dateJsonKey]?.jsonPrimitive?.content)
+
+                if (date != null) {
+                    if (!date.isBefore(monthStart) && !date.isAfter(monthEnd)) {
+                        // Record is within our target month — accumulate it
+                        val price = obj["price"]?.jsonPrimitive?.content
+                            ?.toDoubleOrNull()?.let { kotlin.math.abs(it) } ?: 0.0
+                        val day = accum.getOrPut(date) { DayAccum() }
+                        day.count++
+                        day.cost += price
+                        allBeforeMonth = false
+                    } else if (!date.isBefore(monthStart)) {
+                        // Record is from after our month (newer) — keep scanning
+                        allBeforeMonth = false
+                    }
+                    // Records before monthStart: leave allBeforeMonth as-is
+                }
             }
 
-            // Follow pagination
+            // Twilio returns newest-first. Once an entire page has no records >= monthStart,
+            // all subsequent pages will also be before our target month — stop early.
+            if (allBeforeMonth) break
+
             url = root["next_page_uri"]?.jsonPrimitive?.content
                 ?.takeIf { it.isNotBlank() }
                 ?.let { "https://api.twilio.com$it" }
@@ -232,15 +244,14 @@ fun fetchTwilioCostsByNumber(
     }
 
     // Fetch both directions (inbound + outbound) for calls and SMS
-    val callsTo   = try { fetchPages("Calls",    "StartTime>=", "StartTime<=", "To",   twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val callsFrom = try { fetchPages("Calls",    "StartTime>=", "StartTime<=", "From", twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
-    val smsTo     = try { fetchPages("Messages", "DateSent>=",  "DateSent<=",  "To",   twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
-    val smsFrom   = try { fetchPages("Messages", "DateSent>=",  "DateSent<=",  "From", twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    val callsTo   = try { fetchPages("Calls",    "To",   twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val callsFrom = try { fetchPages("Calls",    "From", twilioNumber, "calls",    "start_time") } catch (_: Exception) { emptyMap() }
+    val smsTo     = try { fetchPages("Messages", "To",   twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
+    val smsFrom   = try { fetchPages("Messages", "From", twilioNumber, "messages", "date_sent")  } catch (_: Exception) { emptyMap() }
 
     val rows = mutableListOf<TwilioDayRow>()
-    var d = yearMonth.atDay(1)
-    val lastDay = yearMonth.atEndOfMonth()
-    while (!d.isAfter(lastDay)) {
+    var d = monthStart
+    while (!d.isAfter(monthEnd)) {
         val callCount = (callsTo[d]?.count ?: 0) + (callsFrom[d]?.count ?: 0)
         val callCost  = (callsTo[d]?.cost  ?: 0.0) + (callsFrom[d]?.cost ?: 0.0)
         val smsCount  = (smsTo[d]?.count   ?: 0) + (smsFrom[d]?.count   ?: 0)
