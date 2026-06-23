@@ -270,10 +270,10 @@ fun fetchTwilioCostsByNumber(
             // If all dates were null we can't be sure we've gone past the month → keep paginating.
             if (seenAnyParsedDate && allBeforeMonth) break
 
-            // IMPORTANT: next_page_uri is JSON null (not missing) when there are no more pages.
-            // Using ".jsonPrimitive" on JsonNull throws; use "as? JsonPrimitive" instead.
+            // Twilio returns next_page_uri as the STRING "null" (not JSON null) when there
+            // are no more pages.  Guard against both the absent key and the string "null".
             url = (root["next_page_uri"] as? JsonPrimitive)?.content
-                ?.takeIf { it.isNotBlank() }
+                ?.takeIf { it.isNotBlank() && it != "null" }
                 ?.let { "https://api.twilio.com$it" }
         }
         return accum
