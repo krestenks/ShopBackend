@@ -223,11 +223,13 @@ fun fetchTwilioCostsByNumber(
                 throw RuntimeException("Twilio $resource API error ($filterKey=$filterVal): $err")
             }
 
-            val root  = Json.parseToJsonElement(conn.inputStream.bufferedReader().readText()).jsonObject
-            val items = root[arrayKey]?.jsonArray ?: run {
+            val root      = Json.parseToJsonElement(conn.inputStream.bufferedReader().readText()).jsonObject
+            val itemsJson = root[arrayKey]?.jsonArray
+            if (itemsJson == null) {
                 System.err.println("[TwilioCost] No '$arrayKey' key in response — keys: ${root.keys}")
                 break
             }
+            val items = itemsJson
             System.err.println("[TwilioCost] Page has ${items.size} items")
             if (items.isEmpty()) break
 
