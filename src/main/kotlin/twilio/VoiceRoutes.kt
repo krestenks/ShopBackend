@@ -215,8 +215,14 @@ fun Route.twilioVoiceRoutes(
         val callId = db.createInboundCallLog(shopId, sid, from, to)
         db.updateCallState(callId, VoiceCallState.INCOMING_CALL)
 
-        // ── 1. Blacklist check ────────────────────────────────────────────────
-        if (from.isNotBlank() && db.isPhoneBlacklisted(shopId, from)) {
+        // ── 1. Blacklist check (tenant-wide) ─────────────────────────────────
+        val shopOwnerId = db.getOwnerIdForShop(shopId)
+        val isBlacklisted = if (shopOwnerId != null) {
+            db.isPhoneBlacklistedByOwner(shopOwnerId, from)
+        } else {
+            db.isPhoneBlacklisted(shopId, from)
+        }
+        if (from.isNotBlank() && isBlacklisted) {
             db.updateCallState(callId, VoiceCallState.REJECTED_BLACKLISTED, "caller=$from")
             db.terminateCall(callId, VoiceCallOutcome.BLACKLIST_REJECTED)
             call.respondText(twiml("<Reject/>"), ContentType.Text.Xml)

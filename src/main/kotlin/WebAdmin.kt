@@ -1793,7 +1793,7 @@ class WebAdmin(private val db: DataBase) {
 
                 call.respondAdminPage(
                     titleText = "Customers",
-                    subtitle = "Browse and verify customer records. 'New' = auto-created on first call/booking. Blacklist is per-shop.",
+                    subtitle = "Browse and verify customer records. 'New' = auto-created on first call/booking. Blacklist is tenant-wide (blocking in one shop blocks all shops under the same owner).",
                     activePath = "/customers",
                 ) {
                     div("panel") {

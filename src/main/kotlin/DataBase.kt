@@ -705,6 +705,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE services  ADD COLUMN owner_id INTEGER",
             "ALTER TABLE customers ADD COLUMN owner_id INTEGER",
             "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
+            // ── Tenant-wide blacklist: add owner_id to phone_blacklist ──
+            "ALTER TABLE phone_blacklist ADD COLUMN owner_id INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -904,6 +906,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // Phone blacklist
     // =========================================================================
 
+    /**
+     * Checks if a phone number is blacklisted for the given shop (per-shop check).
+     * Prefer [isPhoneBlacklistedByOwner] for tenant-wide enforcement.
+     */
     fun isPhoneBlacklisted(shopId: Int, phone: String): Boolean {
         val sql = "SELECT 1 FROM phone_blacklist WHERE shop_id = ? AND phone_e164 = ? AND active = 1 LIMIT 1"
         connection.prepareStatement(sql).use { stmt ->
@@ -914,17 +920,40 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    fun addBlacklistEntry(shopId: Int, phone: String, reason: String?): Int {
+    /**
+     * Checks if a phone number is blacklisted by ANY shop under the given owner (tenant-wide check).
+     * This is the preferred check for inbound calls and SMS — a block in one shop blocks all shops
+     * under the same tenant.
+     */
+    fun isPhoneBlacklistedByOwner(ownerId: Int, phone: String): Boolean {
         val sql = """
-            INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active)
-            VALUES (?, ?, ?, ?, 1)
-            ON CONFLICT(shop_id, phone_e164) DO UPDATE SET active = 1, reason = excluded.reason, created_at = excluded.created_at
+            SELECT 1 FROM phone_blacklist pb
+            JOIN shops s ON s.id = pb.shop_id
+            WHERE s.owner_id = ? AND pb.phone_e164 = ? AND pb.active = 1
+            LIMIT 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, ownerId)
+            stmt.setString(2, phone.trim())
+            val rs = stmt.executeQuery()
+            return rs.next()
+        }
+    }
+
+    fun addBlacklistEntry(shopId: Int, phone: String, reason: String?): Int {
+        // Resolve the owner_id for this shop so the entry is tenant-scoped
+        val ownerId = getOwnerIdForShop(shopId)
+        val sql = """
+            INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active, owner_id)
+            VALUES (?, ?, ?, ?, 1, ?)
+            ON CONFLICT(shop_id, phone_e164) DO UPDATE SET active = 1, reason = excluded.reason, created_at = excluded.created_at, owner_id = excluded.owner_id
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setString(2, phone.trim())
             stmt.setString(3, reason)
             stmt.setLong(4, System.currentTimeMillis())
+            if (ownerId != null) stmt.setInt(5, ownerId) else stmt.setNull(5, java.sql.Types.INTEGER)
             stmt.executeUpdate()
         }
         connection.createStatement().use { s ->

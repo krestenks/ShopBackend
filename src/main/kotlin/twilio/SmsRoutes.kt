@@ -297,8 +297,14 @@ private suspend fun handleInboundSms(
         return
     }
 
-    // Blacklist check — silently drop messages from blocked senders (same behaviour as voice calls)
-    if (from.isNotBlank() && db.isPhoneBlacklisted(shopId, from)) {
+    // Blacklist check (tenant-wide) — silently drop messages from blocked senders
+    val smsOwnerId = db.getOwnerIdForShop(shopId)
+    val isSmsBlacklisted = if (smsOwnerId != null) {
+        db.isPhoneBlacklistedByOwner(smsOwnerId, from)
+    } else {
+        db.isPhoneBlacklisted(shopId, from)
+    }
+    if (from.isNotBlank() && isSmsBlacklisted) {
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
