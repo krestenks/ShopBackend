@@ -58,10 +58,6 @@ fun Routing.smsRoutes(
     callAppScreening: callapp.CallAppScreeningService? = null,
 ) {
 
-    println("[SmsRoutes] Inbound SMS webhook registered at:")
-    println("  POST /api/twilio/sms/inbound   (canonical — matches Twilio console)")
-    println("  POST /twilio/sms/inbound        (compatibility alias)")
-
     // ── Inbound SMS webhook (called by Twilio, no auth) ──────────────────────
     // Canonical URL: https://your-backend/api/twilio/sms/inbound
     // (Consistent with the existing voice routes at /api/twilio/voice/*)
@@ -294,21 +290,15 @@ private suspend fun handleInboundSms(
     val body       = params["Body"]       ?: ""
     val messageSid = params["MessageSid"]
 
-    println("[SmsRoutes] Inbound SMS: from=$from to=$to body=${body.take(80)}")
-
     // Map the Twilio `To` number back to a shop
     val shopId = db.findShopIdByTwilioNumber(to)
     if (shopId == null) {
-        println("[SmsRoutes] No shop found for Twilio number '$to' — ignoring")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
 
-    println("[SmsRoutes] Matched shopId=$shopId — saving message")
-
     // Blacklist check — silently drop messages from blocked senders (same behaviour as voice calls)
     if (from.isNotBlank() && db.isPhoneBlacklisted(shopId, from)) {
-        println("[SmsRoutes] Blacklisted sender $from — dropping message silently")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }

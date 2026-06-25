@@ -67,7 +67,6 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
             val pending = pendingBookings[convKey]
             if (pending != null) {
                 // Auto-confirm the booking
-                println("[AutoBooking] Detected confirmation, triggering book_appointment tool")
                 val toolResult = executeBookAppointment(pending, shopId)
                 pendingBookings.remove(convKey)
                 
@@ -129,7 +128,6 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
                 val hour = timeMatch.groupValues[1]
                 val minute = timeMatch.groupValues[2]
                 pending["time"] = "$hour:$minute"
-                println("[AutoBooking] Extracted time: $hour:$minute")
             } else if (content.contains("today")) {
                 pending["time"] = "today"
             }
@@ -138,7 +136,6 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
         // Only store if we have at least therapist and some info
         if (pending.isNotEmpty() && pending.containsKey("therapist")) {
             pendingBookings[convKey] = pending
-            println("[AutoBooking] Stored pending booking: $pending")
         }
     }
 
@@ -184,13 +181,10 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
                 put("temperature", 0.1)
             }
 
-            println("[LLM] Calling $url")
             val responseBody = client.post(url) {
                 contentType(ContentType.Application.Json)
                 setBody(requestBody.toString())
             }.body<String>()
-
-            println("[LLM] Response: $responseBody")
 
             val json = Json.parseToJsonElement(responseBody)
             val content = json.jsonObject["choices"]?.jsonArray?.get(0)?.jsonObject?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.content
@@ -212,7 +206,6 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
             // No tool calls, return as chat response
             content
         } catch (e: Exception) {
-            println("[LLM] Error: ${e.message}")
             "Sorry, I'm having trouble connecting to the AI. Please try again."
         }
     }
@@ -247,10 +240,9 @@ class TwilioChatbotService(private val db: DataBase, private val config: Chatbot
                     val argsJson = argsElement.jsonObject
                     val result = executeTool(finalToolName, argsJson, shopId)
                     results.add(result)
-                    println("[Tool] Executed $finalToolName: $result")
                 }
             } catch (e: Exception) {
-                println("[Parse] Skipping invalid JSON: ${jsonStr.take(100)}")
+                // Ignore invalid JSON fragments
             }
         }
         
@@ -623,10 +615,7 @@ fun Route.twilioRoutes(db: DataBase, service: TwilioChatbotService) {
         val body = params["Body"] ?: call.request.headers["X-Twilio-Body"]
             ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing Body")
 
-        println("[Twilio] From $from: $body")
-
         val response = service.processMessage(from, body)
-        println("[Twilio] Response: $response")
 
         call.respondText("""<?xml version="1.0"?><Response><Message>${response}</Message></Response>""", ContentType.Text.Xml)
     }

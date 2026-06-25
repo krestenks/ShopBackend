@@ -664,7 +664,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             connection.createStatement().use { stmt ->
                 stmt.executeUpdate("ALTER TABLE sms_message ADD COLUMN handled_at INTEGER NULL")
             }
-            println("[DataBase] Migration: added handled_at column to sms_message")
         } catch (_: Exception) {
             // Column already exists — safe to ignore
         }
@@ -673,10 +672,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         try {
             connection.createStatement().use { stmt ->
                 stmt.execute("ALTER TABLE employee_specialty RENAME TO employee_services")
-                println("Migrated employee_specialty to employee_services")
             }
-        } catch (e: Exception) {
-            // Table already exists or other error - ignore
+        } catch (_: Exception) {
         }
 
         // Migrations: extend existing tables with new columns
@@ -1379,9 +1376,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         if (rs.next()) {
             val hash = rs.getString("password_hash")
-            println("Authenticate shop with pwd:$password, hash: $hash")
             if (BCrypt.checkpw(password, hash)) {
-                println("Shop verified")
                 return Shop(
                     id = rs.getInt("id"),
                     name = rs.getString("name"),
@@ -1403,9 +1398,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         if (rs.next()) {
             val hash = rs.getString("password_hash")
-            println("Authenticate manager with pwd:$password, hash: $hash")
             if (BCrypt.checkpw(password, hash)) {
-                println("Manager verified")
                 return Manager(
                     id = rs.getInt("id"),
                     name = rs.getString("name"),
@@ -1448,7 +1441,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 }
                 else
                 {
-                    println("Booking used or too old: $token, $used, $createdAt")
                 }
             }
         }
@@ -1475,8 +1467,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         connection.prepareStatement(sql).use { stmt ->
             stmt.setLong(1, cutoff)
-            val deleted = stmt.executeUpdate()
-            println("Deleted $deleted old or used booking tokens")
+            stmt.executeUpdate()
         }
     }
 
@@ -1565,8 +1556,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "DELETE FROM app_install_tokens WHERE used_at IS NOT NULL OR expires_at < ?"
         ).use { stmt ->
             stmt.setLong(1, cutoff)
-            val n = stmt.executeUpdate()
-            if (n > 0) println("Deleted $n old install tokens")
+            stmt.executeUpdate()
         }
     }
 
@@ -2220,7 +2210,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         if (updated > 0) {
-            println("[autoComplete] Auto-completed $updated stale Ongoing appointments (>${stallMinutes}min)")
         }
         return updated
     }
@@ -2726,8 +2715,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun getShopsForManager(managerId: Int): List<Shop> {
-        println("getShopsForManager: $managerId")
-
         val stmt = connection.prepareStatement(
             "SELECT * FROM shops WHERE manager_id = ?"
         )
@@ -2745,8 +2732,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             )
             shops.add(shop)
         }
-
-        println("Returning shops: $shops")
 
         rs.close()
         stmt.close()
@@ -2966,13 +2951,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             return emptyArray()
         }
 
-        println("getAvailableTimeSlots called with:")
-        println("  employeeId = $employeeId")
-        println("  shopId = $shopId")
-        println("  dateStr = $dateStr")
-        println("  duration = $duration")
-        println("  minimumLeadMinutes = $minimumLeadMinutes")
-
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val date = LocalDate.parse(dateStr, formatter)
 
@@ -3004,9 +2982,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val startOfDay = startOfDaySeconds * 1000  // Convert to milliseconds
         val endOfDay = endOfDaySeconds * 1000      // Convert to milliseconds
 
-        println("  startOfDay epoch milliseconds = $startOfDay")
-        println("  endOfDay epoch milliseconds = $endOfDay")
-
         val query = """
         SELECT date_time, duration FROM appointments
         WHERE employee_id = ? AND shop_id = ? AND date_time >= ? AND date_time < ?
@@ -3024,7 +2999,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
                     .toLocalDateTime()
                 val apptEnd = apptStart.plusMinutes(rs.getInt("duration").toLong() + 5L)
-                println("  Loaded appointment: $apptStart to $apptEnd")
                 appointments.add(Pair(apptStart, apptEnd))
             }
         }
@@ -3935,8 +3909,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
 
             if (smsDeleted + callsDeleted > 0) {
-                println("[DataRetention] Shop ${shop.id}: deleted $smsDeleted SMS, $callsDeleted calls " +
-                        "(retention=${config.communicationRetentionDays}d)")
             }
             total += smsDeleted + callsDeleted
         }
@@ -3992,8 +3964,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         var deleted = 0
         expiredIds.forEach { id -> if (deleteCustomer(id)) deleted++ }
         if (deleted > 0) {
-            println("[DataRetention] Deleted $deleted expired customer profiles " +
-                    "(no activity in ${maxRetentionMs / 86_400_000} days)")
         }
         return deleted
     }
@@ -4160,7 +4130,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 connection.prepareStatement(
                     "INSERT INTO owners (name, slug, active, created_at) VALUES ('Default Owner', 'default', 1, ?)"
                 ).use { ins -> ins.setLong(1, now); ins.executeUpdate() }
-                println("[Owner] Created default owner (id=1)")
             }
         }
         listOf(
@@ -4268,7 +4237,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.executeUpdate()
         }
         if (updated > 0) {
-            println("[DataBase] Reassigned shop $shopId → owner $newOwnerId")
         }
         return updated > 0
     }

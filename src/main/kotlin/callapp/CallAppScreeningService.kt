@@ -55,15 +55,10 @@ class CallAppScreeningService(
      *         [InvalidPhoneNumberException] skips or circuit-breaker short-circuits).
      */
     suspend fun screenPendingCustomers(): Int {
-        val runAt = java.time.Instant.now()
-        println("[CallAppScreening] Batch started at $runAt")
-
         // ── Circuit breaker check ─────────────────────────────────────────────
         val now = System.currentTimeMillis()
         val openUntil = circuitOpenUntil.get()
         if (now < openUntil) {
-            val waitSec = (openUntil - now) / 1000
-            println("[CallAppScreening] Circuit OPEN — skipping batch, resumes in ${waitSec}s")
             return 0
         }
 
@@ -73,11 +68,8 @@ class CallAppScreeningService(
             limit    = batchSize,
         )
         if (customers.isEmpty()) {
-            println("[CallAppScreening] No pending customers — all results are fresh or in backoff. Done.")
             return 0
         }
-
-        println("[CallAppScreening] Screening ${customers.size} customer(s) (batchSize=$batchSize, maxAgeMs=$maxAgeMs)…")
 
         var queried = 0
         var skipped = 0
@@ -91,11 +83,6 @@ class CallAppScreeningService(
                 // Success — reset consecutive failure counter
                 consecutiveFailures.set(0)
 
-                println(
-                    "[CallAppScreening] ✓ customerId=${customer.id} phone=$phone " +
-                    "found=${result.found} name=${result.name ?: "(none)"} priority=${result.priority}"
-                )
-
             } catch (e: InvalidPhoneNumberException) {
                 // Unrecognised phone format — store benign error; backoff won't trigger a real API call.
                 db.upsertCustomerCallAppScreeningError(
@@ -103,7 +90,6 @@ class CallAppScreeningService(
                     error      = "InvalidPhone: ${e.message}",
                 )
                 skipped++
-                println("[CallAppScreening] ⚠ customerId=${customer.id} phone=$phone — unrecognised number format, skipped")
 
             } catch (e: Exception) {
                 // Real API/network failure
@@ -112,7 +98,6 @@ class CallAppScreeningService(
                     customerId = customer.id,
                     error      = "Error: $msg",
                 )
-                println("[CallAppScreening] ✗ customerId=${customer.id} phone=$phone — ${e.javaClass.simpleName}: $msg")
                 queried++
 
                 // Update circuit breaker
@@ -121,17 +106,12 @@ class CallAppScreeningService(
                     val openUntilNew = System.currentTimeMillis() + circuitBreakerPauseMs
                     circuitOpenUntil.set(openUntilNew)
                     consecutiveFailures.set(0)
-                    println(
-                        "[CallAppScreening] Circuit breaker TRIPPED after $failures consecutive failures. " +
-                        "Pausing all lookups for ${circuitBreakerPauseMs / 60_000} min. Remaining batch abandoned."
-                    )
                     // Stop processing the rest of this batch — API is clearly unhealthy.
                     break
                 }
             }
         }
 
-        println("[CallAppScreening] Done — API queries: $queried, skipped (bad format): $skipped, total candidates: ${customers.size}")
         return queried
     }
 
@@ -153,24 +133,18 @@ class CallAppScreeningService(
         try {
             val result = client.lookup(trimmedPhone)
             db.upsertCustomerCallAppScreening(customerId = customerId, result = result)
-            println(
-                "[CallAppScreening] Immediate ✓ customerId=$customerId phone=$trimmedPhone " +
-                "found=${result.found} name=${result.name ?: "(none)"}"
-            )
         } catch (e: InvalidPhoneNumberException) {
             // Unrecognised format — store benign error so the batch scheduler won't retry it.
             db.upsertCustomerCallAppScreeningError(
                 customerId = customerId,
                 error      = "InvalidPhone: ${e.message}",
             )
-            println("[CallAppScreening] Immediate ⚠ customerId=$customerId phone=$trimmedPhone — unrecognised format, skipped")
         } catch (e: Exception) {
             val msg = e.message?.take(300) ?: e.javaClass.simpleName
             db.upsertCustomerCallAppScreeningError(
                 customerId = customerId,
                 error      = "Error: $msg",
             )
-            println("[CallAppScreening] Immediate ✗ customerId=$customerId phone=$trimmedPhone — ${e.javaClass.simpleName}: $msg")
         }
     }
 }

@@ -64,8 +64,6 @@ class TwilioVoiceCallService(
             append(java.net.URLEncoder.encode(fromNumber, Charsets.UTF_8))
         }
 
-        println("[DirectCall/TwilioAPI] initial call To(manager)=$managerPhoneE164  bridgeCustomerPhone=$customerPhoneE164  from=$fromNumber  bridgeUrl=$bridgeUrl")
-
         val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
 
         val resp: HttpResponse = client.post(url) {
@@ -146,7 +144,6 @@ class TwilioVoiceCallService(
             setBody(listOf("Url" to newUrl, "Method" to "POST").formUrlEncode())
         }
         val body = resp.bodyAsText()
-        println("[TwilioVoice/redirect] callSid=$callSid newUrl=$newUrl status=${resp.status.value} body=$body")
         return CallResult(resp.status.value in 200..299, resp.status.value, body)
     }
 }

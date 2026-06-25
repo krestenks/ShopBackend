@@ -19,8 +19,6 @@ fun Route.chatApiRoutes(db: DataBase, chatbotService: TwilioChatbotService) {
         val message = params["message"] ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing message")
         val shopId = params["shop_id"]?.toIntOrNull() ?: 1
 
-        println("[ChatTest] From $phone (shop $shopId): $message")
-
         val response = chatbotService.processMessage(phone, message, shopId)
 
         call.respond(ChatResponse(response))

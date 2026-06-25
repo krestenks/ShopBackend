@@ -341,8 +341,6 @@ class CallAppRapidApiClient(
     override suspend fun lookup(phoneNumber: String): CallAppLookupResult {
         val (code, number) = parsePhoneForCallApp(phoneNumber)  // throws InvalidPhoneNumberException
 
-        println("[CallAppAPI] lookup code=$code number=$number host=${config.host}")
-
         val response: HttpResponse = client.get("${config.baseUrl}/api/v1/search") {
             parameter("code",   code)
             parameter("number", number)
@@ -357,7 +355,6 @@ class CallAppRapidApiClient(
         val httpStatus = response.status.value
 
         if (!response.status.isSuccess()) {
-            println("[CallAppAPI] HTTP $httpStatus for code=$code number=$number — body: ${rawBody.take(200)}")
             return CallAppLookupResult(
                 found    = false,
                 name     = null,
@@ -374,14 +371,6 @@ class CallAppRapidApiClient(
 
         val resolvedName = dto.data?.name?.trim()?.takeIf { it.isNotBlank() }
         val found = dto.status && resolvedName != null
-
-        // Warn when the API reports success but we couldn't extract a name —
-        // this can happen if the JSON structure differs from what CallAppDataDto expects.
-        if (dto.status && resolvedName == null) {
-            println("[CallAppAPI] WARNING: api_status=true but name is null/blank for code=$code number=$number. rawBody=$rawBody")
-        }
-
-        println("[CallAppAPI] HTTP $httpStatus code=$code number=$number → found=$found name=${resolvedName ?: "(none)"} apiStatus=${dto.status} msg=${dto.message}")
 
         return CallAppLookupResult(
             found     = found,

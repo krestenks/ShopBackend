@@ -61,8 +61,6 @@ fun Route.sharedBookingRoutes(db: DataBase) {
         val shopId = bookingInfo.shopId
         val customerId = bookingInfo.customerId
 
-        println("Serving bookingform $shopId, $customerId")
-
         // Serve the HTML form
         call.respondText(
             """
