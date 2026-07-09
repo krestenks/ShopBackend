@@ -420,32 +420,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private val dbFile = File(dbFileName)
     private val connection: Connection
 
-    /**
-     * Small pool of read-only connections. All writes still go through the single shared
-     * [connection] (SQLite allows only one writer anyway); the pool exists so that the
-     * high-frequency polling read queries (SMS threads/conversations, active-calls) can run
-     * concurrently in WAL mode instead of serializing behind each other on one connection.
-     * Use via [withRead]. Writes must NOT use this pool.
-     */
-    private val readPool: com.zaxxer.hikari.HikariDataSource
-
-    /** Borrows a pooled read connection for the duration of [block]. Read-only queries only. */
-    private inline fun <T> withRead(block: (Connection) -> T): T = readPool.connection.use(block)
-
     init {
         Class.forName("org.sqlite.JDBC")
         val dbUrl = "jdbc:sqlite:${dbFile.absolutePath}"
         connection = DriverManager.getConnection(dbUrl)
 
-        // Concurrency/durability tuning for SQLite under concurrent webhook writes + app polling:
-        //  - WAL lets readers run without blocking the writer (and vice versa).
-        //  - busy_timeout makes a blocked statement wait instead of failing with SQLITE_BUSY.
-        //  - synchronous=NORMAL is the recommended, safe pairing with WAL.
+        // Wait (up to 5s) for a lock instead of failing immediately with SQLITE_BUSY.
+        // NOTE: WAL mode is deliberately NOT enabled. WAL relies on shared-memory (-shm) mmap
+        // that is unreliable on Upsun's network-backed /app/data mount, which caused inbound
+        // writes to fail after the first. The app uses a single shared connection, so all DB
+        // access already serializes safely without WAL.
         try {
             connection.createStatement().use { st ->
-                st.execute("PRAGMA journal_mode=WAL;")
                 st.execute("PRAGMA busy_timeout=5000;")
-                st.execute("PRAGMA synchronous=NORMAL;")
             }
         } catch (e: Exception) {
             println("SQLite PRAGMA setup failed: ${e.message}")
@@ -458,29 +445,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         createTables()
-
-        // Build the read pool after WAL is enabled and tables exist. Each pooled connection
-        // opens in WAL with its own busy_timeout so readers wait rather than fail on contention.
-        readPool = buildReadPool(dbFile)
-    }
-
-    private fun buildReadPool(file: File): com.zaxxer.hikari.HikariDataSource {
-        val sqliteConfig = org.sqlite.SQLiteConfig().apply {
-            setBusyTimeout(5000)
-            setJournalMode(org.sqlite.SQLiteConfig.JournalMode.WAL)
-            setSynchronous(org.sqlite.SQLiteConfig.SynchronousMode.NORMAL)
-        }
-        val sqliteDs = org.sqlite.SQLiteDataSource(sqliteConfig).apply {
-            url = "jdbc:sqlite:${file.absolutePath}"
-        }
-        val hikari = com.zaxxer.hikari.HikariConfig().apply {
-            dataSource        = sqliteDs
-            maximumPoolSize   = 4
-            minimumIdle       = 1
-            poolName          = "sqlite-read"
-            connectionTimeout = 10_000
-        }
-        return com.zaxxer.hikari.HikariDataSource(hikari)
     }
 
     private fun createTables() {
@@ -1260,22 +1224,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getActiveCallsForShop(shopId: Int): List<VoiceCallRecord> {
         val sql = "$CALL_SELECT WHERE vc.shop_id = ? AND vc.is_active = 1 ORDER BY vc.started_at DESC"
-        return withRead { c ->
-            c.prepareStatement(sql).use { stmt ->
-                stmt.setInt(1, shopId)
-                buildCallRecordList(stmt.executeQuery())
-            }
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            return buildCallRecordList(stmt.executeQuery())
         }
     }
 
     fun getRecentCallsForShop(shopId: Int, limit: Int = 50): List<VoiceCallRecord> {
         val sql = "$CALL_SELECT WHERE vc.shop_id = ? ORDER BY vc.started_at DESC LIMIT ?"
-        return withRead { c ->
-            c.prepareStatement(sql).use { stmt ->
-                stmt.setInt(1, shopId)
-                stmt.setInt(2, limit)
-                buildCallRecordList(stmt.executeQuery())
-            }
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, limit)
+            return buildCallRecordList(stmt.executeQuery())
         }
     }
 
@@ -3450,7 +3410,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         body: String,
         status: String,
         twilioMessageSid: String?,
-        windowMs: Long = 15_000,
+        windowMs: Long = 5_000,
     ): Int? {
         val now   = System.currentTimeMillis()
         val phone = counterpartyPhone.trim()
@@ -3594,13 +3554,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ORDER BY created_at ASC
             LIMIT ?
         """.trimIndent()
-        return withRead { c ->
-            c.prepareStatement(sql).use { stmt ->
-                stmt.setInt(1, shopId)
-                stmt.setString(2, counterpartyPhone.trim())
-                stmt.setInt(3, limit)
-                buildSmsMessageList(stmt.executeQuery())
-            }
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, counterpartyPhone.trim())
+            stmt.setInt(3, limit)
+            return buildSmsMessageList(stmt.executeQuery())
         }
     }
 
@@ -3636,7 +3594,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ORDER BY m.created_at DESC
             LIMIT ?
         """.trimIndent()
-        return withRead { c -> c.prepareStatement(sql).use { stmt ->
+        connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setInt(2, limit)
             val rs = stmt.executeQuery()
@@ -3653,8 +3611,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            result
-        } }
+            return result
+        }
     }
 
     /** Mark all unhandled inbound messages in a conversation as handled (read). */
@@ -3682,11 +3640,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               AND direction = 'inbound'
               AND handled_at IS NULL
         """.trimIndent()
-        return withRead { c -> c.prepareStatement(sql).use { stmt ->
+        connection.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
-            if (rs.next()) rs.getInt(1) else 0
-        } }
+            return if (rs.next()) rs.getInt(1) else 0
+        }
     }
 
     /** One summary row per conversation across the given shops — ALL conversations, unread count may be 0. */
@@ -3721,7 +3679,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               )
             ORDER BY unread_count DESC, m.created_at DESC
         """.trimIndent()
-        return withRead { c -> c.prepareStatement(sql).use { stmt ->
+        connection.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
             val result = mutableListOf<SmsUnhandledNotification>()
@@ -3738,8 +3696,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            result
-        } }
+            return result
+        }
     }
 
     /** One summary row per unhandled conversation, across the given shops. */
@@ -3781,7 +3739,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               )
             ORDER BY m.created_at DESC
         """.trimIndent()
-        return withRead { c -> c.prepareStatement(sql).use { stmt ->
+        connection.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
             val result = mutableListOf<SmsUnhandledNotification>()
@@ -3798,8 +3756,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            result
-        } }
+            return result
+        }
     }
 
     /**
