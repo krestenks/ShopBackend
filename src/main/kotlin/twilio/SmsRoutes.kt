@@ -16,6 +16,19 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
+// ─── Diagnostic logging (temporary; traces inbound + poll timing in the Upsun log) ──
+private val SMS_LOG_TZ  = java.time.ZoneId.of("Europe/Copenhagen")
+private val SMS_LOG_FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+/** Human-readable Copenhagen timestamp for correlating with when a message was actually sent. */
+private fun smsTs(epochMs: Long = System.currentTimeMillis()): String =
+    java.time.Instant.ofEpochMilli(epochMs).atZone(SMS_LOG_TZ).format(SMS_LOG_FMT)
+/**
+ * Poll-cadence logging is opt-in via env SMS_DEBUG_POLL=true, because the app's read endpoints
+ * fire every few seconds per device. Turn it on for a test to see the app's actual poll gaps,
+ * then unset it. Inbound-receipt logging (below) is always on and low-volume.
+ */
+private val SMS_DEBUG_POLL = System.getenv("SMS_DEBUG_POLL")?.equals("true", ignoreCase = true) == true
+
 // ─── Request / response models ────────────────────────────────────────────────
 
 @Serializable
@@ -220,7 +233,12 @@ fun Routing.smsRoutes(
             }
 
             val shopIds = getShopIdsForPrincipal(db, refType, refId)
-            call.respond(UnhandledNotificationsResponse(db.getAllSmsConversationsAcrossShops(shopIds)))
+            val allConvos = db.getAllSmsConversationsAcrossShops(shopIds)
+            if (SMS_DEBUG_POLL) {
+                val unread = allConvos.sumOf { it.unreadCount }
+                println("[SMS-POLL] ${smsTs()} all-conversations caller=$refType:$refId shops=$shopIds convos=${allConvos.size} unread=$unread")
+            }
+            call.respond(UnhandledNotificationsResponse(allConvos))
         }
 
         // All unhandled conversations across the caller's shops (notification list)
@@ -282,6 +300,9 @@ fun Routing.smsRoutes(
             }
 
             val messages = db.getSmsThread(shopId, phone)
+            if (SMS_DEBUG_POLL) {
+                println("[SMS-POLL] ${smsTs()} thread caller=$refType:$refId shop=$shopId phone=$phone msgs=${messages.size}")
+            }
             call.respond(SmsThreadResponse(messages))
         }
     }
@@ -301,9 +322,17 @@ private suspend fun handleInboundSms(
     val body       = params["Body"]       ?: ""
     val messageSid = params["MessageSid"]
 
+    // Timestamped receipt log — this is the moment Twilio's webhook actually reached us.
+    // Compare against when you sent the text to see if any delay is upstream (before this line)
+    // or in our handling (the "in Xms" figure logged at the end).
+    val startNs = System.nanoTime()
+    val bodyPreview = body.take(40).replace("\n", " ")
+    println("[SMS-IN] recv ${smsTs()} From=$from To=$to Sid=$messageSid bodyLen=${body.length} body=\"$bodyPreview\"")
+
     // Map the Twilio `To` number back to a shop
     val shopId = db.findShopIdByTwilioNumber(to)
     if (shopId == null) {
+        println("[SMS-IN] DROP no-shop-for-To=$to Sid=$messageSid")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
@@ -316,6 +345,7 @@ private suspend fun handleInboundSms(
         db.isPhoneBlacklisted(shopId, from)
     }
     if (from.isNotBlank() && isSmsBlacklisted) {
+        println("[SMS-IN] DROP blacklisted From=$from shop=$shopId Sid=$messageSid")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
@@ -355,8 +385,11 @@ private suspend fun handleInboundSms(
         status            = "received",
         twilioMessageSid  = messageSid,
     )
+    val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
     if (insertedId == null) {
-        println("[SMS] Suppressed duplicate inbound from $from to shop $shopId (sid=$messageSid)")
+        println("[SMS-IN] SUPPRESSED-DUP From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
+    } else {
+        println("[SMS-IN] STORED id=$insertedId From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
     }
 
     // Return empty TwiML — we don't auto-reply; manager replies manually.
