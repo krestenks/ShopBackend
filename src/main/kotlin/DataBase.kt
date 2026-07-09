@@ -420,10 +420,36 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private val dbFile = File(dbFileName)
     private val connection: Connection
 
+    /**
+     * Small pool of read-only connections. All writes still go through the single shared
+     * [connection] (SQLite allows only one writer anyway); the pool exists so that the
+     * high-frequency polling read queries (SMS threads/conversations, active-calls) can run
+     * concurrently in WAL mode instead of serializing behind each other on one connection.
+     * Use via [withRead]. Writes must NOT use this pool.
+     */
+    private val readPool: com.zaxxer.hikari.HikariDataSource
+
+    /** Borrows a pooled read connection for the duration of [block]. Read-only queries only. */
+    private inline fun <T> withRead(block: (Connection) -> T): T = readPool.connection.use(block)
+
     init {
         Class.forName("org.sqlite.JDBC")
         val dbUrl = "jdbc:sqlite:${dbFile.absolutePath}"
         connection = DriverManager.getConnection(dbUrl)
+
+        // Concurrency/durability tuning for SQLite under concurrent webhook writes + app polling:
+        //  - WAL lets readers run without blocking the writer (and vice versa).
+        //  - busy_timeout makes a blocked statement wait instead of failing with SQLITE_BUSY.
+        //  - synchronous=NORMAL is the recommended, safe pairing with WAL.
+        try {
+            connection.createStatement().use { st ->
+                st.execute("PRAGMA journal_mode=WAL;")
+                st.execute("PRAGMA busy_timeout=5000;")
+                st.execute("PRAGMA synchronous=NORMAL;")
+            }
+        } catch (e: Exception) {
+            println("SQLite PRAGMA setup failed: ${e.message}")
+        }
 
         if (dbFile.createNewFile()) {
             println("Database created at: ${dbFile.absolutePath}")
@@ -432,6 +458,29 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         createTables()
+
+        // Build the read pool after WAL is enabled and tables exist. Each pooled connection
+        // opens in WAL with its own busy_timeout so readers wait rather than fail on contention.
+        readPool = buildReadPool(dbFile)
+    }
+
+    private fun buildReadPool(file: File): com.zaxxer.hikari.HikariDataSource {
+        val sqliteConfig = org.sqlite.SQLiteConfig().apply {
+            setBusyTimeout(5000)
+            setJournalMode(org.sqlite.SQLiteConfig.JournalMode.WAL)
+            setSynchronous(org.sqlite.SQLiteConfig.SynchronousMode.NORMAL)
+        }
+        val sqliteDs = org.sqlite.SQLiteDataSource(sqliteConfig).apply {
+            url = "jdbc:sqlite:${file.absolutePath}"
+        }
+        val hikari = com.zaxxer.hikari.HikariConfig().apply {
+            dataSource        = sqliteDs
+            maximumPoolSize   = 4
+            minimumIdle       = 1
+            poolName          = "sqlite-read"
+            connectionTimeout = 10_000
+        }
+        return com.zaxxer.hikari.HikariDataSource(hikari)
     }
 
     private fun createTables() {
@@ -800,6 +849,28 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 "CREATE INDEX IF NOT EXISTS idx_group_chat_manager_created ON group_chat_message(manager_id, created_at)"
             ) }
         } catch (_: Exception) {}
+
+        // Performance indexes for the high-frequency polling queries (SMS threads/conversations
+        // and the every-2s active-calls poll). Without these, each poll is a full table scan that
+        // gets slower as messages accumulate. CREATE INDEX IF NOT EXISTS is idempotent, so this
+        // runs harmlessly on every startup and backfills existing databases.
+        listOf(
+            // SMS thread fetch + "latest message per conversation" lookups.
+            "CREATE INDEX IF NOT EXISTS idx_sms_shop_phone_created ON sms_message(shop_id, counterparty_phone, created_at)",
+            // unhandled-count + per-conversation unread subquery (covering).
+            "CREATE INDEX IF NOT EXISTS idx_sms_shop_dir_handled ON sms_message(shop_id, direction, handled_at)",
+            // Idempotency guard against duplicate inbound inserts (Twilio webhook retries).
+            // Partial index so the many outbound rows with NULL sid do not collide.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_twilio_sid ON sms_message(twilio_message_sid) WHERE twilio_message_sid IS NOT NULL",
+            // Active-calls poll: WHERE shop_id=? AND is_active=1 ORDER BY started_at DESC.
+            "CREATE INDEX IF NOT EXISTS idx_voice_call_shop_active_started ON voice_call(shop_id, is_active, started_at)",
+        ).forEach { sql ->
+            try {
+                connection.createStatement().use { it.execute(sql) }
+            } catch (e: Exception) {
+                println("Index creation skipped/failed: ${e.message} — $sql")
+            }
+        }
 
         println("All tables ready.")
     }
@@ -1189,18 +1260,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getActiveCallsForShop(shopId: Int): List<VoiceCallRecord> {
         val sql = "$CALL_SELECT WHERE vc.shop_id = ? AND vc.is_active = 1 ORDER BY vc.started_at DESC"
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
-            return buildCallRecordList(stmt.executeQuery())
+        return withRead { c ->
+            c.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, shopId)
+                buildCallRecordList(stmt.executeQuery())
+            }
         }
     }
 
     fun getRecentCallsForShop(shopId: Int, limit: Int = 50): List<VoiceCallRecord> {
         val sql = "$CALL_SELECT WHERE vc.shop_id = ? ORDER BY vc.started_at DESC LIMIT ?"
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
-            stmt.setInt(2, limit)
-            return buildCallRecordList(stmt.executeQuery())
+        return withRead { c ->
+            c.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, shopId)
+                stmt.setInt(2, limit)
+                buildCallRecordList(stmt.executeQuery())
+            }
         }
     }
 
@@ -3354,6 +3429,161 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Inserts an INBOUND SMS with duplicate suppression. Returns the new row id, or
+     * `null` if the message was suppressed as a duplicate.
+     *
+     * Two guards, both evaluated atomically inside a single SQL statement (safe under
+     * SQLite's single-writer model, whether on one shared connection or a pool):
+     *  - The partial UNIQUE index `idx_sms_twilio_sid` blocks exact webhook retries
+     *    (same MessageSid) — handled by `INSERT OR IGNORE`.
+     *  - A content/time window blocks upstream/carrier double-delivery, where the same
+     *    body arrives from the same number within [windowMs] but under a *different*
+     *    Twilio SID — handled by the `WHERE NOT EXISTS` guard.
+     */
+    fun insertInboundSmsDeduped(
+        shopId: Int,
+        customerId: Int?,
+        counterpartyPhone: String,
+        fromPhone: String,
+        toPhone: String,
+        body: String,
+        status: String,
+        twilioMessageSid: String?,
+        windowMs: Long = 15_000,
+    ): Int? {
+        val now   = System.currentTimeMillis()
+        val phone = counterpartyPhone.trim()
+        val sql = """
+            INSERT OR IGNORE INTO sms_message
+                (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
+                 body, direction, status, twilio_message_sid, error_message, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, NULL, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sms_message
+                WHERE shop_id = ?
+                  AND counterparty_phone = ?
+                  AND body = ?
+                  AND direction = 'inbound'
+                  AND created_at >= ?
+            )
+        """.trimIndent()
+        val inserted = connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            if (customerId != null) stmt.setInt(2, customerId) else stmt.setNull(2, java.sql.Types.INTEGER)
+            stmt.setString(3, phone)
+            stmt.setString(4, fromPhone.trim())
+            stmt.setString(5, toPhone.trim())
+            stmt.setString(6, body)
+            stmt.setString(7, status)
+            stmt.setString(8, twilioMessageSid)
+            stmt.setLong(9, now)
+            stmt.setInt(10, shopId)
+            stmt.setString(11, phone)
+            stmt.setString(12, body)
+            stmt.setLong(13, now - windowMs)
+            stmt.executeUpdate()
+        }
+        if (inserted == 0) return null
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /** Result of a guarded outbound insert: the row id, and whether it was newly created. */
+    data class OutboundInsert(val id: Int, val isNew: Boolean)
+
+    /**
+     * Inserts an OUTBOUND SMS unless an identical one (same shop, phone, body) was just
+     * created within [windowMs] — this collapses accidental double-taps of "send" into a
+     * single message and a single Twilio API call. Returns the existing row id with
+     * `isNew = false` when a recent duplicate is found, so the caller can skip the send.
+     */
+    fun insertOutboundSmsIfNotDuplicate(
+        shopId: Int,
+        customerId: Int?,
+        counterpartyPhone: String,
+        fromPhone: String,
+        toPhone: String,
+        body: String,
+        status: String,
+        windowMs: Long = 8_000,
+    ): OutboundInsert {
+        val now    = System.currentTimeMillis()
+        val phone  = counterpartyPhone.trim()
+        val cutoff = now - windowMs
+        val sql = """
+            INSERT INTO sms_message
+                (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
+                 body, direction, status, twilio_message_sid, error_message, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, 'outbound', ?, NULL, NULL, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sms_message
+                WHERE shop_id = ?
+                  AND counterparty_phone = ?
+                  AND body = ?
+                  AND direction = 'outbound'
+                  AND created_at >= ?
+            )
+        """.trimIndent()
+        val inserted = connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            if (customerId != null) stmt.setInt(2, customerId) else stmt.setNull(2, java.sql.Types.INTEGER)
+            stmt.setString(3, phone)
+            stmt.setString(4, fromPhone.trim())
+            stmt.setString(5, toPhone.trim())
+            stmt.setString(6, body)
+            stmt.setString(7, status)
+            stmt.setLong(8, now)
+            stmt.setInt(9, shopId)
+            stmt.setString(10, phone)
+            stmt.setString(11, body)
+            stmt.setLong(12, cutoff)
+            stmt.executeUpdate()
+        }
+        if (inserted > 0) {
+            val id = connection.createStatement().use { s ->
+                val rs = s.executeQuery("SELECT last_insert_rowid()")
+                if (rs.next()) rs.getInt(1) else -1
+            }
+            return OutboundInsert(id, isNew = true)
+        }
+        // Duplicate: return the id of the recent identical row so the caller can respond with it.
+        val existingId = connection.prepareStatement(
+            """
+            SELECT id FROM sms_message
+            WHERE shop_id = ? AND counterparty_phone = ? AND body = ?
+              AND direction = 'outbound' AND created_at >= ?
+            ORDER BY created_at DESC LIMIT 1
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone)
+            stmt.setString(3, body)
+            stmt.setLong(4, cutoff)
+            val rs = stmt.executeQuery()
+            if (rs.next()) rs.getInt(1) else -1
+        }
+        return OutboundInsert(existingId, isNew = false)
+    }
+
+    /** Updates the delivery status (and Twilio SID / error) of an SMS row after sending. */
+    fun updateSmsStatus(id: Int, status: String, twilioMessageSid: String?, errorMessage: String?) {
+        val sql = """
+            UPDATE sms_message
+               SET status = ?, twilio_message_sid = ?, error_message = ?
+             WHERE id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, status)
+            stmt.setString(2, twilioMessageSid)
+            stmt.setString(3, errorMessage)
+            stmt.setInt(4, id)
+            stmt.executeUpdate()
+        }
+    }
+
     /** Full thread for a shop + counterparty phone, oldest first. */
     fun getSmsThread(shopId: Int, counterpartyPhone: String, limit: Int = 200): List<SmsMessage> {
         val sql = """
@@ -3364,11 +3594,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ORDER BY created_at ASC
             LIMIT ?
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
-            stmt.setString(2, counterpartyPhone.trim())
-            stmt.setInt(3, limit)
-            return buildSmsMessageList(stmt.executeQuery())
+        return withRead { c ->
+            c.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, shopId)
+                stmt.setString(2, counterpartyPhone.trim())
+                stmt.setInt(3, limit)
+                buildSmsMessageList(stmt.executeQuery())
+            }
         }
     }
 
@@ -3404,7 +3636,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ORDER BY m.created_at DESC
             LIMIT ?
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        return withRead { c -> c.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setInt(2, limit)
             val rs = stmt.executeQuery()
@@ -3421,8 +3653,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            return result
-        }
+            result
+        } }
     }
 
     /** Mark all unhandled inbound messages in a conversation as handled (read). */
@@ -3450,11 +3682,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               AND direction = 'inbound'
               AND handled_at IS NULL
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        return withRead { c -> c.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
-            return if (rs.next()) rs.getInt(1) else 0
-        }
+            if (rs.next()) rs.getInt(1) else 0
+        } }
     }
 
     /** One summary row per conversation across the given shops — ALL conversations, unread count may be 0. */
@@ -3489,7 +3721,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               )
             ORDER BY unread_count DESC, m.created_at DESC
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        return withRead { c -> c.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
             val result = mutableListOf<SmsUnhandledNotification>()
@@ -3506,8 +3738,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            return result
-        }
+            result
+        } }
     }
 
     /** One summary row per unhandled conversation, across the given shops. */
@@ -3549,7 +3781,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
               )
             ORDER BY m.created_at DESC
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        return withRead { c -> c.prepareStatement(sql).use { stmt ->
             shopIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
             val rs = stmt.executeQuery()
             val result = mutableListOf<SmsUnhandledNotification>()
@@ -3566,8 +3798,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     unreadCount = rs.getInt("unread_count"),
                 )
             }
-            return result
-        }
+            result
+        } }
     }
 
     /**

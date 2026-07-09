@@ -69,7 +69,7 @@ object ShopBackend {
         val customerApi = CustomerApi(db)
         val mobileApi = MobileApi(db)
 
-        // Initialize chatbot
+        // Chatbot config (also supplies the Twilio credentials used by smsService below).
         val chatbotConfig = ChatbotConfig(
             twilioAccountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
             twilioAuthToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
@@ -77,8 +77,20 @@ object ShopBackend {
             lmStudioUrl = System.getenv("LM_STUDIO_URL") ?: "http://localhost:1234/v1",
             lmStudioModel = System.getenv("LM_MODEL") ?: "essentialai/rnj-1"
         )
-        val chatbotService = TwilioChatbotService(db, chatbotConfig)
-        println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")
+
+        // The LM Studio chatbot is disabled by default: LM Studio runs locally on the
+        // dev machine and is not reachable from the Upsun server. Set CHATBOT_ENABLED=true
+        // to re-enable it (kept around for future work). When disabled, the chatbot
+        // service is not created and its routes are not registered.
+        val chatbotEnabled = System.getenv("CHATBOT_ENABLED")?.equals("true", ignoreCase = true) == true
+        val chatbotService: TwilioChatbotService? = if (chatbotEnabled) {
+            TwilioChatbotService(db, chatbotConfig).also {
+                println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")
+            }
+        } else {
+            println("Chatbot DISABLED — set CHATBOT_ENABLED=true to enable (requires reachable LM Studio).")
+            null
+        }
 
         val smsService = TwilioSmsService(
             accountSid = chatbotConfig.twilioAccountSid,
@@ -141,10 +153,13 @@ object ShopBackend {
                 // Simple installer page for provisioning new handsets (session + HTML form)
                 SetupAppRoutes(db).install(this)
 
-                twilioRoutes(db, chatbotService)
+                // Chatbot routes (old LM Studio SMS webhook + test pages) — only when enabled.
+                if (chatbotService != null) {
+                    twilioRoutes(db, chatbotService)
+                    chatTestRoutes(db, chatbotService)
+                    chatApiRoutes(db, chatbotService)
+                }
                 twilioVoiceRoutes(db, callAppScreening)
-                chatTestRoutes(db, chatbotService)
-                chatApiRoutes(db, chatbotService)
                 smsRoutes(db, smsService, callAppScreening)
             }
         }.start(wait = true)

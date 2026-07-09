@@ -37,3 +37,6 @@ build/*
 Test_credentials.txt
 *.apk
 dist/ShopBackend.jar
+
+# Local DB backups (contain customer PII — never commit)
+data/ShopManager_*.db

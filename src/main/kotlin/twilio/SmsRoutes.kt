@@ -127,18 +127,27 @@ fun Routing.smsRoutes(
                 req.body
             }
 
-            // Optimistically insert with status "queued"
+            // Optimistically insert with status "queued". A guarded insert collapses accidental
+            // double-taps (identical shop+phone+body within a few seconds) into one row; when a
+            // recent duplicate is detected we skip the Twilio send entirely and echo the existing id.
             val customerId = db.getCustomerIdByPhone(req.toPhone)
-            val msgId = db.insertSmsMessage(
+            val insert = db.insertOutboundSmsIfNotDuplicate(
                 shopId            = req.shopId,
                 customerId        = customerId,
                 counterpartyPhone = req.toPhone,
                 fromPhone         = fromNumber,
                 toPhone           = req.toPhone,
                 body              = effectiveBody,
-                direction         = "outbound",
                 status            = "queued",
             )
+            val msgId = insert.id
+
+            if (!insert.isNew) {
+                // Duplicate send suppressed — the original request already sent (or is sending) this text.
+                println("[SMS] Suppressed duplicate outbound to ${req.toPhone} for shop ${req.shopId} (msgId=$msgId)")
+                call.respond(SendSmsResponse(ok = true, messageId = msgId))
+                return@post
+            }
 
             // Send via Twilio
             val result = smsService.sendSms(
@@ -147,11 +156,13 @@ fun Routing.smsRoutes(
                 bodyText       = effectiveBody,
             )
 
-            // Update status based on Twilio response (best-effort; row was already inserted)
-            // We keep it simple: mark sent or failed. A production system would use status callbacks.
+            // Persist the outcome so the row reflects reality (SID for delivery/cost tracking,
+            // or the error) instead of being stuck forever at "queued".
             if (result.success) {
+                db.updateSmsStatus(msgId, status = "sent", twilioMessageSid = result.messageSid, errorMessage = null)
                 call.respond(SendSmsResponse(ok = true, messageId = msgId, twilioSid = result.messageSid))
             } else {
+                db.updateSmsStatus(msgId, status = "failed", twilioMessageSid = null, errorMessage = result.errorMessage)
                 call.respond(
                     HttpStatusCode.OK,   // still 200 so the app can display the error
                     SendSmsResponse(ok = false, messageId = msgId, error = result.errorMessage)
@@ -330,18 +341,23 @@ private suspend fun handleInboundSms(
         }
     }
 
-    // Persist
-    db.insertSmsMessage(
+    // Persist with duplicate suppression. Twilio webhook retries (same MessageSid) and
+    // upstream/carrier double-delivery (same body from the same number within a few seconds
+    // under a different SID) both collapse to a single stored row. A suppressed duplicate is
+    // still a successful webhook from Twilio's perspective, so we return 200/empty TwiML.
+    val insertedId = db.insertInboundSmsDeduped(
         shopId            = shopId,
         customerId        = customerId,
         counterpartyPhone = from,
         fromPhone         = from,
         toPhone           = to,
         body              = body,
-        direction         = "inbound",
         status            = "received",
         twilioMessageSid  = messageSid,
     )
+    if (insertedId == null) {
+        println("[SMS] Suppressed duplicate inbound from $from to shop $shopId (sid=$messageSid)")
+    }
 
     // Return empty TwiML — we don't auto-reply; manager replies manually.
     call.respondText("<Response/>", ContentType.Application.Xml)

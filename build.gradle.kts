@@ -13,6 +13,7 @@ val ktorVersion = "2.3.7"
 
 dependencies {
     implementation("org.xerial:sqlite-jdbc:3.44.1.0")
+    implementation("com.zaxxer:HikariCP:5.1.0")               // read-connection pool (WAL concurrency)
     implementation("org.slf4j:slf4j-simple:2.0.13")
     implementation("org.mindrot:jbcrypt:0.4")
     implementation("io.ktor:ktor-server-core:$ktorVersion")
