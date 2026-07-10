@@ -10,13 +10,16 @@ import java.util.Base64
 /**
  * Base URL (through the `/2010-04-01` API version) for Twilio's REST API.
  *
- * Defaults to the **Ireland region** endpoint `api.ie1.twilio.com`, because all of our numbers
- * live in that Twilio Region (data residency) — API calls for a region's numbers must target that
- * region's host or they fail as "resource not found". Override with `TWILIO_API_HOST` (e.g. set it
- * to `api.twilio.com` for the global/US endpoint). Webhooks are unaffected (they point at our backend).
+ * Defaults to the **Ireland region, Dublin edge** endpoint `api.dublin.ie1.twilio.com`, because all
+ * of our numbers live in that Twilio Region. Sending from an IE1 number via a different region's
+ * host fails with error 21663 ("'From' phone number routing configuration is incorrect"). Override
+ * with `TWILIO_API_HOST` (e.g. `api.twilio.com` for the global/US endpoint, or a different edge).
+ *
+ * NOTE: the older region-only host `api.ie1.twilio.com` was retired on 2026-04-28 — use the
+ * edge-location form (`api.<edge>.ie1.twilio.com`). Webhooks are unaffected (they point at our backend).
  */
 internal fun twilioApiBase(): String {
-    val host = System.getenv("TWILIO_API_HOST")?.trim()?.takeIf { it.isNotBlank() } ?: "api.ie1.twilio.com"
+    val host = System.getenv("TWILIO_API_HOST")?.trim()?.takeIf { it.isNotBlank() } ?: "api.dublin.ie1.twilio.com"
     return "https://$host/2010-04-01"
 }
 
