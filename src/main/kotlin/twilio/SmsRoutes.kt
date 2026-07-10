@@ -23,6 +23,11 @@ private val SMS_LOG_FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-
 private fun smsTs(epochMs: Long = System.currentTimeMillis()): String =
     java.time.Instant.ofEpochMilli(epochMs).atZone(SMS_LOG_TZ).format(SMS_LOG_FMT)
 /**
+ * Writes a diagnostic line and flushes stdout immediately. Without the flush, buffered output
+ * lags behind on the Upsun log, making messages show up in the app before their log line appears.
+ */
+private fun smsLog(msg: String) { println(msg); System.out.flush() }
+/**
  * Poll-cadence logging is opt-in via env SMS_DEBUG_POLL=true, because the app's read endpoints
  * fire every few seconds per device. Turn it on for a test to see the app's actual poll gaps,
  * then unset it. Inbound-receipt logging (below) is always on and low-volume.
@@ -157,7 +162,7 @@ fun Routing.smsRoutes(
 
             if (!insert.isNew) {
                 // Duplicate send suppressed — the original request already sent (or is sending) this text.
-                println("[SMS] Suppressed duplicate outbound to ${req.toPhone} for shop ${req.shopId} (msgId=$msgId)")
+                smsLog("[SMS] Suppressed duplicate outbound to ${req.toPhone} for shop ${req.shopId} (msgId=$msgId)")
                 call.respond(SendSmsResponse(ok = true, messageId = msgId))
                 return@post
             }
@@ -236,7 +241,7 @@ fun Routing.smsRoutes(
             val allConvos = db.getAllSmsConversationsAcrossShops(shopIds)
             if (SMS_DEBUG_POLL) {
                 val unread = allConvos.sumOf { it.unreadCount }
-                println("[SMS-POLL] ${smsTs()} all-conversations caller=$refType:$refId shops=$shopIds convos=${allConvos.size} unread=$unread")
+                smsLog("[SMS-POLL] ${smsTs()} all-conversations caller=$refType:$refId shops=$shopIds convos=${allConvos.size} unread=$unread")
             }
             call.respond(UnhandledNotificationsResponse(allConvos))
         }
@@ -301,7 +306,7 @@ fun Routing.smsRoutes(
 
             val messages = db.getSmsThread(shopId, phone)
             if (SMS_DEBUG_POLL) {
-                println("[SMS-POLL] ${smsTs()} thread caller=$refType:$refId shop=$shopId phone=$phone msgs=${messages.size}")
+                smsLog("[SMS-POLL] ${smsTs()} thread caller=$refType:$refId shop=$shopId phone=$phone msgs=${messages.size}")
             }
             call.respond(SmsThreadResponse(messages))
         }
@@ -327,12 +332,12 @@ private suspend fun handleInboundSms(
     // or in our handling (the "in Xms" figure logged at the end).
     val startNs = System.nanoTime()
     val bodyPreview = body.take(40).replace("\n", " ")
-    println("[SMS-IN] recv ${smsTs()} From=$from To=$to Sid=$messageSid bodyLen=${body.length} body=\"$bodyPreview\"")
+    smsLog("[SMS-IN] recv ${smsTs()} From=$from To=$to Sid=$messageSid bodyLen=${body.length} body=\"$bodyPreview\"")
 
     // Map the Twilio `To` number back to a shop
     val shopId = db.findShopIdByTwilioNumber(to)
     if (shopId == null) {
-        println("[SMS-IN] DROP no-shop-for-To=$to Sid=$messageSid")
+        smsLog("[SMS-IN] DROP no-shop-for-To=$to Sid=$messageSid")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
@@ -345,7 +350,7 @@ private suspend fun handleInboundSms(
         db.isPhoneBlacklisted(shopId, from)
     }
     if (from.isNotBlank() && isSmsBlacklisted) {
-        println("[SMS-IN] DROP blacklisted From=$from shop=$shopId Sid=$messageSid")
+        smsLog("[SMS-IN] DROP blacklisted From=$from shop=$shopId Sid=$messageSid")
         call.respondText("<Response/>", ContentType.Application.Xml)
         return
     }
@@ -387,9 +392,9 @@ private suspend fun handleInboundSms(
     )
     val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
     if (insertedId == null) {
-        println("[SMS-IN] SUPPRESSED-DUP From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
+        smsLog("[SMS-IN] SUPPRESSED-DUP From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
     } else {
-        println("[SMS-IN] STORED id=$insertedId From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
+        smsLog("[SMS-IN] STORED id=$insertedId From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
     }
 
     // Return empty TwiML — we don't auto-reply; manager replies manually.

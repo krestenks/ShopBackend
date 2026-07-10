@@ -44,7 +44,7 @@ class TwilioVoiceCallService(
             return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")
         }
 
-        val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls.json"
+        val url = "${twilioApiBase()}/Accounts/$accountSid/Calls.json"
 
         // Step 1: Twilio calls the manager (To=managerPhone).
         // Step 2: When manager answers Twilio fetches the bridge TwiML URL,
@@ -87,7 +87,7 @@ class TwilioVoiceCallService(
             return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")
         }
 
-        val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls.json"
+        val url = "${twilioApiBase()}/Accounts/$accountSid/Calls.json"
 
         val callbackUrl = buildString {
             append(publicBaseUrl.trimEnd('/'))
@@ -136,7 +136,7 @@ class TwilioVoiceCallService(
         if (accountSid.isBlank() || authToken.isBlank()) {
             return CallResult(false, 500, "Twilio not configured (missing TWILIO_* env vars)")
         }
-        val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Calls/$callSid.json"
+        val url = "${twilioApiBase()}/Accounts/$accountSid/Calls/$callSid.json"
         val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
         val resp: HttpResponse = client.post(url) {
             header(HttpHeaders.Authorization, "Basic $basic")

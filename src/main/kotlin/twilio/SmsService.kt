@@ -8,6 +8,19 @@ import io.ktor.http.*
 import java.util.Base64
 
 /**
+ * Base URL (through the `/2010-04-01` API version) for Twilio's REST API.
+ *
+ * Defaults to the **Ireland region** endpoint `api.ie1.twilio.com`, because all of our numbers
+ * live in that Twilio Region (data residency) — API calls for a region's numbers must target that
+ * region's host or they fail as "resource not found". Override with `TWILIO_API_HOST` (e.g. set it
+ * to `api.twilio.com` for the global/US endpoint). Webhooks are unaffected (they point at our backend).
+ */
+internal fun twilioApiBase(): String {
+    val host = System.getenv("TWILIO_API_HOST")?.trim()?.takeIf { it.isNotBlank() } ?: "api.ie1.twilio.com"
+    return "https://$host/2010-04-01"
+}
+
+/**
  * Minimal Twilio SMS sender using Twilio's REST API directly (no Twilio SDK).
  */
 class TwilioSmsService(
@@ -32,7 +45,7 @@ class TwilioSmsService(
             if (fromNumberE164.isBlank()) return SmsResult(false, 400, "Missing From number")
             if (toNumberE164.isBlank()) return SmsResult(false, 400, "Missing To number")
 
-            val url = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Messages.json"
+            val url = "${twilioApiBase()}/Accounts/$accountSid/Messages.json"
             val basic = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray(Charsets.UTF_8))
 
             val resp: HttpResponse = client.post(url) {
