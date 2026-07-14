@@ -6,12 +6,12 @@ import io.ktor.server.routing.*
 import kotlinx.html.*
 import shared.components.BookingUI
 
-class CustomerApi(private val db: DataBase) {
+class CustomerApi(private val db: DataBase, private val telephonyService: telephony.TelephonyService) {
     fun setupRoutes(routing: Route) {
         routing {
             staticResources("/static", "static")
 
-            sharedBookingRoutes(db)
+            sharedBookingRoutes(db, telephonyService)
 
             get("/appointments/add") {
                 call.respondHtml {

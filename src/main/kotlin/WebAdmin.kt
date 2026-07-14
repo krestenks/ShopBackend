@@ -14,7 +14,7 @@ import shared.components.BookingUI
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-class WebAdmin(private val db: DataBase) {
+class WebAdmin(private val db: DataBase, private val telephonyService: telephony.TelephonyService) {
 
     data class AdminSession(val username: String)
 
@@ -203,7 +203,7 @@ class WebAdmin(private val db: DataBase) {
                 resources("static")
             }
 
-            sharedBookingRoutes(db) // <- Include shared routes
+            sharedBookingRoutes(db, telephonyService) // <- Include shared routes
 
             get("/login") {
                 call.respondHtml {

@@ -72,7 +72,7 @@ data class MarkHandledRequest(val shopId: Int, val phone: String)
 
 fun Routing.smsRoutes(
     db: DataBase,
-    smsService: TwilioSmsService,
+    smsService: telephony.TelephonyService,
     callAppScreening: callapp.CallAppScreeningService? = null,
 ) {
 
@@ -110,10 +110,11 @@ fun Routing.smsRoutes(
             }
 
             val voiceConfig = db.getShopVoiceConfig(req.shopId)
-            val fromNumber  = voiceConfig.twilioNumber?.trim().takeIf { !it.isNullOrBlank() }
-                ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "").trim()
+            val fromNumber  = telephony.resolveShopSenderNumber(db, smsService, req.shopId)
 
-            if (fromNumber.isBlank()) {
+            // On Asterisk the SIM is the sender, so a blank display number is tolerable;
+            // on Twilio a From number is mandatory for the API call.
+            if (fromNumber.isBlank() && smsService.providerName == "twilio") {
                 call.respond(
                     HttpStatusCode.BadRequest,
                     SendSmsResponse(ok = false, error = "No Twilio number configured for this shop")
@@ -167,18 +168,19 @@ fun Routing.smsRoutes(
                 return@post
             }
 
-            // Send via Twilio
+            // Send via the configured telephony provider (Twilio or Asterisk)
             val result = smsService.sendSms(
+                shopId         = req.shopId,
                 fromNumberE164 = fromNumber,
                 toNumberE164   = req.toPhone,
-                bodyText       = effectiveBody,
+                body           = effectiveBody,
             )
 
-            // Persist the outcome so the row reflects reality (SID for delivery/cost tracking,
-            // or the error) instead of being stuck forever at "queued".
+            // Persist the outcome so the row reflects reality (provider id for delivery/cost
+            // tracking, or the error) instead of being stuck forever at "queued".
             if (result.success) {
-                db.updateSmsStatus(msgId, status = "sent", twilioMessageSid = result.messageSid, errorMessage = null)
-                call.respond(SendSmsResponse(ok = true, messageId = msgId, twilioSid = result.messageSid))
+                db.updateSmsStatus(msgId, status = "sent", twilioMessageSid = result.providerMessageId, errorMessage = null)
+                call.respond(SendSmsResponse(ok = true, messageId = msgId, twilioSid = result.providerMessageId))
             } else {
                 db.updateSmsStatus(msgId, status = "failed", twilioMessageSid = null, errorMessage = result.errorMessage)
                 call.respond(
@@ -342,63 +344,94 @@ private suspend fun handleInboundSms(
         return
     }
 
+    persistInboundSms(
+        db = db,
+        shopId = shopId,
+        fromPhone = from,
+        toPhone = to,
+        body = body,
+        providerMessageSid = messageSid,
+        callAppScreening = callAppScreening,
+        elapsedSinceNs = startNs,
+    )
+
+    // Return empty TwiML — we don't auto-reply; manager replies manually.
+    // A suppressed duplicate or blacklisted sender is still a successful webhook.
+    call.respondText("<Response/>", ContentType.Application.Xml)
+}
+
+/** Outcome of persisting an inbound SMS (shared by Twilio webhook + Asterisk internal endpoint). */
+enum class InboundSmsPersistResult { STORED, SUPPRESSED_DUPLICATE, BLACKLISTED }
+
+/**
+ * Provider-neutral inbound-SMS persistence: blacklist check, customer auto-create,
+ * CallApp screening trigger, and deduplicated insert. Used by the Twilio webhook and
+ * by the Asterisk dialplan's internal endpoint.
+ */
+fun persistInboundSms(
+    db: DataBase,
+    shopId: Int,
+    fromPhone: String,
+    toPhone: String,
+    body: String,
+    providerMessageSid: String?,
+    callAppScreening: callapp.CallAppScreeningService? = null,
+    elapsedSinceNs: Long = System.nanoTime(),
+): InboundSmsPersistResult {
     // Blacklist check (tenant-wide) — silently drop messages from blocked senders
     val smsOwnerId = db.getOwnerIdForShop(shopId)
     val isSmsBlacklisted = if (smsOwnerId != null) {
-        db.isPhoneBlacklistedByOwner(smsOwnerId, from)
+        db.isPhoneBlacklistedByOwner(smsOwnerId, fromPhone)
     } else {
-        db.isPhoneBlacklisted(shopId, from)
+        db.isPhoneBlacklisted(shopId, fromPhone)
     }
-    if (from.isNotBlank() && isSmsBlacklisted) {
-        smsLog("[SMS-IN] DROP blacklisted From=$from shop=$shopId Sid=$messageSid")
-        call.respondText("<Response/>", ContentType.Application.Xml)
-        return
+    if (fromPhone.isNotBlank() && isSmsBlacklisted) {
+        smsLog("[SMS-IN] DROP blacklisted From=$fromPhone shop=$shopId Sid=$providerMessageSid")
+        return InboundSmsPersistResult.BLACKLISTED
     }
 
     // Auto-create a customer record if none exists yet — mirrors the behaviour of inbound
     // voice calls so that every new SMS sender immediately gets a profile (status "New").
-    val customerId: Int? = if (from.isNotBlank()) {
-        val id = db.ensureCustomerByPhone(from)
+    val customerId: Int? = if (fromPhone.isNotBlank()) {
+        val id = db.ensureCustomerByPhone(fromPhone)
         // Retroactively link any prior SMS messages that arrived before the record existed
-        db.linkSmsMessagesToCustomer(shopId, from, id)
+        db.linkSmsMessagesToCustomer(shopId, fromPhone, id)
         id
     } else {
         null
     }
 
     // Trigger an immediate background CallApp lookup for customers that have never been
-    // screened. Fires and forgets — does not delay the Twilio webhook response at all.
-    if (customerId != null && from.isNotBlank() && callAppScreening != null &&
+    // screened. Fires and forgets — does not delay the webhook response at all.
+    if (customerId != null && fromPhone.isNotBlank() && callAppScreening != null &&
         db.getCustomerCallAppScreening(customerId) == null) {
         @Suppress("OPT_IN_USAGE")
         GlobalScope.launch(Dispatchers.IO) {
-            callAppScreening.screenCustomerNow(customerId, from)
+            callAppScreening.screenCustomerNow(customerId, fromPhone)
         }
     }
 
-    // Persist with duplicate suppression. Twilio webhook retries (same MessageSid) and
-    // upstream/carrier double-delivery (same body from the same number within a few seconds
-    // under a different SID) both collapse to a single stored row. A suppressed duplicate is
-    // still a successful webhook from Twilio's perspective, so we return 200/empty TwiML.
+    // Persist with duplicate suppression. Webhook retries (same provider sid) and
+    // upstream/carrier double-delivery (same body from the same number within a few
+    // seconds under a different sid) both collapse to a single stored row.
     val insertedId = db.insertInboundSmsDeduped(
         shopId            = shopId,
         customerId        = customerId,
-        counterpartyPhone = from,
-        fromPhone         = from,
-        toPhone           = to,
+        counterpartyPhone = fromPhone,
+        fromPhone         = fromPhone,
+        toPhone           = toPhone,
         body              = body,
         status            = "received",
-        twilioMessageSid  = messageSid,
+        twilioMessageSid  = providerMessageSid,
     )
-    val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
-    if (insertedId == null) {
-        smsLog("[SMS-IN] SUPPRESSED-DUP From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
+    val elapsedMs = (System.nanoTime() - elapsedSinceNs) / 1_000_000
+    return if (insertedId == null) {
+        smsLog("[SMS-IN] SUPPRESSED-DUP From=$fromPhone shop=$shopId Sid=$providerMessageSid handledIn=${elapsedMs}ms")
+        InboundSmsPersistResult.SUPPRESSED_DUPLICATE
     } else {
-        smsLog("[SMS-IN] STORED id=$insertedId From=$from shop=$shopId Sid=$messageSid handledIn=${elapsedMs}ms")
+        smsLog("[SMS-IN] STORED id=$insertedId From=$fromPhone shop=$shopId Sid=$providerMessageSid handledIn=${elapsedMs}ms")
+        InboundSmsPersistResult.STORED
     }
-
-    // Return empty TwiML — we don't auto-reply; manager replies manually.
-    call.respondText("<Response/>", ContentType.Application.Xml)
 }
 
 // ─── Helper: check JWT caller has access to the given shopId ─────────────────

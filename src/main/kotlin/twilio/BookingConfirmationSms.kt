@@ -2,6 +2,9 @@ package twilio
 
 import DataBase
 import Shop
+import telephony.SmsSendResult
+import telephony.TelephonyService
+import telephony.resolveShopSenderNumber
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -42,18 +45,16 @@ object BookingConfirmationSms {
 
     suspend fun send(
         db: DataBase,
-        smsService: TwilioSmsService,
+        smsService: TelephonyService,
         shopId: Int,
         toPhoneE164: String,
         appointmentTimeMillis: Long,
         appointmentCount: Int = 1,
-    ): TwilioSmsService.SmsResult {
-        val voice = db.getShopVoiceConfig(shopId)
+    ): SmsSendResult {
         val shop = db.getShopById(shopId)
-            ?: return TwilioSmsService.SmsResult(false, 404, "Shop not found")
+            ?: return SmsSendResult(false, 404, "Shop not found")
 
-        val fromNumber = voice.twilioNumber?.trim().takeIf { !it.isNullOrBlank() }
-            ?: (System.getenv("TWILIO_FROM_NUMBER") ?: "").trim()
+        val fromNumber = resolveShopSenderNumber(db, smsService, shopId)
 
         val body = buildMessage(
             shop = shop,
@@ -63,13 +64,14 @@ object BookingConfirmationSms {
         )
 
         val result = smsService.sendSms(
+            shopId = shopId,
             fromNumberE164 = fromNumber,
             toNumberE164 = toPhoneE164,
-            bodyText = body,
+            body = body,
         )
 
         // Persist the outbound confirmation so it appears in the Messages view.
-        // We do this regardless of Twilio success so the manager can see it was attempted.
+        // We do this regardless of provider success so the manager can see it was attempted.
         runCatching {
             val customerId = db.getCustomerIdByPhone(toPhoneE164)
             db.insertSmsMessage(

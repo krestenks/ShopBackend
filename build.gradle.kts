@@ -37,6 +37,9 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.zxing:javase:3.5.3")
 
+    // Asterisk Manager Interface (AMI) client for the self-hosted phone system
+    implementation("org.asteriskjava:asterisk-java:3.41.0")
+
     // Test dependencies
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
     testImplementation("io.mockk:mockk:1.13.8")

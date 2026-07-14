@@ -190,6 +190,26 @@ data class ShopVoiceConfig(
     val smsPriceListFooter: String? = null,
 )
 
+/**
+ * Per-shop self-hosted telephony (Asterisk/Quectel) configuration.
+ * Parallel to ShopVoiceConfig (which remains Twilio-oriented) — a shop migrating to
+ * the GSM system gets a row here; the Twilio config can stay for fallback.
+ */
+@Serializable
+data class ShopTelephonyConfig(
+    val shopId: Int,
+    /** E.164 number of the SIM in this shop's modem. */
+    val phoneNumber: String? = null,
+    /** Stable udev symlink to the modem's AT/data port, e.g. /dev/ttyQuectelShop1. */
+    val modemDataDevice: String? = null,
+    /** ALSA device for UAC voice audio, e.g. hw:EC25EUX. */
+    val modemAlsaDevice: String? = null,
+    /** SIP password the manager app registers with (username = shop{id}-manager). */
+    val sipPassword: String? = null,
+    /** Epoch ms of last successful Asterisk provisioning; null = never. */
+    val provisionedAt: Long? = null,
+)
+
 // ─── Voice call log ──────────────────────────────────────────────────────────
 
 /** Current state of a tracked inbound call (mirrors Phone flow spec state machine). */
@@ -561,6 +581,21 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             """
             ,
             """
+            CREATE TABLE IF NOT EXISTS shop_telephony_config (
+                shop_id INTEGER PRIMARY KEY,
+                -- GSM phone number of the SIM in this shop's modem (E.164)
+                phone_number TEXT,
+                -- AT/data port of the modem, as a stable udev symlink (e.g. /dev/ttyQuectelShop1)
+                modem_data_device TEXT,
+                -- ALSA device for UAC voice audio (e.g. hw:EC25EUX)
+                modem_alsa_device TEXT,
+                -- SIP credential the manager app registers with (username = shop{id}-manager)
+                sip_password TEXT,
+                -- Last successful Asterisk provisioning (epoch ms), null = never provisioned
+                provisioned_at INTEGER
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS shop_opening_hours (
                 shop_id INTEGER NOT NULL,
                 day_of_week INTEGER NOT NULL,
@@ -907,6 +942,89 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(10, config.communicationRetentionDays)
             stmt.setInt(11, config.customerRetentionDays)
             stmt.setString(12, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
+            stmt.executeUpdate()
+        }
+    }
+
+    // ─── Self-hosted telephony (Asterisk/Quectel) config ─────────────────────
+
+    fun getShopTelephonyConfig(shopId: Int): ShopTelephonyConfig {
+        val sql = """
+            SELECT shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at
+            FROM shop_telephony_config WHERE shop_id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) {
+                ShopTelephonyConfig(
+                    shopId = rs.getInt("shop_id"),
+                    phoneNumber = rs.getString("phone_number"),
+                    modemDataDevice = rs.getString("modem_data_device"),
+                    modemAlsaDevice = rs.getString("modem_alsa_device"),
+                    sipPassword = rs.getString("sip_password"),
+                    provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
+                )
+            } else {
+                ShopTelephonyConfig(shopId)
+            }
+        }
+    }
+
+    /** All shops that have a telephony row with at least a modem device configured. */
+    fun getAllConfiguredShopTelephonyConfigs(): List<ShopTelephonyConfig> {
+        val sql = """
+            SELECT shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at
+            FROM shop_telephony_config
+            WHERE modem_data_device IS NOT NULL AND trim(modem_data_device) != ''
+            ORDER BY shop_id
+        """.trimIndent()
+        val result = mutableListOf<ShopTelephonyConfig>()
+        connection.prepareStatement(sql).use { stmt ->
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                result += ShopTelephonyConfig(
+                    shopId = rs.getInt("shop_id"),
+                    phoneNumber = rs.getString("phone_number"),
+                    modemDataDevice = rs.getString("modem_data_device"),
+                    modemAlsaDevice = rs.getString("modem_alsa_device"),
+                    sipPassword = rs.getString("sip_password"),
+                    provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
+                )
+            }
+        }
+        return result
+    }
+
+    fun upsertShopTelephonyConfig(config: ShopTelephonyConfig) {
+        val sql = """
+            INSERT INTO shop_telephony_config
+                (shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(shop_id) DO UPDATE SET
+                phone_number = excluded.phone_number,
+                modem_data_device = excluded.modem_data_device,
+                modem_alsa_device = excluded.modem_alsa_device,
+                sip_password = excluded.sip_password,
+                provisioned_at = excluded.provisioned_at
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, config.shopId)
+            stmt.setString(2, config.phoneNumber?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(3, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(4, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(5, config.sipPassword?.takeIf { it.isNotBlank() })
+            if (config.provisionedAt != null) stmt.setLong(6, config.provisionedAt) else stmt.setNull(6, java.sql.Types.BIGINT)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun markShopTelephonyProvisioned(shopId: Int, atMs: Long = System.currentTimeMillis()) {
+        connection.prepareStatement(
+            "UPDATE shop_telephony_config SET provisioned_at = ? WHERE shop_id = ?"
+        ).use { stmt ->
+            stmt.setLong(1, atMs)
+            stmt.setInt(2, shopId)
             stmt.executeUpdate()
         }
     }

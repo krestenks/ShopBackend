@@ -21,7 +21,6 @@ import java.time.format.DateTimeFormatter
 import kotlinx.serialization.*
 import twilio.TwilioVoiceCallService
 import twilio.BookingConfirmationSms
-import twilio.TwilioSmsService
 
 // ─── Request/response models used by call-log + blacklist endpoints ───────────
 
@@ -214,7 +213,7 @@ suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginI
 
 
 
-class MobileApi(private val db: DataBase) {
+class MobileApi(private val db: DataBase, private val telephonyService: telephony.TelephonyService) {
     fun setupRoutes(routing: Route) {
         routing {
 
@@ -226,10 +225,8 @@ class MobileApi(private val db: DataBase) {
                 publicBaseUrl = System.getenv("PUBLIC_BASE_URL") ?: (System.getenv("PUBLIC_BOOKING_URL") ?: "http://localhost:8080"),
             )
 
-            val smsService = TwilioSmsService(
-                accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
-                authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
-            )
+            // Provider-agnostic SMS sender (Twilio or Asterisk, chosen at startup)
+            val smsService = telephonyService
 
             post("/api/mobile/login") {
                 val loginRequest = call.receive<LoginRequest>()

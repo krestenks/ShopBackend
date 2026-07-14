@@ -12,7 +12,7 @@ import shared.components.BookingUI
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import twilio.BookingConfirmationSms
-import twilio.TwilioSmsService
+import telephony.TelephonyService
 
 
 suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingTokenInfo? {
@@ -24,13 +24,7 @@ suspend fun ApplicationCall.authenticateBookingToken(db: DataBase): BookingToken
 }
 
 // Accepts a DataBase reference (or other services) as a parameter
-fun Route.sharedBookingRoutes(db: DataBase) {
-
-    // SMS confirmation sender (used for both SMS-link bookings and manager-app bookings)
-    val smsService = TwilioSmsService(
-        accountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
-        authToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
-    )
+fun Route.sharedBookingRoutes(db: DataBase, smsService: TelephonyService) {
 
     @Serializable
     data class MultiTimeSlotsBlock(val employeeId: Int, val duration: Int)

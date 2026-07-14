@@ -24,6 +24,17 @@ import twilio.smsRoutes
 import callapp.CallAppRapidApiConfig
 import callapp.CallAppRapidApiClient
 import callapp.CallAppScreeningService
+import asterisk.AmiClient
+import asterisk.AriClient
+import asterisk.AsteriskConfig
+import asterisk.AsteriskEventHandler
+import asterisk.AsteriskProvisioner
+import asterisk.AsteriskTelephonyService
+import asterisk.DialplanWriter
+import asterisk.QuectelConfigWriter
+import asterisk.internalTelephonyRoutes
+import telephony.TelephonyService
+import telephony.TwilioTelephonyService
 import kotlinx.coroutines.runBlocking
 
 object ShopBackend {
@@ -64,10 +75,7 @@ object ShopBackend {
             println("Startup cleanup error: ${e.message}")
         }
 
-        // Instantiate route handlers
-        val webAdmin = WebAdmin(db)
-        val customerApi = CustomerApi(db)
-        val mobileApi = MobileApi(db)
+        // Route handlers are instantiated after the telephony provider is chosen (below).
 
         // Chatbot config (also supplies the Twilio credentials used by smsService below).
         val chatbotConfig = ChatbotConfig(
@@ -96,6 +104,32 @@ object ShopBackend {
             accountSid = chatbotConfig.twilioAccountSid,
             authToken  = chatbotConfig.twilioAuthToken,
         )
+
+        // ── Telephony provider: Twilio (default) or self-hosted Asterisk ─────
+        val asteriskConfig = AsteriskConfig.fromEnv()
+        var asteriskProvisioner: AsteriskProvisioner? = null
+        val telephonyService: TelephonyService = if (asteriskConfig.enabled) {
+            val amiClient = AmiClient(asteriskConfig).also { it.start() }
+            AsteriskEventHandler(amiClient, db).start()
+            val ariClient = AriClient(asteriskConfig)
+            asteriskProvisioner = AsteriskProvisioner(
+                db = db,
+                config = asteriskConfig,
+                ariClient = ariClient,
+                quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
+                dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
+            )
+            println("[Telephony] Provider: ASTERISK (AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath})")
+            AsteriskTelephonyService(amiClient, asteriskConfig, db)
+        } else {
+            println("[Telephony] Provider: TWILIO (set ASTERISK_ENABLED=true to switch)")
+            TwilioTelephonyService(smsService)
+        }
+
+        // Instantiate route handlers
+        val webAdmin = WebAdmin(db, telephonyService)
+        val customerApi = CustomerApi(db, telephonyService)
+        val mobileApi = MobileApi(db, telephonyService)
 
         // Background cleanup
         startCleanupScheduler(db)
@@ -160,7 +194,12 @@ object ShopBackend {
                     chatApiRoutes(db, chatbotService)
                 }
                 twilioVoiceRoutes(db, callAppScreening)
-                smsRoutes(db, smsService, callAppScreening)
+                smsRoutes(db, telephonyService, callAppScreening)
+
+                // Asterisk dialplan → backend callbacks (inbound SMS/call, provisioning)
+                if (asteriskConfig.enabled) {
+                    internalTelephonyRoutes(db, asteriskConfig, asteriskProvisioner!!, callAppScreening)
+                }
             }
         }.start(wait = true)
     }
@@ -179,6 +218,10 @@ object ShopBackend {
             "ADMIN_PASSWORD",
             "LM_STUDIO_URL",
             "LM_MODEL",
+            "ASTERISK_ENABLED",
+            "ASTERISK_AMI_SECRET",
+            "ASTERISK_ARI_PASSWORD",
+            "ASTERISK_INTERNAL_SECRET",
         )
         println("──── Environment ────────────────────────────────")
         for (name in vars) {
