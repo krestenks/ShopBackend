@@ -92,15 +92,23 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
         connection.connectTimeout = 10_000
         connection.readTimeout    = 10_000
 
+        System.err.println("[TwilioCost/usage] GET $urlStr")
         val responseCode = connection.responseCode
+        System.err.println("[TwilioCost/usage] $category HTTP $responseCode")
         if (responseCode != 200) {
             val err = connection.errorStream?.bufferedReader()?.readText() ?: "HTTP $responseCode"
+            System.err.println("[TwilioCost/usage] $category ERROR: $err")
             throw RuntimeException("Twilio API error ($category): $err")
         }
 
         val body    = connection.inputStream.bufferedReader().readText()
         val root    = Json.parseToJsonElement(body).jsonObject
-        val records = root["usage_records"]?.jsonArray ?: return emptyMap()
+        val records = root["usage_records"]?.jsonArray
+        if (records == null) {
+            System.err.println("[TwilioCost/usage] $category NO usage_records key — top-level keys: ${root.keys}")
+            return emptyMap()
+        }
+        System.err.println("[TwilioCost/usage] $category records=${records.size} totalCount=${records.sumOf { it.jsonObject["count"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0 }} totalPrice=${records.sumOf { it.jsonObject["price"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0 }}")
 
         val result = mutableMapOf<LocalDate, Pair<Int, Double>>()
         for (rec in records) {
@@ -114,8 +122,8 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
         return result
     }
 
-    val callsData = try { fetchCategory("calls") } catch (_: Exception) { emptyMap() }
-    val smsData   = try { fetchCategory("sms")   } catch (_: Exception) { emptyMap() }
+    val callsData = try { fetchCategory("calls") } catch (e: Exception) { System.err.println("[TwilioCost/usage] calls FAILED: ${e.message}"); emptyMap() }
+    val smsData   = try { fetchCategory("sms")   } catch (e: Exception) { System.err.println("[TwilioCost/usage] sms FAILED: ${e.message}");   emptyMap() }
 
     // Build one row per day in the month (including days with no usage)
     val rows = mutableListOf<TwilioDayRow>()
