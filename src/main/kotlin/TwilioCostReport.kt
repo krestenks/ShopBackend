@@ -87,10 +87,15 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
     val startDate = yearMonth.atDay(1).format(DateTimeFormatter.ISO_LOCAL_DATE)
     val endDate   = yearMonth.atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE)
 
+    // Usage Records live in the GLOBAL realm and require the account's PRIMARY auth token —
+    // the region/ie1 token is rejected there with 20003. Set it as env TWILIO_PRIMARY_AUTH_TOKEN.
+    // (Because Usage is global it covers the whole month, including days before the ie1 move.)
+    val globalToken = System.getenv("TWILIO_PRIMARY_AUTH_TOKEN")?.trim()?.takeIf { it.isNotBlank() } ?: authToken
+
     fun fetchCategory(category: String): Map<LocalDate, Pair<Int, Double>> {
         val urlStr = "$TWILIO_GLOBAL_BASE/Accounts/$accountSid/Usage/Records/Daily.json" +
                 "?Category=$category&StartDate=$startDate&EndDate=$endDate&PageSize=100"
-        val credentials = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray())
+        val credentials = Base64.getEncoder().encodeToString("$accountSid:$globalToken".toByteArray())
         val connection = URL(urlStr).openConnection() as java.net.HttpURLConnection
         connection.requestMethod = "GET"
         connection.setRequestProperty("Authorization", "Basic $credentials")
