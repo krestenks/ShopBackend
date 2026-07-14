@@ -19,6 +19,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import twilio.twilioApiBase
+
+// Scheme+host root (no /2010-04-01), used to resolve Twilio's relative next_page_uri.
+// Region-aware: defaults to the Dublin IE1 edge, honours TWILIO_API_HOST — same as twilioApiBase().
+private fun twilioHostRoot(): String = twilioApiBase().removeSuffix("/2010-04-01")
 
 // ─── Data models ─────────────────────────────────────────────────────────────
 
@@ -78,7 +83,7 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
     val endDate   = yearMonth.atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE)
 
     fun fetchCategory(category: String): Map<LocalDate, Pair<Int, Double>> {
-        val urlStr = "https://api.twilio.com/2010-04-01/Accounts/$accountSid/Usage/Records/Daily.json" +
+        val urlStr = "${twilioApiBase()}/Accounts/$accountSid/Usage/Records/Daily.json" +
                 "?Category=$category&StartDate=$startDate&EndDate=$endDate&PageSize=100"
         val credentials = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray())
         val connection = URL(urlStr).openConnection() as java.net.HttpURLConnection
@@ -202,7 +207,7 @@ fun fetchTwilioCostsByNumber(
 
         val encodedNumber = java.net.URLEncoder.encode(filterVal, "UTF-8")
         var url: String? =
-            "https://api.twilio.com/2010-04-01/Accounts/$accountSid/$resource.json" +
+            "${twilioApiBase()}/Accounts/$accountSid/$resource.json" +
             "?$filterKey=$encodedNumber&PageSize=1000"
 
         System.err.println("[TwilioCost] fetchPages START: $resource $filterKey=$filterVal")
@@ -274,7 +279,7 @@ fun fetchTwilioCostsByNumber(
             // are no more pages.  Guard against both the absent key and the string "null".
             url = (root["next_page_uri"] as? JsonPrimitive)?.content
                 ?.takeIf { it.isNotBlank() && it != "null" }
-                ?.let { "https://api.twilio.com$it" }
+                ?.let { "${twilioHostRoot()}$it" }
         }
         return accum
     }
