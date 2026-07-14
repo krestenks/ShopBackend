@@ -39,6 +39,8 @@ dependencies {
 
     // Asterisk Manager Interface (AMI) client for the self-hosted phone system
     implementation("org.asteriskjava:asterisk-java:3.41.0")
+    // Serial port access for the GSM modem scanner (AT command probing)
+    implementation("com.fazecast:jSerialComm:2.11.0")
 
     // Test dependencies
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")

@@ -92,6 +92,27 @@ class AmiClient(private val config: AsteriskConfig) {
         command("module reload chan_quectel.so")
     }
 
+    /**
+     * Trunk state per chan_quectel device from `quectel show devices`
+     * ("Free", "Not connected", "Ring", ...). Empty when AMI is down.
+     */
+    fun quectelDeviceStates(): Map<String, String> {
+        if (!connected) return emptyMap()
+        return try {
+            // Columns: ID  Group  State  RSSI  Mode  Provider Name  Model  Firmware  IMEI  IMSI  Number
+            command("quectel show devices")
+                .drop(1)
+                .mapNotNull { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size >= 3) parts[0] to parts[2] else null
+                }
+                .toMap()
+        } catch (e: Exception) {
+            println("[AMI] quectel show devices failed: ${e.message}")
+            emptyMap()
+        }
+    }
+
     fun reloadDialplan() {
         command("dialplan reload")
     }

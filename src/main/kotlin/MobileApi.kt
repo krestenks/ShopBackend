@@ -137,6 +137,19 @@ data class MeResponse(
 
 @Serializable
 data class CallCustomerResponse(val success: Boolean, val status: Int, val twilio: String)
+
+/** SIP registration details for the manager app's softphone (Asterisk mode only). */
+@Serializable
+data class SipCredentialsResponse(
+    val shopId: Int,
+    val username: String,
+    val password: String,
+    val host: String,
+    val port: Int,
+    val transport: String,
+    val shopPhoneNumber: String? = null,
+)
+
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?, val ownerId: Int = 0)
 
 // ─── Availability screen models ───────────────────────────────────────────────
@@ -213,7 +226,11 @@ suspend fun PipelineContext<Unit, ApplicationCall>.authenticateManager(): LoginI
 
 
 
-class MobileApi(private val db: DataBase, private val telephonyService: telephony.TelephonyService) {
+class MobileApi(
+    private val db: DataBase,
+    private val telephonyService: telephony.TelephonyService,
+    private val asteriskAdmin: asterisk.AsteriskAdmin? = null,
+) {
     fun setupRoutes(routing: Route) {
         routing {
 
@@ -274,6 +291,48 @@ class MobileApi(private val db: DataBase, private val telephonyService: telephon
             }
 
             authenticate("jwt") {
+
+                // ─────────────────────────────────────────────────────────────
+                // SIP credentials (self-hosted Asterisk telephony)
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * SIP registration details for the manager app's softphone.
+                 * 404 when the backend runs in Twilio mode or the shop has no
+                 * provisioned GSM telephony yet — the app treats that as
+                 * "softphone disabled for this shop".
+                 *
+                 * GET /api/mobile/telephony/sip-credentials?shopId=N
+                 */
+                get("/api/mobile/telephony/sip-credentials") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@get
+                    }
+                    val admin = asteriskAdmin
+                        ?: return@get call.respond(HttpStatusCode.NotFound, "Self-hosted telephony not enabled")
+                    val tele = db.getShopTelephonyConfig(shopId)
+                    if (tele.sipPassword.isNullOrBlank() || tele.provisionedAt == null) {
+                        call.respond(HttpStatusCode.NotFound, "Shop not provisioned for telephony")
+                        return@get
+                    }
+                    if (admin.config.sipHost.isBlank()) {
+                        call.respond(HttpStatusCode.ServiceUnavailable, "ASTERISK_SIP_HOST not configured on server")
+                        return@get
+                    }
+                    call.respond(SipCredentialsResponse(
+                        shopId = shopId,
+                        username = admin.config.endpointId(shopId),
+                        password = tele.sipPassword!!,
+                        host = admin.config.sipHost,
+                        port = admin.config.sipPort,
+                        transport = "udp",
+                        shopPhoneNumber = tele.phoneNumber,
+                    ))
+                }
 
                 // ─────────────────────────────────────────────────────────────
                 // Customer detail endpoints

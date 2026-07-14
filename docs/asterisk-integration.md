@@ -15,6 +15,9 @@ ASTERISK_ARI_PASSWORD=...      # required
 ASTERISK_CONFIG_PATH=/etc/asterisk
 ASTERISK_BACKEND_BASE_URL=http://127.0.0.1:8080
 ASTERISK_INTERNAL_SECRET=...   # required — auths the dialplan→backend callbacks
+ASTERISK_SIP_HOST=...          # host the MANAGER APP registers SIP against
+                               # (Tailscale IP/hostname; LAN IP while testing)
+ASTERISK_SIP_PORT=5060
 ```
 
 ## What the backend does when enabled
@@ -39,6 +42,19 @@ ASTERISK_INTERNAL_SECRET=...   # required — auths the dialplan→backend callb
     `curl -X POST localhost:8080/api/internal/telephony/provision -d "secret=...&shopId=3"`
 - **Event handler** (`asterisk/AsteriskEventHandler.kt`): AMI DialEnd/Hangup events
   close call-log rows (keyed by Asterisk UNIQUEID stored in `voice_call.twilio_call_sid`).
+
+## Admin UI & app API (Phases 3–4)
+
+- **Shop edit page** (`/shops/edit?id=N`) gets a "GSM Telephony" section in Asterisk
+  mode: SIM number, modem device, ALSA device, live trunk state, SIP account display,
+  **Save & Provision**, **Regenerate SIP password**, and **test SMS**.
+- **Modem scan** (`/admin/telephony/scan?shopId=N`): lists `/dev/ttyUSB*` +
+  `/dev/ttyQuectel*` udev symlinks. Ports assigned to a shop or active in
+  chan_quectel are shown from DB/AMI state only; unassigned ports are AT-probed
+  (AT → AT+CIMI → AT+CSQ → AT+CNUM) for IMSI/signal/number. One-click assign.
+- **Manager app**: `GET /api/mobile/telephony/sip-credentials?shopId=N` (JWT) returns
+  `{username, password, host, port, transport, shopPhoneNumber}`; 404 = softphone
+  disabled/not provisioned for that shop (app should hide SIP features).
 
 ## Per-shop data (`shop_telephony_config` table)
 

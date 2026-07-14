@@ -18,6 +18,10 @@ package asterisk
  *   ASTERISK_BACKEND_BASE_URL  default http://127.0.0.1:8080 (URL the dialplan CURLs back to)
  *   ASTERISK_INTERNAL_SECRET   required when enabled — shared secret for the
  *                              /api/internal/telephony/... endpoints
+ *   ASTERISK_SIP_HOST          host the MANAGER APP should register its SIP account
+ *                              against (Tailscale IP/hostname of the phone server;
+ *                              LAN IP during testing). No default.
+ *   ASTERISK_SIP_PORT          default 5060
  */
 data class AsteriskConfig(
     val enabled: Boolean,
@@ -31,6 +35,8 @@ data class AsteriskConfig(
     val configPath: String,
     val backendBaseUrl: String,
     val internalSecret: String,
+    val sipHost: String,
+    val sipPort: Int,
 ) {
     companion object {
         fun fromEnv(): AsteriskConfig = AsteriskConfig(
@@ -45,6 +51,8 @@ data class AsteriskConfig(
             configPath = env("ASTERISK_CONFIG_PATH", "/etc/asterisk"),
             backendBaseUrl = env("ASTERISK_BACKEND_BASE_URL", "http://127.0.0.1:8080").trimEnd('/'),
             internalSecret = env("ASTERISK_INTERNAL_SECRET", ""),
+            sipHost = env("ASTERISK_SIP_HOST", ""),
+            sipPort = System.getenv("ASTERISK_SIP_PORT")?.toIntOrNull() ?: 5060,
         )
 
         private fun env(name: String, default: String): String =

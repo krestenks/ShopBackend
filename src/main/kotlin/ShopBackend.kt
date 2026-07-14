@@ -26,11 +26,13 @@ import callapp.CallAppRapidApiClient
 import callapp.CallAppScreeningService
 import asterisk.AmiClient
 import asterisk.AriClient
+import asterisk.AsteriskAdmin
 import asterisk.AsteriskConfig
 import asterisk.AsteriskEventHandler
 import asterisk.AsteriskProvisioner
 import asterisk.AsteriskTelephonyService
 import asterisk.DialplanWriter
+import asterisk.ModemScanner
 import asterisk.QuectelConfigWriter
 import asterisk.internalTelephonyRoutes
 import telephony.TelephonyService
@@ -107,17 +109,23 @@ object ShopBackend {
 
         // ── Telephony provider: Twilio (default) or self-hosted Asterisk ─────
         val asteriskConfig = AsteriskConfig.fromEnv()
-        var asteriskProvisioner: AsteriskProvisioner? = null
+        var asteriskAdmin: AsteriskAdmin? = null
         val telephonyService: TelephonyService = if (asteriskConfig.enabled) {
             val amiClient = AmiClient(asteriskConfig).also { it.start() }
             AsteriskEventHandler(amiClient, db).start()
             val ariClient = AriClient(asteriskConfig)
-            asteriskProvisioner = AsteriskProvisioner(
+            val provisioner = AsteriskProvisioner(
                 db = db,
                 config = asteriskConfig,
                 ariClient = ariClient,
                 quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
                 dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
+            )
+            asteriskAdmin = AsteriskAdmin(
+                config = asteriskConfig,
+                amiClient = amiClient,
+                provisioner = provisioner,
+                modemScanner = ModemScanner(db, asteriskConfig, amiClient),
             )
             println("[Telephony] Provider: ASTERISK (AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath})")
             AsteriskTelephonyService(amiClient, asteriskConfig, db)
@@ -127,9 +135,9 @@ object ShopBackend {
         }
 
         // Instantiate route handlers
-        val webAdmin = WebAdmin(db, telephonyService)
+        val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)
         val customerApi = CustomerApi(db, telephonyService)
-        val mobileApi = MobileApi(db, telephonyService)
+        val mobileApi = MobileApi(db, telephonyService, asteriskAdmin)
 
         // Background cleanup
         startCleanupScheduler(db)
@@ -197,8 +205,8 @@ object ShopBackend {
                 smsRoutes(db, telephonyService, callAppScreening)
 
                 // Asterisk dialplan → backend callbacks (inbound SMS/call, provisioning)
-                if (asteriskConfig.enabled) {
-                    internalTelephonyRoutes(db, asteriskConfig, asteriskProvisioner!!, callAppScreening)
+                asteriskAdmin?.let {
+                    internalTelephonyRoutes(db, it.config, it.provisioner, callAppScreening)
                 }
             }
         }.start(wait = true)
