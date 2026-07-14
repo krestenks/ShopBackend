@@ -25,6 +25,11 @@ import twilio.twilioApiBase
 // Region-aware: defaults to the Dublin IE1 edge, honours TWILIO_API_HOST — same as twilioApiBase().
 private fun twilioHostRoot(): String = twilioApiBase().removeSuffix("/2010-04-01")
 
+// Twilio Usage/Billing is a GLOBAL account resource — it is NOT region-scoped and returns
+// 20404 "Endpoint is not supported in realm 'ie1'" on the Dublin edge. Always query Usage
+// Records on the primary/global endpoint, regardless of where the call/SMS content lives.
+private const val TWILIO_GLOBAL_BASE = "https://api.twilio.com/2010-04-01"
+
 // ─── Data models ─────────────────────────────────────────────────────────────
 
 data class TwilioDayRow(
@@ -83,7 +88,7 @@ fun fetchTwilioCosts(accountSid: String, authToken: String, yearMonth: YearMonth
     val endDate   = yearMonth.atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE)
 
     fun fetchCategory(category: String): Map<LocalDate, Pair<Int, Double>> {
-        val urlStr = "${twilioApiBase()}/Accounts/$accountSid/Usage/Records/Daily.json" +
+        val urlStr = "$TWILIO_GLOBAL_BASE/Accounts/$accountSid/Usage/Records/Daily.json" +
                 "?Category=$category&StartDate=$startDate&EndDate=$endDate&PageSize=100"
         val credentials = Base64.getEncoder().encodeToString("$accountSid:$authToken".toByteArray())
         val connection = URL(urlStr).openConnection() as java.net.HttpURLConnection
