@@ -114,6 +114,18 @@ object ShopBackend {
         val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db)
         println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")
 
+        // Startup pass: once AMI is up, re-resolve each assigned SIM's current device
+        // (ttyUSB numbers change across reboots) and re-provision, so trunks come back
+        // on the right ports without any manual config. No-op until SIMs are assigned.
+        Thread({
+            var waited = 0
+            while (!amiClient.connected && waited < 60) { Thread.sleep(1000); waited++ }
+            if (amiClient.connected) {
+                runBlocking { runCatching { provisioner.provisionAllConfigured() }
+                    .onFailure { println("[Telephony] startup provisioning failed: ${it.message}") } }
+            }
+        }, "telephony-startup").apply { isDaemon = true }.start()
+
         // Instantiate route handlers
         val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)
         val customerApi = CustomerApi(db, telephonyService)

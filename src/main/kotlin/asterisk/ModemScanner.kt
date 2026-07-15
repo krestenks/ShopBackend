@@ -43,33 +43,38 @@ class ModemScanner(
         val physical = resolver.listPhysicalModems()
         if (physical.isEmpty()) return emptyList()
 
-        // Map each configured trunk to the USB port it currently sits on, so we can
-        // read a held modem's identity from AMI rather than AT-probing its busy port.
-        val configured = db.getAllConfiguredShopTelephonyConfigs()
-        val trunkByUsbPort: Map<String, Int> = configured.mapNotNull { cfg ->
-            val dev = cfg.modemDataDevice?.let { canonicalTty(it) } ?: return@mapNotNull null
-            val port = physical.firstOrNull { it.atDevice?.let { d -> canonicalTty(d) } == dev }?.usbPort
-            port?.let { it to cfg.shopId }
-        }.toMap()
+        // Which USB port each live chan_quectel trunk sits on, read from AMI (its
+        // "Data" device) — so we read a held modem's identity over AMI rather than
+        // AT-probing a busy port. Independent of the DB, so it's correct even before
+        // any shop has an IMSI assigned.
+        val heldByUsbPort: Map<String, String> = trunkUsbPorts(physical)
 
         val shopNames = db.getAllShops().associate { it.id to it.name }
 
         return physical.map { m ->
-            val heldShopId = trunkByUsbPort[m.usbPort]
+            val trunk = heldByUsbPort[m.usbPort]
             val base = DetectedModem(
                 usbPort = m.usbPort,
                 atDevice = m.atDevice,
                 alsaDevice = m.alsaDev,
-                held = heldShopId != null,
+                held = trunk != null,
             )
-            val filled = if (heldShopId != null) {
-                readFromAmi(base, config.trunkName(heldShopId))
-            } else {
-                probe(base)
-            }
+            val filled = if (trunk != null) readFromAmi(base, trunk) else probe(base)
             val shopId = filled.imsi?.let { db.findShopIdByImsi(it) }
             filled.copy(assignedShopId = shopId, assignedShopName = shopId?.let { shopNames[it] })
         }.sortedBy { it.usbPort }
+    }
+
+    /** usbPort → trunk name, for every live chan_quectel device (via AMI). */
+    private fun trunkUsbPorts(physical: List<PhysicalModem>): Map<String, String> {
+        val ami = amiClient ?: return emptyMap()
+        val result = mutableMapOf<String, String>()
+        for (trunk in ami.quectelDeviceStates().keys) {
+            val dataDev = ami.quectelDeviceState(trunk)["Data"] ?: continue
+            val port = physical.firstOrNull { canonicalTty(it.atDevice ?: "") == canonicalTty(dataDev) }?.usbPort
+            if (port != null) result[port] = trunk
+        }
+        return result
     }
 
     private fun readFromAmi(base: DetectedModem, trunk: String): DetectedModem {
@@ -127,18 +132,14 @@ class ModemScanner(
      * @return human-readable result.
      */
     fun sendTestSms(usbPort: String, toNumber: String, body: String): String {
-        val physical = resolver.listPhysicalModems().firstOrNull { it.usbPort == usbPort }
-            ?: return "modem $usbPort not found"
-        // Held trunk → send through chan_quectel.
-        val configured = db.getAllConfiguredShopTelephonyConfigs()
-        val heldShopId = configured.firstOrNull { cfg ->
-            cfg.modemDataDevice?.let { canonicalTty(it) } == physical.atDevice?.let { canonicalTty(it) }
-        }?.shopId
-        if (heldShopId != null && amiClient != null) {
-            val r = amiClient.sendSms(config.trunkName(heldShopId), toNumber, body)
-            return if (r.success) "sent via trunk ${config.trunkName(heldShopId)}" else "failed: ${r.detail}"
+        val all = resolver.listPhysicalModems()
+        val physical = all.firstOrNull { it.usbPort == usbPort } ?: return "modem $usbPort not found"
+        // Held trunk → send through chan_quectel; else AT-inject on the free port.
+        val trunk = trunkUsbPorts(all)[usbPort]
+        if (trunk != null && amiClient != null) {
+            val r = amiClient.sendSms(trunk, toNumber, body)
+            return if (r.success) "sent via trunk $trunk" else "failed: ${r.detail}"
         }
-        // Free modem → AT-inject.
         val path = physical.atDevice ?: return "no AT device for $usbPort"
         return atSendSms(path, toNumber, body)
     }
