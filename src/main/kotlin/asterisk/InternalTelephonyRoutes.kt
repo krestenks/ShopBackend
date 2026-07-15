@@ -8,6 +8,7 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.withTimeoutOrNull
 import telephony.TelephonyService
 import telephony.persistInboundSms
 import telephony.resolveShopSenderNumber
@@ -99,6 +100,15 @@ fun Routing.internalTelephonyRoutes(
             println("[Asterisk/call-inbound] REJECT blacklisted caller=$from shop=$shopId")
             call.respondText("reject")
             return@post
+        }
+
+        // CallApp name lookup — done SYNCHRONOUSLY (bounded) so the name is on the
+        // record for the FIRST call, not just subsequent ones. Only for callers we've
+        // never screened; the dialplan waits ~2 s before ringing, so this fits. The
+        // client has its own short timeout; the extra bound guards against a hang.
+        if (customerId != null && from.isNotBlank() && callAppScreening != null &&
+            db.getCustomerCallAppScreening(customerId) == null) {
+            withTimeoutOrNull(2500) { callAppScreening.screenCustomerNow(customerId, from) }
         }
 
         // 2. Effective open/closed (manager override wins over the schedule).
