@@ -49,8 +49,8 @@ data class SendSmsRequest(
 data class SendSmsResponse(
     val ok: Boolean,
     val messageId: Int = -1,
-    /** Provider message reference. JSON field name kept for app compatibility. */
-    val twilioSid: String? = null,
+    /** Provider message reference (chan_quectel trunk + timestamp). */
+    val providerSid: String? = null,
     val error: String? = null,
 )
 
@@ -160,10 +160,10 @@ fun Routing.smsRoutes(
             // Persist the outcome so the row reflects reality (provider id for delivery/cost
             // tracking, or the error) instead of being stuck forever at "queued".
             if (result.success) {
-                db.updateSmsStatus(msgId, status = "sent", twilioMessageSid = result.providerMessageId, errorMessage = null)
-                call.respond(SendSmsResponse(ok = true, messageId = msgId, twilioSid = result.providerMessageId))
+                db.updateSmsStatus(msgId, status = "sent", providerMessageSid = result.providerMessageId, errorMessage = null)
+                call.respond(SendSmsResponse(ok = true, messageId = msgId, providerSid = result.providerMessageId))
             } else {
-                db.updateSmsStatus(msgId, status = "failed", twilioMessageSid = null, errorMessage = result.errorMessage)
+                db.updateSmsStatus(msgId, status = "failed", providerMessageSid = null, errorMessage = result.errorMessage)
                 call.respond(
                     HttpStatusCode.OK,   // still 200 so the app can display the error
                     SendSmsResponse(ok = false, messageId = msgId, error = result.errorMessage)
@@ -358,7 +358,7 @@ fun persistInboundSms(
         toPhone           = toPhone,
         body              = body,
         status            = "received",
-        twilioMessageSid  = providerMessageSid,
+        providerMessageSid  = providerMessageSid,
     )
     val elapsedMs = (System.nanoTime() - elapsedSinceNs) / 1_000_000
     return if (insertedId == null) {

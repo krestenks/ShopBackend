@@ -245,7 +245,7 @@ enum class VoiceCallOutcome {
 data class VoiceCallRecord(
     val id: Int,
     val shopId: Int,
-    val twilioCallSid: String,
+    val providerCallId: String,
     val fromPhone: String,
     val toPhone: String,
     val customerType: String,          // "unknown" | "known"
@@ -261,8 +261,6 @@ data class VoiceCallRecord(
     val endedAt: Long?,
     val linkedBookingId: Int?,
     val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
-    /** Legacy operator-leg call id (unused since the Twilio removal; kept for JSON compat). */
-    val operatorLegSid: String? = null,
 )
 
 @Serializable
@@ -290,7 +288,7 @@ data class SmsMessage(
     val direction: String,
     /** "sent" | "queued" | "failed" | "received" */
     val status: String,
-    val twilioMessageSid: String?,
+    val providerMessageSid: String?,
     val errorMessage: String?,
     val createdAt: Long,
 )
@@ -615,7 +613,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             CREATE TABLE IF NOT EXISTS voice_call (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 shop_id INTEGER NOT NULL,
-                twilio_call_sid TEXT NOT NULL UNIQUE,
+                provider_call_id TEXT NOT NULL UNIQUE,
                 from_phone TEXT NOT NULL,
                 to_phone TEXT NOT NULL,
                 customer_type TEXT NOT NULL DEFAULT 'unknown',
@@ -650,7 +648,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 body                TEXT    NOT NULL DEFAULT '',
                 direction           TEXT    NOT NULL DEFAULT 'outbound',
                 status              TEXT    NOT NULL DEFAULT 'queued',
-                twilio_message_sid  TEXT,
+                provider_message_sid  TEXT,
                 error_message       TEXT,
                 created_at          INTEGER NOT NULL
             );
@@ -727,7 +725,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN business_name TEXT",
             "ALTER TABLE shop_voice_config ADD COLUMN phone_override TEXT",
             "ALTER TABLE voice_call ADD COLUMN operator_phone TEXT",
-            "ALTER TABLE voice_call ADD COLUMN operator_leg_sid TEXT",
             "ALTER TABLE shop_voice_config ADD COLUMN communication_retention_days INTEGER NOT NULL DEFAULT 5",
             "ALTER TABLE shop_voice_config ADD COLUMN customer_retention_days INTEGER NOT NULL DEFAULT 90",
             // Employee availability per shop (manager controlled): 1=available, 0=unavailable
@@ -852,7 +849,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "CREATE INDEX IF NOT EXISTS idx_sms_shop_dir_handled ON sms_message(shop_id, direction, handled_at)",
             // Idempotency guard against duplicate inbound inserts (webhook/handler retries).
             // Partial index so the many outbound rows with NULL sid do not collide.
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_twilio_sid ON sms_message(twilio_message_sid) WHERE twilio_message_sid IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_provider_sid ON sms_message(provider_message_sid) WHERE provider_message_sid IS NOT NULL",
             // Active-calls poll: WHERE shop_id=? AND is_active=1 ORDER BY started_at DESC.
             "CREATE INDEX IF NOT EXISTS idx_voice_call_shop_active_started ON voice_call(shop_id, is_active, started_at)",
         ).forEach { sql ->
@@ -1180,14 +1177,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /** Insert a new call log row immediately when the inbound call arrives. Returns the new row ID. */
-    fun createInboundCallLog(shopId: Int, twilioCallSid: String, fromPhone: String, toPhone: String): Int {
+    fun createInboundCallLog(shopId: Int, providerCallId: String, fromPhone: String, toPhone: String): Int {
         val sql = """
-            INSERT INTO voice_call (shop_id, twilio_call_sid, from_phone, to_phone, state, outcome, is_active, started_at)
+            INSERT INTO voice_call (shop_id, provider_call_id, from_phone, to_phone, state, outcome, is_active, started_at)
             VALUES (?, ?, ?, ?, 'INCOMING_CALL', 'IN_PROGRESS', 1, ?)
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
-            stmt.setString(2, twilioCallSid)
+            stmt.setString(2, providerCallId)
             stmt.setString(3, fromPhone)
             stmt.setString(4, toPhone)
             stmt.setLong(5, System.currentTimeMillis())
@@ -1315,12 +1312,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     /** Shared SELECT fragment used by all voice call queries. */
     private val CALL_SELECT = """
-        SELECT vc.id, vc.shop_id, vc.twilio_call_sid, vc.from_phone, vc.to_phone,
+        SELECT vc.id, vc.shop_id, vc.provider_call_id, vc.from_phone, vc.to_phone,
                vc.customer_type, vc.customer_id,
                c.name  AS customer_name,
                cs.name AS callapp_name,
                vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
-               vc.linked_booking_id, vc.operator_phone, vc.operator_leg_sid
+               vc.linked_booking_id, vc.operator_phone
         FROM voice_call vc
         LEFT JOIN customers c     ON c.id  = vc.customer_id
         -- Join screening via explicit customer_id first; fall back to a phone match for unknown callers
@@ -1354,10 +1351,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    fun getCallByTwilioSid(twilioCallSid: String): VoiceCallRecord? {
-        val sql = "$CALL_SELECT WHERE vc.twilio_call_sid = ?"
+    fun getCallByProviderCallId(providerCallId: String): VoiceCallRecord? {
+        val sql = "$CALL_SELECT WHERE vc.provider_call_id = ?"
         connection.prepareStatement(sql).use { stmt ->
-            stmt.setString(1, twilioCallSid)
+            stmt.setString(1, providerCallId)
             return buildCallRecordList(stmt.executeQuery()).firstOrNull()
         }
     }
@@ -1397,7 +1394,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             result += VoiceCallRecord(
                 id = rs.getInt("id"),
                 shopId = rs.getInt("shop_id"),
-                twilioCallSid = rs.getString("twilio_call_sid"),
+                providerCallId = rs.getString("provider_call_id"),
                 fromPhone = rs.getString("from_phone"),
                 toPhone = rs.getString("to_phone"),
                 customerType = rs.getString("customer_type"),
@@ -1411,22 +1408,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 endedAt = rs.getLong("ended_at").takeIf { !rs.wasNull() },
                 linkedBookingId = rs.getInt("linked_booking_id").takeIf { !rs.wasNull() },
                 operatorPhone = rs.getString("operator_phone"),
-                operatorLegSid = try { rs.getString("operator_leg_sid") } catch (_: Exception) { null },
             )
         }
         return result
-    }
-
-    /**
-     * Legacy: stored the operator-leg call id in the old whisper flow. Unused now.
-     * Kept only because historical rows may carry a value.
-     */
-    fun setCallOperatorLegSid(callId: Int, operatorLegSid: String) {
-        connection.prepareStatement("UPDATE voice_call SET operator_leg_sid = ? WHERE id = ?").use { stmt ->
-            stmt.setString(1, operatorLegSid.trim())
-            stmt.setInt(2, callId)
-            stmt.executeUpdate()
-        }
     }
 
     // === Shop opening hours ===
@@ -3443,13 +3427,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         body: String,
         direction: String,
         status: String,
-        twilioMessageSid: String? = null,
+        providerMessageSid: String? = null,
         errorMessage: String? = null,
     ): Int {
         val sql = """
             INSERT INTO sms_message
                 (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
-                 body, direction, status, twilio_message_sid, error_message, created_at)
+                 body, direction, status, provider_message_sid, error_message, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -3461,7 +3445,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(6, body)
             stmt.setString(7, direction)
             stmt.setString(8, status)
-            stmt.setString(9, twilioMessageSid)
+            stmt.setString(9, providerMessageSid)
             stmt.setString(10, errorMessage)
             stmt.setLong(11, System.currentTimeMillis())
             stmt.executeUpdate()
@@ -3478,7 +3462,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      *
      * Two guards, both evaluated atomically inside a single SQL statement (safe under
      * SQLite's single-writer model, whether on one shared connection or a pool):
-     *  - The partial UNIQUE index `idx_sms_twilio_sid` blocks exact webhook retries
+     *  - The partial UNIQUE index `idx_sms_provider_sid` blocks exact webhook retries
      *    (same MessageSid) — handled by `INSERT OR IGNORE`.
      *  - A content/time window blocks upstream/carrier double-delivery, where the same
      *    body arrives from the same number within [windowMs] but under a *different*
@@ -3492,7 +3476,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         toPhone: String,
         body: String,
         status: String,
-        twilioMessageSid: String?,
+        providerMessageSid: String?,
         windowMs: Long = 5_000,
     ): Int? {
         val now   = System.currentTimeMillis()
@@ -3500,7 +3484,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             INSERT OR IGNORE INTO sms_message
                 (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
-                 body, direction, status, twilio_message_sid, error_message, created_at)
+                 body, direction, status, provider_message_sid, error_message, created_at)
             SELECT ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, NULL, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM sms_message
@@ -3519,7 +3503,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(5, toPhone.trim())
             stmt.setString(6, body)
             stmt.setString(7, status)
-            stmt.setString(8, twilioMessageSid)
+            stmt.setString(8, providerMessageSid)
             stmt.setLong(9, now)
             stmt.setInt(10, shopId)
             stmt.setString(11, phone)
@@ -3559,7 +3543,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             INSERT INTO sms_message
                 (shop_id, customer_id, counterparty_phone, from_phone, to_phone,
-                 body, direction, status, twilio_message_sid, error_message, created_at)
+                 body, direction, status, provider_message_sid, error_message, created_at)
             SELECT ?, ?, ?, ?, ?, ?, 'outbound', ?, NULL, NULL, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM sms_message
@@ -3612,15 +3596,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /** Updates the delivery status (and provider sid / error) of an SMS row after sending. */
-    fun updateSmsStatus(id: Int, status: String, twilioMessageSid: String?, errorMessage: String?) {
+    fun updateSmsStatus(id: Int, status: String, providerMessageSid: String?, errorMessage: String?) {
         val sql = """
             UPDATE sms_message
-               SET status = ?, twilio_message_sid = ?, error_message = ?
+               SET status = ?, provider_message_sid = ?, error_message = ?
              WHERE id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setString(1, status)
-            stmt.setString(2, twilioMessageSid)
+            stmt.setString(2, providerMessageSid)
             stmt.setString(3, errorMessage)
             stmt.setInt(4, id)
             stmt.executeUpdate()
@@ -3631,7 +3615,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getSmsThread(shopId: Int, counterpartyPhone: String, limit: Int = 200): List<SmsMessage> {
         val sql = """
             SELECT id, shop_id, customer_id, counterparty_phone, from_phone, to_phone,
-                   body, direction, status, twilio_message_sid, error_message, created_at
+                   body, direction, status, provider_message_sid, error_message, created_at
             FROM sms_message
             WHERE shop_id = ? AND counterparty_phone = ?
             ORDER BY created_at ASC
@@ -4072,7 +4056,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 body = rs.getString("body") ?: "",
                 direction = rs.getString("direction"),
                 status = rs.getString("status"),
-                twilioMessageSid = rs.getString("twilio_message_sid"),
+                providerMessageSid = rs.getString("provider_message_sid"),
                 errorMessage = rs.getString("error_message"),
                 createdAt = rs.getLong("created_at"),
             )
@@ -4088,7 +4072,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getSmsMessagesForCustomer(customerId: Int, phone: String, limit: Int = 100): List<SmsMessage> {
         val sql = """
             SELECT id, shop_id, customer_id, counterparty_phone, from_phone, to_phone,
-                   body, direction, status, twilio_message_sid, error_message, created_at
+                   body, direction, status, provider_message_sid, error_message, created_at
             FROM sms_message
             WHERE customer_id = ? OR counterparty_phone = ?
             ORDER BY created_at DESC

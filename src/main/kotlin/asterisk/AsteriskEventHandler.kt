@@ -16,7 +16,7 @@ import org.asteriskjava.manager.event.HangupEvent
  *
  * Inbound call rows are created by the dialplan's CURL to
  * /api/internal/telephony/call/inbound, keyed by the Asterisk channel UNIQUEID
- * (stored in voice_call.twilio_call_sid — same column, provider-neutral role).
+ * (stored in voice_call.provider_call_id — same column, provider-neutral role).
  * This handler closes the loop:
  *
  *   DialEnd(ANSWER) on the GSM leg  → state BRIDGED_TO_OPERATOR
@@ -47,7 +47,7 @@ class AsteriskEventHandler(
     private fun onDialEnd(event: DialEndEvent) {
         if (!event.dialStatus.equals("ANSWER", ignoreCase = true)) return
         val uniqueId = event.uniqueId ?: return
-        val record = db.getCallByTwilioSid(uniqueId) ?: return
+        val record = db.getCallByProviderCallId(uniqueId) ?: return
         if (record.isActive) {
             db.updateCallState(record.id, VoiceCallState.BRIDGED_TO_OPERATOR, "sip_answered")
         }
@@ -57,7 +57,7 @@ class AsteriskEventHandler(
         val channel = event.channel ?: return
         if (!channel.startsWith("Quectel/", ignoreCase = true)) return
         val uniqueId = event.uniqueId ?: return
-        val record = db.getCallByTwilioSid(uniqueId) ?: return
+        val record = db.getCallByProviderCallId(uniqueId) ?: return
         if (!record.isActive) return
         val outcome = if (record.state == VoiceCallState.BRIDGED_TO_OPERATOR.name) {
             VoiceCallOutcome.OPERATOR_BRIDGED
