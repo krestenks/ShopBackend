@@ -32,7 +32,12 @@ class AsteriskProvisioner(
     suspend fun assignShopToImsi(shopId: Int, imsi: String): ShopTelephonyConfig {
         db.clearImsiFromOtherShops(imsi, keepShopId = shopId)
         val existing = db.getShopTelephonyConfig(shopId)
-        db.upsertShopTelephonyConfig(existing.copy(imsi = imsi.trim()))
+        // A different SIM means a different (unknown) number — clear the stale one.
+        val numberStillValid = existing.imsi == imsi.trim()
+        db.upsertShopTelephonyConfig(existing.copy(
+            imsi = imsi.trim(),
+            phoneNumber = if (numberStillValid) existing.phoneNumber else null,
+        ))
         return provisionShop(shopId)
     }
 

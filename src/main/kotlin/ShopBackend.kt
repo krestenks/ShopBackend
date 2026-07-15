@@ -120,7 +120,9 @@ object ShopBackend {
         Thread({
             var waited = 0
             while (!amiClient.connected && waited < 60) { Thread.sleep(1000); waited++ }
-            if (amiClient.connected) {
+            // Only re-provision when at least one shop is bound to a SIM — otherwise
+            // regenerating would wipe an existing hand-provisioned config to nothing.
+            if (amiClient.connected && db.getAllConfiguredShopTelephonyConfigs().isNotEmpty()) {
                 runBlocking { runCatching { provisioner.provisionAllConfigured() }
                     .onFailure { println("[Telephony] startup provisioning failed: ${it.message}") } }
             }
