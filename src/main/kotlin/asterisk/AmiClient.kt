@@ -118,6 +118,28 @@ class AmiClient(private val config: AsteriskConfig) {
     }
 
     /**
+     * Labeled fields from `quectel show device state <trunk>` (IMEI, IMSI, State,
+     * RSSI, "Provider Name", "GSM Registration Status", ...). Empty on failure.
+     * NOTE: chan_quectel caches IMSI/ICCID — after a hot SIM swap this can be stale
+     * until the modem is rebooted.
+     */
+    fun quectelDeviceState(trunk: String): Map<String, String> {
+        if (!connected) return emptyMap()
+        return try {
+            command("quectel show device state $trunk").mapNotNull { line ->
+                val i = line.indexOf(':')
+                if (i <= 0) return@mapNotNull null
+                val key = line.substring(0, i).trim()
+                val value = line.substring(i + 1).trim()
+                if (key.isEmpty()) null else key to value
+            }.toMap()
+        } catch (e: Exception) {
+            println("[AMI] quectel show device state $trunk failed: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    /**
      * Sends an SMS out of [trunkName] (e.g. "shop3"). Prefers the chan_quectel AMI
      * action; falls back to the CLI command (validated on the phone server) if the
      * action is missing in the installed driver build.

@@ -391,48 +391,110 @@ class WebAdmin(
             get("/telephony/setup") {
                 val shops = db.getAllShops()
                 val trunkStates = asteriskAdmin?.amiClient?.quectelDeviceStates().orEmpty()
+                val tmsg = call.request.queryParameters["tmsg"]
+                // Scanning holds the AT ports briefly; do it off the request thread.
+                val modems = if (asteriskAdmin != null && call.request.queryParameters["scan"] == "1") {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { asteriskAdmin.modemScanner.scan() }
+                } else emptyList()
 
                 call.respondAdminPage(
                     titleText = "Telephony setup",
-                    subtitle = "Per-shop GSM line readiness (self-hosted Asterisk)",
+                    subtitle = "Assign SIMs to shops (self-hosted Asterisk)",
                     activePath = "/telephony/setup",
                 ) {
+                    if (!tmsg.isNullOrBlank()) div("panel") { p { b { +tmsg } } }
+
+                    // ── Detected modems / SIMs ───────────────────────────────
                     div("panel") {
-                        h3 { +"Shop readiness" }
-                        table {
-                            thead {
-                                tr {
-                                    th { +"Shop" }
-                                    th { +"SIM number" }
-                                    th { +"Modem device" }
-                                    th { +"Trunk state" }
-                                    th { +"Provisioned" }
-                                    th { +"Business name" }
-                                    th { +"Opening hours" }
-                                    th { +"Actions" }
-                                }
+                        h3 { +"Modems / SIMs" }
+                        if (asteriskAdmin == null) {
+                            p { +"Telephony is not enabled on this backend." }
+                        } else {
+                            p("hint") {
+                                +"Each modem is identified by its SIM's IMSI. Assign a SIM to a shop and the backend resolves the device and provisions automatically. "
+                                +"Numbers aren't readable from these SIMs — use \"Test SMS\" to a phone you can read, then enter the number on the shop's row below."
                             }
-                            tbody {
-                                for (s in shops) {
-                                    val vc = db.getShopVoiceConfig(s.id)
-                                    val tele = db.getShopTelephonyConfig(s.id)
-                                    db.ensureDefaultShopOpeningHours(s.id)
-                                    val ohCount = db.getShopOpeningHours(s.id).size
-                                    tr {
-                                        td { +s.name }
-                                        td { +(tele.phoneNumber ?: "(missing)") }
-                                        td { +(tele.modemDataDevice ?: "(not assigned)") }
-                                        td { +(trunkStates["shop${s.id}"] ?: "-") }
-                                        td {
-                                            val ok = tele.provisionedAt != null
-                                            span("badge ${if (ok) "ok" else "warn"}") {
-                                                +(if (ok) "Yes" else "No")
+                            p { a(href = "/telephony/setup?scan=1", classes = "btn primary") { +"🔄 Scan modems" } }
+                            if (call.request.queryParameters["scan"] == "1") {
+                                if (modems.isEmpty()) {
+                                    p { +"No EC25 modems detected (running on the phone server?)." }
+                                } else {
+                                    table {
+                                        thead { tr {
+                                            th { +"USB" }; th { +"IMSI" }; th { +"IMEI" }; th { +"Provider" }
+                                            th { +"Signal" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
+                                        } }
+                                        tbody {
+                                            val unassignedShops = shops.filter { db.getShopTelephonyConfig(it.id).imsi.isNullOrBlank() }
+                                            for (m in modems) {
+                                                tr {
+                                                    td { code { +m.usbPort } }
+                                                    td { +(m.imsi ?: m.error ?: "-") }
+                                                    td { +(m.imei ?: "-") }
+                                                    td { +(m.provider ?: "-") }
+                                                    td { +(m.signal ?: "-") }
+                                                    td { +(m.trunkState ?: "-") }
+                                                    td { +(m.atDevice ?: "-") }
+                                                    td { +(m.assignedShopName ?: "(unassigned)") }
+                                                    td {
+                                                        if (m.imsi != null && m.assignedShopId == null && unassignedShops.isNotEmpty()) {
+                                                            form(action = "/telephony/assign", method = FormMethod.post) {
+                                                                hiddenInput { name = "imsi"; value = m.imsi }
+                                                                select {
+                                                                    name = "shopId"
+                                                                    option { value = ""; +"— shop —" }
+                                                                    for (s in unassignedShops) option { value = s.id.toString(); +s.name }
+                                                                }
+                                                                submitInput(classes = "btn") { value = "Assign" }
+                                                            }
+                                                        }
+                                                        form(action = "/telephony/test-sms", method = FormMethod.post) {
+                                                            hiddenInput { name = "usbPort"; value = m.usbPort }
+                                                            textInput { name = "to"; placeholder = "+45… (your phone)" }
+                                                            submitInput(classes = "btn") { value = "Test SMS" }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-                                        td { +(vc.businessName ?: "(not set)") }
-                                        td { +"$ohCount/7" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Shop readiness ───────────────────────────────────────
+                    div("panel") {
+                        h3 { +"Shops" }
+                        table {
+                            thead { tr {
+                                th { +"Shop" }; th { +"IMSI" }; th { +"Number" }; th { +"Device" }
+                                th { +"Trunk" }; th { +"Provisioned" }; th { +"Actions" }
+                            } }
+                            tbody {
+                                for (s in shops) {
+                                    val tele = db.getShopTelephonyConfig(s.id)
+                                    tr {
+                                        td { +s.name }
+                                        td { +(tele.imsi ?: "(none)") }
+                                        td { +(tele.phoneNumber ?: "(missing)") }
+                                        td { +(tele.modemDataDevice ?: "-") }
+                                        td { +(trunkStates["shop${s.id}"] ?: "-") }
                                         td {
-                                            a(href = "/shops/edit?id=${s.id}", classes = "btn") { +"Edit shop" }
+                                            span("badge ${if (tele.provisionedAt != null) "ok" else "warn"}") {
+                                                +(if (tele.provisionedAt != null) "Yes" else "No")
+                                            }
+                                        }
+                                        td {
+                                            a(href = "/shops/edit?id=${s.id}", classes = "btn") { +"Edit" }
+                                            if (!tele.imsi.isNullOrBlank() && asteriskAdmin != null) {
+                                                +" "
+                                                form(action = "/telephony/unassign", method = FormMethod.post) {
+                                                    style = "display:inline"
+                                                    hiddenInput { name = "shopId"; value = s.id.toString() }
+                                                    submitInput(classes = "btn danger") { value = "Unassign" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -983,13 +1045,18 @@ class WebAdmin(
                                 p { b { +tmsg } }
                             }
                             p("hint") {
-                                +"Status: "
-                                if (!asteriskAdmin.amiClient.connected) {
-                                    +"⚠️ AMI not connected (is Asterisk running?)"
+                                +"SIM (IMSI): "
+                                if (tele.imsi.isNullOrBlank()) {
+                                    em { +"none — assign a modem on the " }
+                                    a(href = "/telephony/setup") { +"Telephony page" }
                                 } else {
-                                    +("trunk $trunkName: " + (trunkState ?: "not loaded in chan_quectel"))
+                                    code { +tele.imsi!! }
+                                    +"  •  trunk $trunkName: "
+                                    +(if (!asteriskAdmin.amiClient.connected) "AMI offline"
+                                      else trunkState ?: "not loaded")
+                                    +"  •  device ${tele.modemDataDevice ?: "unresolved"}"
                                 }
-                                +" — last provisioned: "
+                                +"  •  last provisioned: "
                                 +(tele.provisionedAt?.let {
                                     java.time.Instant.ofEpochMilli(it)
                                         .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
@@ -999,43 +1066,20 @@ class WebAdmin(
                             form(action = "/shops/telephony/save", method = FormMethod.post) {
                                 hiddenInput { name = "id"; value = id.toString() }
                                 label { +"SIM phone number (E.164)" }
-                                br()
+                                p("hint") { +"These SIMs don't report their own number — use \"Send test SMS\" to a phone you can read, then type the number here." }
                                 textInput {
                                     name = "telephony_phone_number"
                                     value = tele.phoneNumber ?: ""
                                     placeholder = "+4512345678"
                                 }
-                                br(); br()
-                                label { +"Modem AT/data device" }
-                                p("hint") {
-                                    +"Use a stable udev symlink (e.g. /dev/ttyQuectelShop$id), not a raw /dev/ttyUSBn. "
-                                    a(href = "/admin/telephony/scan?shopId=$id") { +"Scan for modems" }
-                                }
-                                textInput {
-                                    name = "telephony_modem_device"
-                                    value = tele.modemDataDevice ?: ""
-                                    placeholder = "/dev/ttyQuectelShop$id"
-                                }
-                                br(); br()
-                                label { +"ALSA audio device (UAC)" }
-                                p("hint") { +"e.g. hw:EC25EUX — must be unique per modem when several are plugged in." }
-                                textInput {
-                                    name = "telephony_alsa_device"
-                                    value = tele.modemAlsaDevice ?: ""
-                                    placeholder = "hw:EC25EUX"
-                                }
-                                br(); br()
-                                p {
-                                    +"SIP account for the manager app: "
-                                    b { +asteriskAdmin.config.endpointId(id) }
-                                    +" / "
-                                    if (tele.sipPassword.isNullOrBlank()) {
-                                        em { +"password generated on first provisioning" }
-                                    } else {
-                                        code { +tele.sipPassword!! }
-                                    }
-                                }
-                                submitInput(classes = "btn primary") { value = "Save & Provision Asterisk" }
+                                +" "
+                                submitInput(classes = "btn primary") { value = "Save number" }
+                            }
+                            p {
+                                +"SIP account for the manager app: "
+                                b { +asteriskAdmin.config.endpointId(id) }
+                                +" / "
+                                if (tele.sipPassword.isNullOrBlank()) em { +"generated on provisioning" } else code { +tele.sipPassword!! }
                             }
                             form(action = "/shops/telephony/regenerate-sip", method = FormMethod.post) {
                                 hiddenInput { name = "id"; value = id.toString() }
@@ -1045,11 +1089,13 @@ class WebAdmin(
                                         "return confirm('Generate a new SIP password? The manager app must fetch credentials again before it can register.')"
                                 }
                             }
-                            form(action = "/shops/telephony/test-sms", method = FormMethod.post) {
-                                hiddenInput { name = "id"; value = id.toString() }
-                                textInput { name = "test_to_phone"; placeholder = "+45xxxxxxxx" }
-                                +" "
-                                submitInput(classes = "btn") { value = "Send test SMS via this shop's SIM" }
+                            if (!tele.imsi.isNullOrBlank()) {
+                                form(action = "/shops/telephony/test-sms", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = id.toString() }
+                                    textInput { name = "test_to_phone"; placeholder = "+45xxxxxxxx" }
+                                    +" "
+                                    submitInput(classes = "btn") { value = "Send test SMS via this shop's SIM" }
+                                }
                             }
                         }
 
@@ -1135,16 +1181,8 @@ class WebAdmin(
                     val existing = db.getShopTelephonyConfig(sid)
                     db.upsertShopTelephonyConfig(existing.copy(
                         phoneNumber = params["telephony_phone_number"]?.trim()?.takeIf { it.isNotBlank() },
-                        modemDataDevice = params["telephony_modem_device"]?.trim()?.takeIf { it.isNotBlank() },
-                        modemAlsaDevice = params["telephony_alsa_device"]?.trim()?.takeIf { it.isNotBlank() },
                     ))
-                    val msg = try {
-                        asteriskAdmin.provisioner.provisionShop(sid)
-                        "✅ Saved and provisioned."
-                    } catch (e: Exception) {
-                        "⚠️ Saved, but provisioning failed: ${e.message}"
-                    }
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number saved.", Charsets.UTF_8)}")
                 }
 
                 post("/shops/telephony/regenerate-sip") {
@@ -1170,83 +1208,53 @@ class WebAdmin(
                         "⚠️ Enter a destination number for the test SMS."
                     } else {
                         val from = telephony.resolveShopSenderNumber(db, sid)
-                        val result = telephonyService.sendSms(sid, from, to, "Test SMS from shop backend (shop $sid)")
-                        if (result.success) "✅ Test SMS queued to $to." else "⚠️ Test SMS failed: ${result.errorMessage ?: result.body}"
+                        val result = telephonyService.sendSms(sid, from, to, "Test SMS — shop $sid. Reply with nothing; note the sender number.")
+                        if (result.success) "✅ Test SMS sent to $to. Read the sender number on that phone and enter it above."
+                        else "⚠️ Test SMS failed: ${result.errorMessage ?: result.body}"
                     }
                     call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
-                get("/admin/telephony/scan") {
-                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
-                    val modems = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        asteriskAdmin.modemScanner.scan()
-                    }
-                    call.respondAdminPage(
-                        titleText = "Modem scan",
-                        subtitle = "Detected serial devices on the phone server",
-                        activePath = "/shops",
-                    ) {
-                        div("panel") {
-                            if (modems.isEmpty()) {
-                                p { +"No /dev/ttyUSB* devices found (is this running on the phone server?)." }
-                            } else {
-                                table {
-                                    tr {
-                                        th { +"Device" }
-                                        th { +"udev aliases" }
-                                        th { +"Assigned to" }
-                                        th { +"Asterisk state" }
-                                        th { +"IMSI" }
-                                        th { +"Signal" }
-                                        th { +"Number" }
-                                        if (shopId != null) th { +"" }
-                                    }
-                                    for (m in modems) {
-                                        tr {
-                                            td { code { +m.devicePath } }
-                                            td { +m.aliases.joinToString(", ") }
-                                            td { +(m.assignedShopId?.let { "shop $it" } ?: "-") }
-                                            td { +(m.asteriskState ?: if (m.probed) "-" else "?") }
-                                            td { +(m.imsi ?: m.probeError ?: "-") }
-                                            td { +(m.signalStrength ?: "-") }
-                                            td { +(m.phoneNumber ?: "-") }
-                                            if (shopId != null) {
-                                                td {
-                                                    if (m.assignedShopId == null) {
-                                                        // Prefer the stable udev alias over the raw ttyUSB path.
-                                                        val device = m.aliases.firstOrNull() ?: m.devicePath
-                                                        form(action = "/admin/telephony/assign", method = FormMethod.post) {
-                                                            hiddenInput { name = "shopId"; value = shopId.toString() }
-                                                            hiddenInput { name = "device"; value = device }
-                                                            submitInput(classes = "btn") { value = "Use for shop $shopId" }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                p("hint") {
-                                    +"Ports already assigned to a shop or active in chan_quectel are not AT-probed (the driver owns them). "
-                                    +"Raw ttyUSB numbering changes on replug — always assign via a udev symlink when available."
-                                }
-                            }
-                            if (shopId != null) {
-                                p { a(href = "/shops/edit?id=$shopId", classes = "btn") { +"Back to shop $shopId" } }
-                            }
+                // Assign a scanned SIM (by IMSI) to a shop, then auto-provision.
+                post("/telephony/assign") {
+                    val params = call.receiveParameters()
+                    val imsi = params["imsi"]?.trim().orEmpty()
+                    val sid = params["shopId"]?.toIntOrNull()
+                    val msg = when {
+                        imsi.isBlank() -> "⚠️ Missing IMSI."
+                        sid == null || sid <= 0 -> "⚠️ Pick a shop."
+                        else -> try {
+                            asteriskAdmin.provisioner.assignShopToImsi(sid, imsi)
+                            "✅ SIM $imsi assigned and provisioned."
+                        } catch (e: Exception) {
+                            "⚠️ Assign failed: ${e.message}"
                         }
                     }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
-                post("/admin/telephony/assign") {
+                // Unassign a shop's SIM.
+                post("/telephony/unassign") {
                     val params = call.receiveParameters()
                     val sid = params["shopId"]?.toIntOrNull()
-                        ?: return@post call.respondRedirect("/shops")
-                    val device = params["device"]?.trim().orEmpty()
-                    if (device.isNotBlank()) {
-                        db.upsertShopTelephonyConfig(db.getShopTelephonyConfig(sid).copy(modemDataDevice = device))
+                    if (sid != null) runCatching { asteriskAdmin.provisioner.unassignShop(sid) }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode("SIM unassigned.", Charsets.UTF_8)}")
+                }
+
+                // Send a test SMS from a specific modem (by USB port) to discover its number.
+                post("/telephony/test-sms") {
+                    val params = call.receiveParameters()
+                    val usbPort = params["usbPort"]?.trim().orEmpty()
+                    val to = params["to"]?.trim().orEmpty()
+                    val msg = if (usbPort.isBlank() || to.isBlank()) {
+                        "⚠️ Need a modem and a destination number."
+                    } else {
+                        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            asteriskAdmin.modemScanner.sendTestSms(usbPort, to, "Test SMS from modem $usbPort — note this sender number.")
+                        }
+                        "Test SMS to $to from modem $usbPort: $r. Read the sender number on that phone."
                     }
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode("Modem device set to $device — review and provision.", Charsets.UTF_8)}")
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
             }
 

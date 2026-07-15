@@ -194,11 +194,17 @@ data class ShopVoiceConfig(
 @Serializable
 data class ShopTelephonyConfig(
     val shopId: Int,
-    /** E.164 number of the SIM in this shop's modem. */
+    /**
+     * The SIM's IMSI — the STABLE assignment key. A shop is bound to a SIM, not a
+     * USB port; the device paths below are resolved from whichever modem currently
+     * holds this IMSI, so a SIM moved to another modem follows the shop.
+     */
+    val imsi: String? = null,
+    /** E.164 number of the SIM. Entered manually (not readable from these SIMs). */
     val phoneNumber: String? = null,
-    /** Stable udev symlink to the modem's AT/data port, e.g. /dev/ttyQuectelShop1. */
+    /** Last-resolved AT/data device for this shop's SIM, e.g. /dev/ttyUSB3. Cached; re-resolved on scan/provision. */
     val modemDataDevice: String? = null,
-    /** ALSA device for UAC voice audio, e.g. hw:EC25EUX. */
+    /** Last-resolved ALSA device for UAC voice audio, e.g. hw:CARD=EC25Shop1. Cached. */
     val modemAlsaDevice: String? = null,
     /** SIP password the manager app registers with (username = shop{id}-manager). */
     val sipPassword: String? = null,
@@ -576,11 +582,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             """
             CREATE TABLE IF NOT EXISTS shop_telephony_config (
                 shop_id INTEGER PRIMARY KEY,
-                -- GSM phone number of the SIM in this shop's modem (E.164)
+                -- SIM IMSI: the stable assignment key (a shop is bound to a SIM)
+                imsi TEXT,
+                -- GSM phone number of the SIM (E.164), entered manually
                 phone_number TEXT,
-                -- AT/data port of the modem, as a stable udev symlink (e.g. /dev/ttyQuectelShop1)
+                -- Last-resolved AT/data device (e.g. /dev/ttyUSB3), re-resolved from the IMSI on scan/provision
                 modem_data_device TEXT,
-                -- ALSA device for UAC voice audio (e.g. hw:EC25EUX)
+                -- Last-resolved ALSA device for UAC voice audio (e.g. hw:CARD=EC25Shop1)
                 modem_alsa_device TEXT,
                 -- SIP credential the manager app registers with (username = shop{id}-manager)
                 sip_password TEXT,
@@ -731,6 +739,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
             // Price-list SMS footer appended when manager taps "Send price list" in the app
             "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
+            // IMSI-keyed telephony assignment (shop bound to a SIM, not a USB port)
+            "ALTER TABLE shop_telephony_config ADD COLUMN imsi TEXT",
             // Appointment workflow status tracking
             "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
@@ -934,50 +944,46 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     // ─── Self-hosted telephony (Asterisk/Quectel) config ─────────────────────
 
+    private fun readTelephonyRow(rs: java.sql.ResultSet) = ShopTelephonyConfig(
+        shopId = rs.getInt("shop_id"),
+        imsi = rs.getString("imsi"),
+        phoneNumber = rs.getString("phone_number"),
+        modemDataDevice = rs.getString("modem_data_device"),
+        modemAlsaDevice = rs.getString("modem_alsa_device"),
+        sipPassword = rs.getString("sip_password"),
+        provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
+    )
+
+    private val telephonySelect =
+        "SELECT shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at FROM shop_telephony_config"
+
     fun getShopTelephonyConfig(shopId: Int): ShopTelephonyConfig {
-        val sql = """
-            SELECT shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at
-            FROM shop_telephony_config WHERE shop_id = ?
-        """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        connection.prepareStatement("$telephonySelect WHERE shop_id = ?").use { stmt ->
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
-            return if (rs.next()) {
-                ShopTelephonyConfig(
-                    shopId = rs.getInt("shop_id"),
-                    phoneNumber = rs.getString("phone_number"),
-                    modemDataDevice = rs.getString("modem_data_device"),
-                    modemAlsaDevice = rs.getString("modem_alsa_device"),
-                    sipPassword = rs.getString("sip_password"),
-                    provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
-                )
-            } else {
-                ShopTelephonyConfig(shopId)
-            }
+            return if (rs.next()) readTelephonyRow(rs) else ShopTelephonyConfig(shopId)
         }
     }
 
-    /** All shops that have a telephony row with at least a modem device configured. */
-    fun getAllConfiguredShopTelephonyConfigs(): List<ShopTelephonyConfig> {
-        val sql = """
-            SELECT shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at
-            FROM shop_telephony_config
-            WHERE modem_data_device IS NOT NULL AND trim(modem_data_device) != ''
-            ORDER BY shop_id
-        """.trimIndent()
-        val result = mutableListOf<ShopTelephonyConfig>()
-        connection.prepareStatement(sql).use { stmt ->
+    /** Shop id currently assigned to this SIM IMSI, or null. */
+    fun findShopIdByImsi(imsi: String): Int? {
+        val norm = imsi.trim()
+        if (norm.isBlank()) return null
+        connection.prepareStatement("SELECT shop_id FROM shop_telephony_config WHERE imsi = ? LIMIT 1").use { stmt ->
+            stmt.setString(1, norm)
             val rs = stmt.executeQuery()
-            while (rs.next()) {
-                result += ShopTelephonyConfig(
-                    shopId = rs.getInt("shop_id"),
-                    phoneNumber = rs.getString("phone_number"),
-                    modemDataDevice = rs.getString("modem_data_device"),
-                    modemAlsaDevice = rs.getString("modem_alsa_device"),
-                    sipPassword = rs.getString("sip_password"),
-                    provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
-                )
-            }
+            return if (rs.next()) rs.getInt("shop_id") else null
+        }
+    }
+
+    /** All shops bound to a SIM (imsi set) — the assignment source of truth. */
+    fun getAllConfiguredShopTelephonyConfigs(): List<ShopTelephonyConfig> {
+        val result = mutableListOf<ShopTelephonyConfig>()
+        connection.prepareStatement(
+            "$telephonySelect WHERE imsi IS NOT NULL AND trim(imsi) != '' ORDER BY shop_id"
+        ).use { stmt ->
+            val rs = stmt.executeQuery()
+            while (rs.next()) result += readTelephonyRow(rs)
         }
         return result
     }
@@ -985,9 +991,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun upsertShopTelephonyConfig(config: ShopTelephonyConfig) {
         val sql = """
             INSERT INTO shop_telephony_config
-                (shop_id, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
+                imsi = excluded.imsi,
                 phone_number = excluded.phone_number,
                 modem_data_device = excluded.modem_data_device,
                 modem_alsa_device = excluded.modem_alsa_device,
@@ -996,11 +1003,23 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, config.shopId)
-            stmt.setString(2, config.phoneNumber?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(3, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(4, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(5, config.sipPassword?.takeIf { it.isNotBlank() })
-            if (config.provisionedAt != null) stmt.setLong(6, config.provisionedAt) else stmt.setNull(6, java.sql.Types.BIGINT)
+            stmt.setString(2, config.imsi?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(3, config.phoneNumber?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(4, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(5, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(6, config.sipPassword?.takeIf { it.isNotBlank() })
+            if (config.provisionedAt != null) stmt.setLong(7, config.provisionedAt) else stmt.setNull(7, java.sql.Types.BIGINT)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Clears any shop currently bound to [imsi] except [keepShopId] (a SIM maps to one shop). */
+    fun clearImsiFromOtherShops(imsi: String, keepShopId: Int) {
+        connection.prepareStatement(
+            "UPDATE shop_telephony_config SET imsi = NULL WHERE imsi = ? AND shop_id != ?"
+        ).use { stmt ->
+            stmt.setString(1, imsi.trim())
+            stmt.setInt(2, keepShopId)
             stmt.executeUpdate()
         }
     }

@@ -95,6 +95,7 @@ object ShopBackend {
         val amiClient = AmiClient(asteriskConfig).also { it.start() }
         AsteriskEventHandler(amiClient, db).start()
         val ariClient = AriClient(asteriskConfig)
+        val modemScanner = ModemScanner(db, asteriskConfig, amiClient)
         val provisioner = AsteriskProvisioner(
             db = db,
             config = asteriskConfig,
@@ -102,12 +103,13 @@ object ShopBackend {
             quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
             dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
             promptGenerator = PromptGenerator(asteriskConfig),
+            modemScanner = modemScanner,
         )
         val asteriskAdmin = AsteriskAdmin(
             config = asteriskConfig,
             amiClient = amiClient,
             provisioner = provisioner,
-            modemScanner = ModemScanner(db, asteriskConfig, amiClient),
+            modemScanner = modemScanner,
         )
         val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db)
         println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")

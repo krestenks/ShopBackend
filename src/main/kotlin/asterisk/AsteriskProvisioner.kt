@@ -21,18 +21,30 @@ class AsteriskProvisioner(
     private val quectelConfigWriter: QuectelConfigWriter,
     private val dialplanWriter: DialplanWriter,
     private val promptGenerator: PromptGenerator,
+    private val modemScanner: ModemScanner,
 ) {
 
     /**
-     * Provisions one shop. Requires modem_data_device to be set in shop_telephony_config.
-     * Generates and persists a SIP password on first provisioning.
+     * Binds a shop to a SIM (by IMSI) and provisions it. The IMSI is the stable key;
+     * the physical modem holding it is resolved dynamically. If that SIM was bound to
+     * another shop it's moved here (a SIM maps to one shop).
+     */
+    suspend fun assignShopToImsi(shopId: Int, imsi: String): ShopTelephonyConfig {
+        db.clearImsiFromOtherShops(imsi, keepShopId = shopId)
+        val existing = db.getShopTelephonyConfig(shopId)
+        db.upsertShopTelephonyConfig(existing.copy(imsi = imsi.trim()))
+        return provisionShop(shopId)
+    }
+
+    /**
+     * Provisions one shop. Requires an IMSI to be assigned. Resolves the current
+     * modem for that IMSI (auto-following a SIM moved to another slot), caches its
+     * device paths, then (re)writes all config and reloads.
      * @return the (possibly updated) telephony config, including the SIP password.
      */
     suspend fun provisionShop(shopId: Int): ShopTelephonyConfig {
         var telephony = db.getShopTelephonyConfig(shopId)
-        require(!telephony.modemDataDevice.isNullOrBlank()) {
-            "Shop $shopId has no modem_data_device configured"
-        }
+        require(!telephony.imsi.isNullOrBlank()) { "Shop $shopId has no SIM (IMSI) assigned" }
 
         if (telephony.sipPassword.isNullOrBlank()) {
             telephony = telephony.copy(sipPassword = generateSipPassword())
@@ -42,10 +54,11 @@ class AsteriskProvisioner(
         ariClient.upsertEndpoint(shopId, telephony.sipPassword!!)
         regenerateShopPrompts(shopId)
         promptGenerator.generateSharedPrompts()
-        regenerateFiles()
+        regenerateFiles()   // resolves the current modem for every shop's IMSI, then writes + reloads
         db.markShopTelephonyProvisioned(shopId)
-        println("[Asterisk] Provisioned shop $shopId (trunk=${config.trunkName(shopId)}, endpoint=${config.endpointId(shopId)})")
-        return db.getShopTelephonyConfig(shopId)
+        val after = db.getShopTelephonyConfig(shopId)
+        println("[Asterisk] Provisioned shop $shopId (trunk=${config.trunkName(shopId)}, imsi=${after.imsi}, device=${after.modemDataDevice})")
+        return after
     }
 
     /**
@@ -79,6 +92,30 @@ class AsteriskProvisioner(
     }
 
     /**
+     * Resolves, for every shop bound to a SIM, the physical modem currently holding
+     * that IMSI and caches its device paths in the DB. This is what makes a SIM moved
+     * to a different modem automatically follow its shop.
+     */
+    private fun resolveDevicesForAllShops() {
+        val detected = runCatching { modemScanner.scan() }.getOrDefault(emptyList())
+        if (detected.isEmpty()) return
+        for (shop in db.getAllConfiguredShopTelephonyConfigs()) {
+            val imsi = shop.imsi ?: continue
+            val modem = detected.firstOrNull { it.imsi == imsi }
+            if (modem == null) {
+                println("[Asterisk] WARN shop ${shop.shopId}: no modem currently reports IMSI $imsi")
+                continue
+            }
+            if (modem.atDevice != shop.modemDataDevice || modem.alsaDevice != shop.modemAlsaDevice) {
+                db.upsertShopTelephonyConfig(shop.copy(
+                    modemDataDevice = modem.atDevice,
+                    modemAlsaDevice = modem.alsaDevice,
+                ))
+            }
+        }
+    }
+
+    /**
      * Re-renders one shop's TTS prompts from its voice-config texts. Called on
      * provisioning and whenever the voice config is saved in the admin UI
      * (prompt files are read per call, so no Asterisk reload is needed).
@@ -88,9 +125,18 @@ class AsteriskProvisioner(
     }
 
     private fun regenerateFiles() {
-        val shops = db.getAllConfiguredShopTelephonyConfigs()
+        resolveDevicesForAllShops()
+        // Only write trunks whose device actually resolved (a modem is present).
+        val shops = db.getAllConfiguredShopTelephonyConfigs().filter { !it.modemDataDevice.isNullOrBlank() }
         quectelConfigWriter.regenerate(shops)
         dialplanWriter.regenerate(shops)
+    }
+
+    /** Removes a shop's SIM binding and re-provisions the rest. */
+    suspend fun unassignShop(shopId: Int) {
+        val cfg = db.getShopTelephonyConfig(shopId)
+        db.upsertShopTelephonyConfig(cfg.copy(imsi = null, modemDataDevice = null, modemAlsaDevice = null))
+        deprovisionShop(shopId)
     }
 
     private fun generateSipPassword(): String {
