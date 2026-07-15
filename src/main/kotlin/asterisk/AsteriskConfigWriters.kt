@@ -15,9 +15,24 @@ internal fun writeAtomically(target: Path, content: String) {
     val tmp = Files.createTempFile(target.parent, target.fileName.toString(), ".tmp")
     try {
         Files.writeString(tmp, content)
+        makeWorldReadable(tmp)
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     } finally {
         Files.deleteIfExists(tmp)
+    }
+}
+
+/**
+ * createTempFile defaults to mode 600, which the rename preserves — leaving the
+ * asterisk user unable to read the result. An unreadable quectel_shops.conf is
+ * fatal: the failed #include makes chan_quectel's config load return null and
+ * the driver segfaults (observed on the phone server). Force 644.
+ */
+internal fun makeWorldReadable(file: Path) {
+    try {
+        Files.setPosixFilePermissions(file, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
+    } catch (_: UnsupportedOperationException) {
+        // Non-POSIX filesystem (Windows dev machine) — irrelevant there.
     }
 }
 

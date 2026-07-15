@@ -76,6 +76,7 @@ class PromptGenerator(private val config: AsteriskConfig) {
                 }.isSuccess
                 val source = if (soxOk) downsampled else rawWav
 
+                makeWorldReadable(source.toPath())
                 Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
                 if (!soxOk) println("[Prompts] sox unavailable — wrote $baseName.wav at 16 kHz (Asterisk will transcode)")
                 Files.deleteIfExists(downsampled.toPath())
