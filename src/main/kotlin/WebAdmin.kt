@@ -69,7 +69,7 @@ class WebAdmin(
                         NavItem("/appointments", "Appointments", "📅"),
                         NavItem("/customers", "Customers", "👤"),
                         NavItem("/reports", "Reports", "💰"),
-                        NavItem("/twilio/setup", "Twilio setup", "📞"),
+                        NavItem("/telephony/setup", "Telephony setup", "📞"),
                         NavItem("/test-booking-link", "Booking link", "🔗"),
                         NavItem("/setup-app", "Install app", "📲"),
                         NavItem("/admin/owners", "Owners", "🏢"),
@@ -388,39 +388,26 @@ class WebAdmin(
                 }
             }
 
-            get("/twilio/setup") {
+            get("/telephony/setup") {
                 val shops = db.getAllShops()
-                val baseUrl = PublicBaseUrl.fromCall(call).trimEnd('/')
-                val voiceWebhook = "$baseUrl/api/twilio/voice/welcome"
+                val trunkStates = asteriskAdmin?.amiClient?.quectelDeviceStates().orEmpty()
 
                 call.respondAdminPage(
-                    titleText = "Twilio setup",
-                    subtitle = "Configure your Twilio number webhooks",
-                    activePath = "/twilio/setup",
+                    titleText = "Telephony setup",
+                    subtitle = "Per-shop GSM line readiness (self-hosted Asterisk)",
+                    activePath = "/telephony/setup",
                 ) {
-                    div("panel") {
-                        p {
-                            +"For each shop Twilio number, configure in Twilio Console: Phone Numbers → (number) → Voice & Fax → 'A call comes in' → Webhook (POST)."
-                        }
-                        p {
-                            +"Webhook URL to paste: "
-                            code { +voiceWebhook }
-                        }
-                        p("hint") {
-                            +"This endpoint returns TwiML that plays the welcome message (press 1 = SMS booking link, press 2 = forward to operator when open)."
-                        }
-                    }
-
                     div("panel") {
                         h3 { +"Shop readiness" }
                         table {
                             thead {
                                 tr {
                                     th { +"Shop" }
-                                    th { +"Shop Twilio #" }
-                                    th { +"Manager (operator)" }
+                                    th { +"SIM number" }
+                                    th { +"Modem device" }
+                                    th { +"Trunk state" }
+                                    th { +"Provisioned" }
                                     th { +"Business name" }
-                                    th { +"Welcome" }
                                     th { +"Opening hours" }
                                     th { +"Actions" }
                                 }
@@ -428,22 +415,21 @@ class WebAdmin(
                             tbody {
                                 for (s in shops) {
                                     val vc = db.getShopVoiceConfig(s.id)
+                                    val tele = db.getShopTelephonyConfig(s.id)
                                     db.ensureDefaultShopOpeningHours(s.id)
                                     val ohCount = db.getShopOpeningHours(s.id).size
-                                    val welcomeOk = vc.welcomeOpenMessage.isNotBlank() && vc.welcomeClosedMessage.isNotBlank()
                                     tr {
                                         td { +s.name }
-                                        td { +(vc.twilioNumber ?: "(missing)") }
+                                        td { +(tele.phoneNumber ?: "(missing)") }
+                                        td { +(tele.modemDataDevice ?: "(not assigned)") }
+                                        td { +(trunkStates["shop${s.id}"] ?: "-") }
                                         td {
-                                            val managerPhone = db.getManagerPhoneForShop(s.id)
-                                            +(managerPhone ?: "(no manager)")
-                                        }
-                                        td { +(vc.businessName ?: "(not set)") }
-                                        td {
-                                            span("badge ${if (welcomeOk) "ok" else "warn"}") {
-                                                +(if (welcomeOk) "OK" else "Missing")
+                                            val ok = tele.provisionedAt != null
+                                            span("badge ${if (ok) "ok" else "warn"}") {
+                                                +(if (ok) "Yes" else "No")
                                             }
                                         }
+                                        td { +(vc.businessName ?: "(not set)") }
                                         td { +"$ohCount/7" }
                                         td {
                                             a(href = "/shops/edit?id=${s.id}", classes = "btn") { +"Edit shop" }
@@ -851,22 +837,9 @@ class WebAdmin(
                             }
 
                             hr()
-                            h3 { +"Twilio Voice / Welcome message" }
+                            h3 { +"Voice / Welcome message" }
 
-                            label { +"Shop Twilio number (E.164):" }
-                            br()
-                            textInput {
-                                name = "twilio_number"
-                                value = voiceConfig.twilioNumber ?: ""
-                                placeholder = "+4512345678"
-                            }
-                            br(); br()
-
-                            label { +"Operator phone (E.164) for call forwarding:" }
-                            br()
-                            p { em { +"Operator: derived automatically from the shop's assigned manager phone." } }
-                            // business_name
-                            label { +"Business name (spoken in whisper)" }
+                            label { +"Business name" }
                             textInput {
                                 name = "business_name"
                                 value = voiceConfig.businessName ?: ""
@@ -1196,7 +1169,7 @@ class WebAdmin(
                     val msg = if (to.isBlank()) {
                         "⚠️ Enter a destination number for the test SMS."
                     } else {
-                        val from = telephony.resolveShopSenderNumber(db, telephonyService, sid)
+                        val from = telephony.resolveShopSenderNumber(db, sid)
                         val result = telephonyService.sendSms(sid, from, to, "Test SMS from shop backend (shop $sid)")
                         if (result.success) "✅ Test SMS queued to $to." else "⚠️ Test SMS failed: ${result.errorMessage ?: result.body}"
                     }
@@ -1291,7 +1264,6 @@ class WebAdmin(
                     // Voice config — operator_phone removed; operator comes from manager phone
                     val voice = ShopVoiceConfig(
                         shopId = id,
-                        twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
                         businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },
                         temporaryOperatorClosed = params["temporary_operator_closed"] == "on",
                         temporaryOperatorClosedMessage = params["temporary_operator_closed_message"]?.trim().orEmpty()
@@ -2857,11 +2829,8 @@ class WebAdmin(
                             }
 
                             hr()
-                            h3 { +"Twilio Voice / Welcome message" }
-                            label { +"Shop Twilio number (E.164):" }; br()
-                            textInput { name = "twilio_number"; value = voiceConfig.twilioNumber ?: ""; placeholder = "+4512345678" }
-                            br(); br()
-                            label { +"Business name (spoken in whisper)" }
+                            h3 { +"Voice / Welcome message" }
+                            label { +"Business name" }
                             textInput { name = "business_name"; value = voiceConfig.businessName ?: ""; placeholder = "My Salon" }
                             br(); br()
                             label { +"Welcome message (OPEN):" }; br()
@@ -2976,7 +2945,6 @@ class WebAdmin(
                     db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
                     val voice = ShopVoiceConfig(
                         shopId = id,
-                        twilioNumber = params["twilio_number"]?.trim()?.takeIf { it.isNotBlank() },
                         businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },
                         temporaryOperatorClosed = false,
                         temporaryOperatorClosedMessage = ShopVoiceConfig(id).temporaryOperatorClosedMessage,

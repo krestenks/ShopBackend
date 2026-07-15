@@ -1,4 +1,4 @@
-package twilio
+package telephony
 
 import DataBase
 import SmsConversationSummary
@@ -49,6 +49,7 @@ data class SendSmsRequest(
 data class SendSmsResponse(
     val ok: Boolean,
     val messageId: Int = -1,
+    /** Provider message reference. JSON field name kept for app compatibility. */
     val twilioSid: String? = null,
     val error: String? = null,
 )
@@ -72,25 +73,14 @@ data class MarkHandledRequest(val shopId: Int, val phone: String)
 
 fun Routing.smsRoutes(
     db: DataBase,
-    smsService: telephony.TelephonyService,
+    smsService: TelephonyService,
     callAppScreening: callapp.CallAppScreeningService? = null,
 ) {
-
-    // ── Inbound SMS webhook (called by Twilio, no auth) ──────────────────────
-    // Canonical URL: https://your-backend/api/twilio/sms/inbound
-    // (Consistent with the existing voice routes at /api/twilio/voice/*)
-    post("/api/twilio/sms/inbound") {
-        handleInboundSms(call, db, callAppScreening)
-    }
-    // Backward-compat alias so the old URL still works too
-    post("/twilio/sms/inbound") {
-        handleInboundSms(call, db, callAppScreening)
-    }
 
     // ── Manager API endpoints (JWT authenticated) ─────────────────────────────
     authenticate("jwt") {
 
-        // Send an SMS from the shop's Twilio number to a customer
+        // Send an SMS from the shop's number (GSM SIM) to a customer
         post("/api/mobile/sms/send") {
             val principal = call.principal<JWTPrincipal>()
             val refId     = principal?.payload?.getClaim("userId")?.asInt()
@@ -110,17 +100,8 @@ fun Routing.smsRoutes(
             }
 
             val voiceConfig = db.getShopVoiceConfig(req.shopId)
-            val fromNumber  = telephony.resolveShopSenderNumber(db, smsService, req.shopId)
-
-            // On Asterisk the SIM is the sender, so a blank display number is tolerable;
-            // on Twilio a From number is mandatory for the API call.
-            if (fromNumber.isBlank() && smsService.providerName == "twilio") {
-                call.respond(
-                    HttpStatusCode.BadRequest,
-                    SendSmsResponse(ok = false, error = "No Twilio number configured for this shop")
-                )
-                return@post
-            }
+            // The SIM is the actual sender; this value is only stored for display.
+            val fromNumber  = resolveShopSenderNumber(db, req.shopId)
 
             if (req.toPhone.isBlank()) {
                 call.respond(
@@ -148,7 +129,7 @@ fun Routing.smsRoutes(
 
             // Optimistically insert with status "queued". A guarded insert collapses accidental
             // double-taps (identical shop+phone+body within a few seconds) into one row; when a
-            // recent duplicate is detected we skip the Twilio send entirely and echo the existing id.
+            // recent duplicate is detected we skip the send entirely and echo the existing id.
             val customerId = db.getCustomerIdByPhone(req.toPhone)
             val insert = db.insertOutboundSmsIfNotDuplicate(
                 shopId            = req.shopId,
@@ -168,7 +149,7 @@ fun Routing.smsRoutes(
                 return@post
             }
 
-            // Send via the configured telephony provider (Twilio or Asterisk)
+            // Send via the shop's GSM trunk (Asterisk/chan_quectel)
             val result = smsService.sendSms(
                 shopId         = req.shopId,
                 fromNumberE164 = fromNumber,
@@ -315,58 +296,13 @@ fun Routing.smsRoutes(
     }
 }
 
-// ─── Inbound SMS handler (shared by both URL aliases) ────────────────────────
-
-private suspend fun handleInboundSms(
-    call: ApplicationCall,
-    db: DataBase,
-    callAppScreening: callapp.CallAppScreeningService? = null,
-) {
-    val params = call.receiveParameters()
-
-    val from       = params["From"]       ?: ""
-    val to         = params["To"]         ?: ""
-    val body       = params["Body"]       ?: ""
-    val messageSid = params["MessageSid"]
-
-    // Timestamped receipt log — this is the moment Twilio's webhook actually reached us.
-    // Compare against when you sent the text to see if any delay is upstream (before this line)
-    // or in our handling (the "in Xms" figure logged at the end).
-    val startNs = System.nanoTime()
-    val bodyPreview = body.take(40).replace("\n", " ")
-    smsLog("[SMS-IN] recv ${smsTs()} From=$from To=$to Sid=$messageSid bodyLen=${body.length} body=\"$bodyPreview\"")
-
-    // Map the Twilio `To` number back to a shop
-    val shopId = db.findShopIdByTwilioNumber(to)
-    if (shopId == null) {
-        smsLog("[SMS-IN] DROP no-shop-for-To=$to Sid=$messageSid")
-        call.respondText("<Response/>", ContentType.Application.Xml)
-        return
-    }
-
-    persistInboundSms(
-        db = db,
-        shopId = shopId,
-        fromPhone = from,
-        toPhone = to,
-        body = body,
-        providerMessageSid = messageSid,
-        callAppScreening = callAppScreening,
-        elapsedSinceNs = startNs,
-    )
-
-    // Return empty TwiML — we don't auto-reply; manager replies manually.
-    // A suppressed duplicate or blacklisted sender is still a successful webhook.
-    call.respondText("<Response/>", ContentType.Application.Xml)
-}
-
-/** Outcome of persisting an inbound SMS (shared by Twilio webhook + Asterisk internal endpoint). */
+/** Outcome of persisting an inbound SMS. */
 enum class InboundSmsPersistResult { STORED, SUPPRESSED_DUPLICATE, BLACKLISTED }
 
 /**
- * Provider-neutral inbound-SMS persistence: blacklist check, customer auto-create,
- * CallApp screening trigger, and deduplicated insert. Used by the Twilio webhook and
- * by the Asterisk dialplan's internal endpoint.
+ * Inbound-SMS persistence: blacklist check, customer auto-create, CallApp
+ * screening trigger, and deduplicated insert. Called by the Asterisk dialplan's
+ * internal endpoint.
  */
 fun persistInboundSms(
     db: DataBase,

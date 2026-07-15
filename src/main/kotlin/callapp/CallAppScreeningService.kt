@@ -15,9 +15,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   exponential-backoff retry window has passed.
  *
  * ### On-contact immediate lookup ([screenCustomerNow])
- * - Called from Twilio webhook handlers the moment a new (or previously unscreened)
+ * - Called from inbound call/SMS handlers the moment a new (or previously unscreened)
  *   customer is first seen on an inbound call or SMS.
- * - Runs in a background coroutine — the Twilio webhook response is never delayed.
+ * - Runs in a background coroutine — the inbound handler response is never delayed.
  * - Ensures the CallApp name is available for the *next* interaction, not 6 hours later.
  *
  * ## Failure robustness
@@ -118,7 +118,7 @@ class CallAppScreeningService(
     /**
      * Performs an immediate CallApp lookup for a single customer.
      *
-     * Intended to be called (inside a background coroutine) from Twilio webhook handlers
+     * Intended to be called (inside a background coroutine) from inbound call/SMS handlers
      * the first time a customer contacts the shop, so their CallApp name is available for
      * the manager within seconds rather than waiting up to 6 hours for the batch scheduler.
      *

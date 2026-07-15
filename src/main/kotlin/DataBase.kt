@@ -29,7 +29,7 @@ data class Owner(
 )
 
 /**
- * Credentials + Twilio config for an owner admin web-login.
+ * Credentials for an owner admin web-login.
  * One row per owner (UNIQUE on owner_id).
  */
 @Serializable
@@ -39,9 +39,6 @@ data class OwnerAccount(
     val username: String,
     /** BCrypt hash — never sent to clients. */
     val passwordHash: String,
-    val twilioNumber: String? = null,
-    val twilioAccountSid: String? = null,
-    val twilioAuthToken: String? = null,
     val active: Boolean = true,
     val createdAt: Long = 0L,
 )
@@ -170,7 +167,6 @@ data class ServiceList(val services: List<Service>)
 @Serializable
 data class ShopVoiceConfig(
     val shopId: Int,
-    val twilioNumber: String? = null,
     val operatorPhone: String? = null,
     val welcomeOpenMessage: String = "Hello and welcome. We are open.",
     val welcomeClosedMessage: String = "Hello and welcome. We are currently closed.",
@@ -192,8 +188,8 @@ data class ShopVoiceConfig(
 
 /**
  * Per-shop self-hosted telephony (Asterisk/Quectel) configuration.
- * Parallel to ShopVoiceConfig (which remains Twilio-oriented) — a shop migrating to
- * the GSM system gets a row here; the Twilio config can stay for fallback.
+ * Per-shop GSM line configuration. Parallel to ShopVoiceConfig:
+ * voice-flow texts live there, the physical line lives here.
  */
 @Serializable
 data class ShopTelephonyConfig(
@@ -265,7 +261,7 @@ data class VoiceCallRecord(
     val endedAt: Long?,
     val linkedBookingId: Int?,
     val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
-    /** Child (operator-leg) Twilio CallSid, stored when the whisper URL is called. */
+    /** Legacy operator-leg call id (unused since the Twilio removal; kept for JSON compat). */
     val operatorLegSid: String? = null,
 )
 
@@ -569,7 +565,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             """
             CREATE TABLE IF NOT EXISTS shop_voice_config (
                 shop_id INTEGER PRIMARY KEY,
-                twilio_number TEXT,
                 operator_phone TEXT,
                 welcome_open_message TEXT,
                 welcome_closed_message TEXT,
@@ -769,9 +764,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 owner_id            INTEGER NOT NULL UNIQUE,
                 username            TEXT    NOT NULL UNIQUE,
                 password_hash       TEXT    NOT NULL,
-                twilio_number       TEXT,
-                twilio_account_sid  TEXT,
-                twilio_auth_token   TEXT,
                 active              INTEGER NOT NULL DEFAULT 1,
                 created_at          INTEGER NOT NULL
             )
@@ -858,7 +850,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "CREATE INDEX IF NOT EXISTS idx_sms_shop_phone_created ON sms_message(shop_id, counterparty_phone, created_at)",
             // unhandled-count + per-conversation unread subquery (covering).
             "CREATE INDEX IF NOT EXISTS idx_sms_shop_dir_handled ON sms_message(shop_id, direction, handled_at)",
-            // Idempotency guard against duplicate inbound inserts (Twilio webhook retries).
+            // Idempotency guard against duplicate inbound inserts (webhook/handler retries).
             // Partial index so the many outbound rows with NULL sid do not collide.
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_twilio_sid ON sms_message(twilio_message_sid) WHERE twilio_message_sid IS NOT NULL",
             // Active-calls poll: WHERE shop_id=? AND is_active=1 ORDER BY started_at DESC.
@@ -878,7 +870,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getShopVoiceConfig(shopId: Int): ShopVoiceConfig {
         val sql = """
-            SELECT shop_id, twilio_number, operator_phone, welcome_open_message, welcome_closed_message,
+            SELECT shop_id, operator_phone, welcome_open_message, welcome_closed_message,
                    temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override,
                    communication_retention_days, customer_retention_days, sms_price_list_footer
             FROM shop_voice_config WHERE shop_id = ?
@@ -889,7 +881,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             return if (rs.next()) {
                 ShopVoiceConfig(
                     shopId = rs.getInt("shop_id"),
-                    twilioNumber = rs.getString("twilio_number"),
                     operatorPhone = rs.getString("operator_phone"),
                     welcomeOpenMessage = rs.getString("welcome_open_message") ?: ShopVoiceConfig(shopId).welcomeOpenMessage,
                     welcomeClosedMessage = rs.getString("welcome_closed_message") ?: ShopVoiceConfig(shopId).welcomeClosedMessage,
@@ -910,13 +901,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun upsertShopVoiceConfig(config: ShopVoiceConfig) {
         val sql = """
-            INSERT INTO shop_voice_config (shop_id, twilio_number, operator_phone, welcome_open_message,
+            INSERT INTO shop_voice_config (shop_id, operator_phone, welcome_open_message,
                 welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message,
                 business_name, phone_override, communication_retention_days, customer_retention_days,
                 sms_price_list_footer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
-                twilio_number = excluded.twilio_number,
                 operator_phone = excluded.operator_phone,
                 welcome_open_message = excluded.welcome_open_message,
                 welcome_closed_message = excluded.welcome_closed_message,
@@ -931,17 +921,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, config.shopId)
-            stmt.setString(2, config.twilioNumber)
-            stmt.setString(3, config.operatorPhone)
-            stmt.setString(4, config.welcomeOpenMessage)
-            stmt.setString(5, config.welcomeClosedMessage)
-            stmt.setInt(6, if (config.temporaryOperatorClosed) 1 else 0)
-            stmt.setString(7, config.temporaryOperatorClosedMessage)
-            stmt.setString(8, config.businessName)
-            stmt.setString(9, config.phoneOverride)
-            stmt.setInt(10, config.communicationRetentionDays)
-            stmt.setInt(11, config.customerRetentionDays)
-            stmt.setString(12, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(2, config.operatorPhone)
+            stmt.setString(3, config.welcomeOpenMessage)
+            stmt.setString(4, config.welcomeClosedMessage)
+            stmt.setInt(5, if (config.temporaryOperatorClosed) 1 else 0)
+            stmt.setString(6, config.temporaryOperatorClosedMessage)
+            stmt.setString(7, config.businessName)
+            stmt.setString(8, config.phoneOverride)
+            stmt.setInt(9, config.communicationRetentionDays)
+            stmt.setInt(10, config.customerRetentionDays)
+            stmt.setString(11, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
             stmt.executeUpdate()
         }
     }
@@ -1278,7 +1267,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Terminates any currently active calls for the same shop and caller phone.
      *
-     * This protects against Twilio callback gaps where a previous call never got marked inactive
+     * This protects against event gaps where a previous call never got marked inactive
      * (e.g. caller hung up while in menu / gather).
      */
     fun terminateActiveCallsFromPhone(
@@ -1429,8 +1418,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
-     * Store the operator-leg (child) Twilio CallSid, captured when the whisper URL is served.
-     * Used by the app's 🤝 accept button to redirect the operator-leg call via Twilio REST.
+     * Legacy: stored the operator-leg call id in the old whisper flow. Unused now.
+     * Kept only because historical rows may carry a value.
      */
     fun setCallOperatorLegSid(callId: Int, operatorLegSid: String) {
         connection.prepareStatement("UPDATE voice_call SET operator_leg_sid = ? WHERE id = ?").use { stmt ->
@@ -1515,30 +1504,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(1, shopId)
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.getString("phone")?.trim()?.takeIf { it.isNotBlank() } else null
-        }
-    }
-
-    /**
-     * Map an incoming Twilio call/SMS `To` number to a shop.
-     *
-     * We match against the per-shop configured Twilio number in [shop_voice_config].
-     */
-    fun findShopIdByTwilioNumber(twilioToNumber: String): Int? {
-        val normalized = twilioToNumber.trim()
-        if (normalized.isBlank()) return null
-
-        val sql = """
-            SELECT shop_id
-            FROM shop_voice_config
-            WHERE replace(replace(replace(twilio_number, ' ', ''), '-', ''), '(', '') =
-                  replace(replace(replace(?, ' ', ''), '-', ''), '(', '')
-            LIMIT 1
-        """.trimIndent()
-
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setString(1, normalized)
-            val rs = stmt.executeQuery()
-            return if (rs.next()) rs.getInt("shop_id") else null
         }
     }
 
@@ -2245,7 +2210,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
 
     /**
-     * Convenience helper for features that need to contact the customer (e.g. Twilio voice call).
+     * Convenience helper for features that need to contact the customer (e.g. voice call).
      *
      * NOTE: The [Appointment] model currently does not expose customer_id, so this method returns
      * the richer [AppointmentWithServices] which includes the [customer] object.
@@ -3517,7 +3482,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      *    (same MessageSid) — handled by `INSERT OR IGNORE`.
      *  - A content/time window blocks upstream/carrier double-delivery, where the same
      *    body arrives from the same number within [windowMs] but under a *different*
-     *    Twilio SID — handled by the `WHERE NOT EXISTS` guard.
+     *    provider sid — handled by the `WHERE NOT EXISTS` guard.
      */
     fun insertInboundSmsDeduped(
         shopId: Int,
@@ -3575,7 +3540,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Inserts an OUTBOUND SMS unless an identical one (same shop, phone, body) was just
      * created within [windowMs] — this collapses accidental double-taps of "send" into a
-     * single message and a single Twilio API call. Returns the existing row id with
+     * single message and a single provider send. Returns the existing row id with
      * `isNew = false` when a recent duplicate is found, so the caller can skip the send.
      */
     fun insertOutboundSmsIfNotDuplicate(
@@ -3646,7 +3611,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return OutboundInsert(existingId, isNew = false)
     }
 
-    /** Updates the delivery status (and Twilio SID / error) of an SMS row after sending. */
+    /** Updates the delivery status (and provider sid / error) of an SMS row after sending. */
     fun updateSmsStatus(id: Int, status: String, twilioMessageSid: String?, errorMessage: String?) {
         val sql = """
             UPDATE sms_message
@@ -4793,31 +4758,25 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // =========================================================================
 
     /**
-     * Creates an owner account (web-login credentials + optional Twilio config).
+     * Creates an owner account (web-login credentials).
      * Returns the new row id, or -1 on failure.
      */
     fun addOwnerAccount(
         ownerId: Int,
         username: String,
         password: String,
-        twilioNumber: String? = null,
-        twilioAccountSid: String? = null,
-        twilioAuthToken: String? = null,
     ): Int {
         val hash = BCrypt.hashpw(password, BCrypt.gensalt())
         val now  = System.currentTimeMillis()
         connection.prepareStatement(
             """INSERT INTO owner_account
-               (owner_id, username, password_hash, twilio_number, twilio_account_sid, twilio_auth_token, active, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?)"""
+               (owner_id, username, password_hash, active, created_at)
+               VALUES (?, ?, ?, 1, ?)"""
         ).use { stmt ->
             stmt.setInt(1, ownerId)
             stmt.setString(2, username.trim())
             stmt.setString(3, hash)
-            stmt.setString(4, twilioNumber?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(5, twilioAccountSid?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(6, twilioAuthToken?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setLong(7, now)
+            stmt.setLong(4, now)
             stmt.executeUpdate()
         }
         return connection.createStatement().use { s ->
@@ -4830,22 +4789,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun updateOwnerAccount(
         id: Int,
         username: String,
-        twilioNumber: String? = null,
-        twilioAccountSid: String? = null,
-        twilioAuthToken: String? = null,
         active: Boolean = true,
     ) {
         connection.prepareStatement(
             """UPDATE owner_account
-               SET username = ?, twilio_number = ?, twilio_account_sid = ?, twilio_auth_token = ?, active = ?
+               SET username = ?, active = ?
                WHERE id = ?"""
         ).use { stmt ->
             stmt.setString(1, username.trim())
-            stmt.setString(2, twilioNumber?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(3, twilioAccountSid?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(4, twilioAuthToken?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setInt(5, if (active) 1 else 0)
-            stmt.setInt(6, id)
+            stmt.setInt(2, if (active) 1 else 0)
+            stmt.setInt(3, id)
             stmt.executeUpdate()
         }
     }
@@ -4881,8 +4834,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     /** Fetch the owner_account for a given ownerId, or null if none exists. */
     fun getOwnerAccountByOwnerId(ownerId: Int): OwnerAccount? {
-        val sql = """SELECT id, owner_id, username, password_hash,
-                            twilio_number, twilio_account_sid, twilio_auth_token, active, created_at
+        val sql = """SELECT id, owner_id, username, password_hash, active, created_at
                      FROM owner_account WHERE owner_id = ? LIMIT 1"""
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, ownerId)
@@ -4893,9 +4845,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 ownerId          = rs.getInt("owner_id"),
                 username         = rs.getString("username"),
                 passwordHash     = rs.getString("password_hash"),
-                twilioNumber     = rs.getString("twilio_number"),
-                twilioAccountSid = rs.getString("twilio_account_sid"),
-                twilioAuthToken  = rs.getString("twilio_auth_token"),
                 active           = rs.getInt("active") != 0,
                 createdAt        = rs.getLong("created_at"),
             )

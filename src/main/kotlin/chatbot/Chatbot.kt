@@ -1,4 +1,4 @@
-package twilio
+package chatbot
 
 import DataBase
 import io.ktor.client.*
@@ -19,16 +19,13 @@ import kotlinx.coroutines.withContext
 
 @Serializable
 data class ChatbotConfig(
-    val twilioAccountSid: String = "",
-    val twilioAuthToken: String = "",
-    val twilioFromNumber: String = "",
     val lmStudioUrl: String = "http://localhost:1234/v1",
     val lmStudioModel: String = "essentialai/rnj-1"
 )
 
 data class ChatMessage(val role: String, val content: String)
 
-class TwilioChatbotService(private val db: DataBase, private val config: ChatbotConfig) {
+class ChatbotService(private val db: DataBase, private val config: ChatbotConfig) {
     private val history = mutableMapOf<String, MutableList<ChatMessage>>()
     private val client = HttpClient(CIO)
     private val initializedConversations = mutableSetOf<String>()
@@ -607,20 +604,3 @@ Remember: Once customer confirms, call book_appointment tool - don't ask again!
     public fun getTherapistsPublic(shopId: Int): String = getTherapists(shopId)
 }
 
-fun Route.twilioRoutes(db: DataBase, service: TwilioChatbotService) {
-    post("/api/twilio/webhook") {
-        val params = call.receiveParameters()
-        val from = params["From"] ?: call.request.headers["X-Twilio-From"]
-            ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing From")
-        val body = params["Body"] ?: call.request.headers["X-Twilio-Body"]
-            ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing Body")
-
-        val response = service.processMessage(from, body)
-
-        call.respondText("""<?xml version="1.0"?><Response><Message>${response}</Message></Response>""", ContentType.Text.Xml)
-    }
-
-    get("/api/twilio/health") {
-        call.respondText("OK")
-    }
-}

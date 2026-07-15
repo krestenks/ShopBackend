@@ -1,6 +1,6 @@
 /**
  * Central place for deciding which public URL the backend should use when it needs to generate a URL
- * that the outside world can open (booking links, Twilio callbacks, etc.).
+ * that the outside world can open (booking links etc.).
  */
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -9,7 +9,7 @@ object PublicBaseUrl {
 
     /**
      * Preferred order:
-     * 1) PUBLIC_BASE_URL   (generic, used by Twilio voice)
+     * 1) PUBLIC_BASE_URL   (generic)
      * 2) PUBLIC_BOOKING_URL (legacy name used for booking links)
      * 3) localhost fallback
      */

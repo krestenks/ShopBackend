@@ -1,4 +1,4 @@
-package twilio
+package chatbot
 
 import DataBase
 import io.ktor.http.*
@@ -9,9 +9,9 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 
 /**
- * API endpoint for testing chatbot without Twilio
+ * API endpoint for testing chatbot without SMS provider
  */
-fun Route.chatApiRoutes(db: DataBase, chatbotService: TwilioChatbotService) {
+fun Route.chatApiRoutes(db: DataBase, chatbotService: ChatbotService) {
 
     post("/api/chat/send") {
         val params = call.receiveParameters()

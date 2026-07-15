@@ -2,7 +2,7 @@
  * TenantContext.kt
  *
  * Carries the resolved owner domain for a given request or session.
- * Every authenticated action (web admin, mobile JWT, Twilio inbound) should
+ * Every authenticated action (web admin, mobile JWT, inbound telephony) should
  * derive a TenantContext before touching domain data so that isolation is
  * enforced consistently.
  *

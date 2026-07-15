@@ -13,14 +13,11 @@ import java.util.concurrent.TimeUnit
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import org.mindrot.jbcrypt.BCrypt
-import twilio.TwilioChatbotService
-import twilio.TwilioSmsService
-import twilio.ChatbotConfig
-import twilio.twilioRoutes
-import twilio.chatTestRoutes
-import twilio.chatApiRoutes
-import twilio.twilioVoiceRoutes
-import twilio.smsRoutes
+import chatbot.ChatbotService
+import chatbot.ChatbotConfig
+import chatbot.chatTestRoutes
+import chatbot.chatApiRoutes
+import telephony.smsRoutes
 import callapp.CallAppRapidApiConfig
 import callapp.CallAppRapidApiClient
 import callapp.CallAppScreeningService
@@ -36,7 +33,6 @@ import asterisk.ModemScanner
 import asterisk.QuectelConfigWriter
 import asterisk.internalTelephonyRoutes
 import telephony.TelephonyService
-import telephony.TwilioTelephonyService
 import kotlinx.coroutines.runBlocking
 
 object ShopBackend {
@@ -77,24 +73,15 @@ object ShopBackend {
             println("Startup cleanup error: ${e.message}")
         }
 
-        // Route handlers are instantiated after the telephony provider is chosen (below).
-
-        // Chatbot config (also supplies the Twilio credentials used by smsService below).
-        val chatbotConfig = ChatbotConfig(
-            twilioAccountSid = System.getenv("TWILIO_ACCOUNT_SID") ?: "",
-            twilioAuthToken = System.getenv("TWILIO_AUTH_TOKEN") ?: "",
-            twilioFromNumber = System.getenv("TWILIO_FROM_NUMBER") ?: "",
-            lmStudioUrl = System.getenv("LM_STUDIO_URL") ?: "http://localhost:1234/v1",
-            lmStudioModel = System.getenv("LM_MODEL") ?: "essentialai/rnj-1"
-        )
-
-        // The LM Studio chatbot is disabled by default: LM Studio runs locally on the
-        // dev machine and is not reachable from the Upsun server. Set CHATBOT_ENABLED=true
-        // to re-enable it (kept around for future work). When disabled, the chatbot
-        // service is not created and its routes are not registered.
+        // LM Studio chatbot (disabled by default: LM Studio runs locally on the
+        // dev machine). Set CHATBOT_ENABLED=true to re-enable the test pages/API.
         val chatbotEnabled = System.getenv("CHATBOT_ENABLED")?.equals("true", ignoreCase = true) == true
-        val chatbotService: TwilioChatbotService? = if (chatbotEnabled) {
-            TwilioChatbotService(db, chatbotConfig).also {
+        val chatbotService: ChatbotService? = if (chatbotEnabled) {
+            val chatbotConfig = ChatbotConfig(
+                lmStudioUrl = System.getenv("LM_STUDIO_URL") ?: "http://localhost:1234/v1",
+                lmStudioModel = System.getenv("LM_MODEL") ?: "essentialai/rnj-1"
+            )
+            ChatbotService(db, chatbotConfig).also {
                 println("Chatbot initialized. LM Studio: ${chatbotConfig.lmStudioUrl}")
             }
         } else {
@@ -102,37 +89,26 @@ object ShopBackend {
             null
         }
 
-        val smsService = TwilioSmsService(
-            accountSid = chatbotConfig.twilioAccountSid,
-            authToken  = chatbotConfig.twilioAuthToken,
-        )
-
-        // ── Telephony provider: Twilio (default) or self-hosted Asterisk ─────
+        // ── Telephony: self-hosted Asterisk/Quectel GSM stack ────────────────
         val asteriskConfig = AsteriskConfig.fromEnv()
-        var asteriskAdmin: AsteriskAdmin? = null
-        val telephonyService: TelephonyService = if (asteriskConfig.enabled) {
-            val amiClient = AmiClient(asteriskConfig).also { it.start() }
-            AsteriskEventHandler(amiClient, db).start()
-            val ariClient = AriClient(asteriskConfig)
-            val provisioner = AsteriskProvisioner(
-                db = db,
-                config = asteriskConfig,
-                ariClient = ariClient,
-                quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
-                dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
-            )
-            asteriskAdmin = AsteriskAdmin(
-                config = asteriskConfig,
-                amiClient = amiClient,
-                provisioner = provisioner,
-                modemScanner = ModemScanner(db, asteriskConfig, amiClient),
-            )
-            println("[Telephony] Provider: ASTERISK (AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath})")
-            AsteriskTelephonyService(amiClient, asteriskConfig, db)
-        } else {
-            println("[Telephony] Provider: TWILIO (set ASTERISK_ENABLED=true to switch)")
-            TwilioTelephonyService(smsService)
-        }
+        val amiClient = AmiClient(asteriskConfig).also { it.start() }
+        AsteriskEventHandler(amiClient, db).start()
+        val ariClient = AriClient(asteriskConfig)
+        val provisioner = AsteriskProvisioner(
+            db = db,
+            config = asteriskConfig,
+            ariClient = ariClient,
+            quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
+            dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
+        )
+        val asteriskAdmin = AsteriskAdmin(
+            config = asteriskConfig,
+            amiClient = amiClient,
+            provisioner = provisioner,
+            modemScanner = ModemScanner(db, asteriskConfig, amiClient),
+        )
+        val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db)
+        println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")
 
         // Instantiate route handlers
         val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)
@@ -178,7 +154,6 @@ object ShopBackend {
                 route("/") {
                     webAdmin.setupRoutes(this)
                     financialReportRoutes(db)
-                    twilioCostReportRoutes(db)
                 }
                 route("/api") { customerApi.setupRoutes(this) }
                 // MobileApi defines its own absolute paths like /api/mobile/...
@@ -187,7 +162,6 @@ object ShopBackend {
 
                 // Mobile financial reports (JWT token in query param for WebView)
                 mobileFinancialReportRoutes(db)
-                mobileTwilioCostReportRoutes(db)
 
                 // Self-hosted Android APK update endpoints (JWT authenticated)
                 appUpdateRoutes()
@@ -195,19 +169,15 @@ object ShopBackend {
                 // Simple installer page for provisioning new handsets (session + HTML form)
                 SetupAppRoutes(db).install(this)
 
-                // Chatbot routes (old LM Studio SMS webhook + test pages) — only when enabled.
+                // Chatbot test pages/API (LM Studio) — only when enabled.
                 if (chatbotService != null) {
-                    twilioRoutes(db, chatbotService)
                     chatTestRoutes(db, chatbotService)
                     chatApiRoutes(db, chatbotService)
                 }
-                twilioVoiceRoutes(db, callAppScreening)
                 smsRoutes(db, telephonyService, callAppScreening)
 
                 // Asterisk dialplan → backend callbacks (inbound SMS/call, provisioning)
-                asteriskAdmin?.let {
-                    internalTelephonyRoutes(db, it.config, it.provisioner, callAppScreening)
-                }
+                internalTelephonyRoutes(db, asteriskConfig, provisioner, callAppScreening)
             }
         }.start(wait = true)
     }
@@ -218,15 +188,11 @@ object ShopBackend {
             "PORT",
             "PUBLIC_BASE_URL",
             "PUBLIC_BOOKING_URL",
-            "TWILIO_ACCOUNT_SID",
-            "TWILIO_AUTH_TOKEN",
-            "TWILIO_FROM_NUMBER",
             "CALLAPP_RAPIDAPI_KEY",
             "ADMIN_USERNAME",
             "ADMIN_PASSWORD",
             "LM_STUDIO_URL",
             "LM_MODEL",
-            "ASTERISK_ENABLED",
             "ASTERISK_AMI_SECRET",
             "ASTERISK_ARI_PASSWORD",
             "ASTERISK_INTERNAL_SECRET",
@@ -285,7 +251,7 @@ object ShopBackend {
             try {
                 db.deleteOldBookingTokens()
 
-                // Also clear stuck active calls (e.g. if Twilio status callbacks were missed).
+                // Also clear stuck active calls (e.g. if hangup events were missed).
                 val terminated = db.terminateActiveCalls(
                     olderThanMs = 30 * 60 * 1000L,
                     note = "scheduled_cleanup",

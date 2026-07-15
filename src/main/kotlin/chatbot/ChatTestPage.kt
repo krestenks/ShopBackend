@@ -1,4 +1,4 @@
-package twilio
+package chatbot
 
 import DataBase
 import io.ktor.http.*
@@ -10,9 +10,9 @@ import io.ktor.server.html.*
 import kotlinx.html.*
 
 /**
- * Chat test page for testing the chatbot without Twilio
+ * Chat test page for testing the chatbot without SMS provider
  */
-fun Route.chatTestRoutes(db: DataBase, chatbotService: TwilioChatbotService) {
+fun Route.chatTestRoutes(db: DataBase, chatbotService: ChatbotService) {
 
     get("/chat-test") {
         val shops = db.getAllShops()

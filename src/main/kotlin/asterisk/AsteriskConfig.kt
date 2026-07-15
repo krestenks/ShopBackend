@@ -6,7 +6,6 @@ package asterisk
  * The backend and Asterisk run on the same machine (the phone server), so the
  * defaults point at localhost. Secrets have no defaults on purpose.
  *
- *   ASTERISK_ENABLED           "true" switches TelephonyService to Asterisk and starts AMI
  *   ASTERISK_AMI_HOST          default 127.0.0.1
  *   ASTERISK_AMI_PORT          default 5038
  *   ASTERISK_AMI_USERNAME      default kotlinbackend
@@ -24,7 +23,6 @@ package asterisk
  *   ASTERISK_SIP_PORT          default 5060
  */
 data class AsteriskConfig(
-    val enabled: Boolean,
     val amiHost: String,
     val amiPort: Int,
     val amiUsername: String,
@@ -40,7 +38,6 @@ data class AsteriskConfig(
 ) {
     companion object {
         fun fromEnv(): AsteriskConfig = AsteriskConfig(
-            enabled = System.getenv("ASTERISK_ENABLED")?.equals("true", ignoreCase = true) == true,
             amiHost = env("ASTERISK_AMI_HOST", "127.0.0.1"),
             amiPort = System.getenv("ASTERISK_AMI_PORT")?.toIntOrNull() ?: 5038,
             amiUsername = env("ASTERISK_AMI_USERNAME", "kotlinbackend"),

@@ -11,7 +11,7 @@ import kotlinx.html.*
 import shared.components.BookingUI
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import twilio.BookingConfirmationSms
+import telephony.BookingConfirmationSms
 import telephony.TelephonyService
 
 

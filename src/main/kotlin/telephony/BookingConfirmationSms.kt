@@ -1,10 +1,7 @@
-package twilio
+package telephony
 
 import DataBase
 import Shop
-import telephony.SmsSendResult
-import telephony.TelephonyService
-import telephony.resolveShopSenderNumber
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -54,7 +51,7 @@ object BookingConfirmationSms {
         val shop = db.getShopById(shopId)
             ?: return SmsSendResult(false, 404, "Shop not found")
 
-        val fromNumber = resolveShopSenderNumber(db, smsService, shopId)
+        val fromNumber = resolveShopSenderNumber(db, shopId)
 
         val body = buildMessage(
             shop = shop,

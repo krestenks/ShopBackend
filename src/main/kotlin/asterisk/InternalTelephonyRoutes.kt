@@ -1,13 +1,14 @@
 package asterisk
 
 import DataBase
+import VoiceCallOutcome
 import VoiceCallState
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import twilio.persistInboundSms
+import telephony.persistInboundSms
 
 /**
  * Endpoints the generated Asterisk dialplan CURLs into (localhost only in practice).
@@ -63,25 +64,14 @@ fun Routing.internalTelephonyRoutes(
         val uniqueId = params["uniqueid"]?.trim()?.takeIf { it.isNotBlank() }
             ?: "ast-${System.currentTimeMillis()}"
 
-        // Tenant-wide blacklist: tell the dialplan to reject before ringing the app.
-        val ownerId = db.getOwnerIdForShop(shopId)
-        val blacklisted = from.isNotBlank() && if (ownerId != null) {
-            db.isPhoneBlacklistedByOwner(ownerId, from)
-        } else {
-            db.isPhoneBlacklisted(shopId, from)
-        }
-        if (blacklisted) {
-            println("[Asterisk/call-inbound] blacklisted caller=$from shop=$shopId")
-            call.respondText("reject")
-            return@post
-        }
-
+        // Every inbound call gets a log row (also the rejected ones, so the app
+        // shows the attempt) and a routing decision: respond "reject" and the
+        // dialplan hangs up with cause 21 before ringing the app.
         val toPhone = db.getShopTelephonyConfig(shopId).phoneNumber ?: ""
         val callId = db.createInboundCallLog(shopId, uniqueId, from, toPhone)
         db.updateCallState(callId, VoiceCallState.INCOMING_CALL, "asterisk uniqueid=$uniqueId")
 
-        // Auto-create a "New" customer row so the app can navigate to a profile,
-        // mirroring the Twilio welcome handler.
+        // Auto-create a "New" customer row so the app can navigate to a profile.
         val existingCustomerId = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
         val customerId = existingCustomerId ?: from.takeIf { it.isNotBlank() }?.let {
             runCatching { db.insertNewCustomer(it) }.getOrNull()
@@ -90,8 +80,47 @@ fun Routing.internalTelephonyRoutes(
         val isKnown = existingCustomerId != null && !status.isNullOrBlank() && !status.equals("New", ignoreCase = true)
         db.updateCallCustomer(callId, customerId, if (isKnown) "known" else "unknown")
 
+        // 1. Tenant-wide blacklist.
+        val ownerId = db.getOwnerIdForShop(shopId)
+        val blacklisted = from.isNotBlank() && if (ownerId != null) {
+            db.isPhoneBlacklistedByOwner(ownerId, from)
+        } else {
+            db.isPhoneBlacklisted(shopId, from)
+        }
+        if (blacklisted) {
+            db.updateCallState(callId, VoiceCallState.REJECTED_BLACKLISTED, "caller=$from")
+            db.terminateCall(callId, VoiceCallOutcome.BLACKLIST_REJECTED)
+            println("[Asterisk/call-inbound] REJECT blacklisted caller=$from shop=$shopId")
+            call.respondText("reject")
+            return@post
+        }
+
+        // 2. Effective open/closed (manager override wins over the schedule).
+        val voice = db.getShopVoiceConfig(shopId)
+        val isOpen = when (voice.phoneOverride?.trim()?.lowercase()) {
+            "open" -> true
+            "closed" -> false
+            else -> db.isShopOpenByScheduleNow(shopId)
+        }
+        if (!isOpen) {
+            db.updateCallState(callId, VoiceCallState.CLOSED_MESSAGE, "shop closed")
+            db.terminateCall(callId, VoiceCallOutcome.CLOSED_HOURS)
+            println("[Asterisk/call-inbound] REJECT shop closed shop=$shopId caller=$from")
+            call.respondText("reject")
+            return@post
+        }
+
+        // 3. Temporary operator closure (manager toggle in the app).
+        if (voice.temporaryOperatorClosed) {
+            db.updateCallState(callId, VoiceCallState.TEMPORARY_CLOSED_MESSAGE, "temporary operator closure")
+            db.terminateCall(callId, VoiceCallOutcome.TEMP_OPERATOR_CLOSED)
+            println("[Asterisk/call-inbound] REJECT temp-closed shop=$shopId caller=$from")
+            call.respondText("reject")
+            return@post
+        }
+
         // TODO(FCM): push-wake the manager app here before Asterisk Dial()s the SIP endpoint.
-        println("[Asterisk/call-inbound] callId=$callId shop=$shopId from=$from uniqueid=$uniqueId known=$isKnown")
+        println("[Asterisk/call-inbound] RING callId=$callId shop=$shopId from=$from uniqueid=$uniqueId known=$isKnown")
         call.respondText("ok")
     }
 

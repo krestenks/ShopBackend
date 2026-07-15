@@ -7,7 +7,7 @@ import telephony.TelephonyService
 /**
  * TelephonyService backed by the self-hosted Asterisk/Quectel stack.
  *
- * SMS goes out over the shop's own GSM trunk (SIM), so the Twilio-style
+ * SMS goes out over the shop's own GSM trunk (SIM), so the
  * fromNumber parameter is ignored — the sending identity IS the SIM.
  */
 class AsteriskTelephonyService(
