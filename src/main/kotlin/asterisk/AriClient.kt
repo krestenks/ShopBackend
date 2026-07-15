@@ -33,7 +33,9 @@ class AriClient(private val config: AsteriskConfig) {
     suspend fun upsertEndpoint(shopId: Int, sipPassword: String) {
         val endpointId = config.endpointId(shopId)
 
-        putConfig("aor", "$endpointId-aor", mapOf(
+        // The AOR id MUST equal the registering SIP username (= endpointId), or
+        // PJSIP's AOR lookup on REGISTER fails with 404 Not Found.
+        putConfig("aor", endpointId, mapOf(
             "max_contacts" to "3",
             "qualify_frequency" to "30",
             "remove_existing" to "yes",
@@ -51,7 +53,7 @@ class AriClient(private val config: AsteriskConfig) {
             "force_rport" to "yes",
             "rewrite_contact" to "yes",
             "auth" to "$endpointId-auth",
-            "aors" to "$endpointId-aor",
+            "aors" to endpointId,
         ))
     }
 
@@ -59,7 +61,8 @@ class AriClient(private val config: AsteriskConfig) {
         val endpointId = config.endpointId(shopId)
         deleteConfig("endpoint", endpointId)
         deleteConfig("auth", "$endpointId-auth")
-        deleteConfig("aor", "$endpointId-aor")
+        deleteConfig("aor", endpointId)
+        deleteConfig("aor", "$endpointId-aor")   // clean up the pre-fix AOR name if present
     }
 
     private suspend fun putConfig(objectType: String, id: String, fields: Map<String, String>) {
