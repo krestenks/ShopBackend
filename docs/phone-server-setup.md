@@ -91,6 +91,21 @@ sudo asterisk -rx "module show like res_json"      # JSON_DECODE() — already u
 If func_curl is missing: `sudo apt install asterisk-modules` (it ships there) and
 `sudo asterisk -rx "module load func_curl.so"`.
 
+## 5b. TTS for the DTMF menu prompts
+
+The backend renders the welcome/menu prompts as WAV files (pico2wave, validated
+in the POC; sox downsamples to 8 kHz so Asterisk plays them without transcoding):
+
+```bash
+sudo apt install libttspico-utils sox
+sudo mkdir -p /usr/share/asterisk/sounds/shopbackend
+sudo chown <backend-user>:asterisk /usr/share/asterisk/sounds/shopbackend
+```
+
+Prompts are (re)generated on every provisioning run and whenever a shop's
+voice-config texts are saved in the web admin. Language: `ASTERISK_TTS_LANG`
+(default en-GB — pico has no Danish voice; the default messages are English).
+
 ## 6. Backend service on the box
 
 The backend must run ON this machine (it writes /etc/asterisk files and is CURLed
@@ -147,9 +162,14 @@ addressing per USB path. Configure the resulting name in the shop's
    `sudo asterisk -rx "pjsip show endpoints"` → `shop1-manager`.
 4. Manager app: log out/in (starts SipService) → notification "Shop phone online (1)".
 5. Test SMS button on the shop edit page → arrives on a real phone.
-6. Call the SIM from a phone → app shows the in-app incoming call screen → answer →
-   two-way audio. Backend call log gets the row (INCOMING_CALL → BRIDGED → ended).
-7. In the app, open a message thread → 📞 → outbound call goes out via the SIM.
+6. Call the SIM from an UNKNOWN phone → app shows the in-app incoming call screen
+   (pure ringing for the caller) → answer → two-way audio. Backend call log gets
+   the row (INCOMING_CALL → BRIDGED → ended).
+7. Whitelist that customer in the app (status ≠ New), call again → welcome message
+   plays → press 1 → booking-link SMS arrives; call again → press 2 → app rings.
+8. Set phone status to closed → known customer still gets the SMS-link menu;
+   unknown numbers are rejected silently.
+9. In the app, open a message thread → 📞 → outbound call goes out via the SIM.
 
 ## Deferred (known, deliberate)
 
@@ -159,8 +179,7 @@ addressing per USB path. Configure the resulting name in the shop's
   `InternalTelephonyRoutes.kt` (backend) once FCM exists.
 - **Phase 9 (LTE failover) & Phase 10 (Tailscale/DDNS)**: infra on the box;
   `ASTERISK_SIP_HOST` switches to the Tailscale hostname when done.
-- **Inbound call-flow extras from the old Phone flow spec**: blacklist,
-  opening-hours and temporary-closure rejection ARE enforced (backend answers
-  "reject" → dialplan hangs up with cause 21 before ringing the app). Still
-  missing vs the old spec: the known-customer DTMF menu (press 1 = SMS booking
-  link) and spoken welcome/closed messages — needs TTS/sound files on the box.
+- ~~Inbound call-flow extras~~ **DONE**: the full phone flow now runs in the
+  dialplan — blacklist/closed rejection, known-customer welcome + DTMF menu
+  (1 = SMS booking link, 2 = operator when open), unknown callers ring the app
+  directly, TTS prompts generated from the per-shop voice-config texts.

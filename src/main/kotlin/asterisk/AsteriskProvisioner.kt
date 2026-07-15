@@ -20,6 +20,7 @@ class AsteriskProvisioner(
     private val ariClient: AriClient,
     private val quectelConfigWriter: QuectelConfigWriter,
     private val dialplanWriter: DialplanWriter,
+    private val promptGenerator: PromptGenerator,
 ) {
 
     /**
@@ -39,6 +40,8 @@ class AsteriskProvisioner(
         }
 
         ariClient.upsertEndpoint(shopId, telephony.sipPassword!!)
+        regenerateShopPrompts(shopId)
+        promptGenerator.generateSharedPrompts()
         regenerateFiles()
         db.markShopTelephonyProvisioned(shopId)
         println("[Asterisk] Provisioned shop $shopId (trunk=${config.trunkName(shopId)}, endpoint=${config.endpointId(shopId)})")
@@ -62,15 +65,26 @@ class AsteriskProvisioner(
      */
     suspend fun provisionAllConfigured() {
         val shops = db.getAllConfiguredShopTelephonyConfigs()
+        promptGenerator.generateSharedPrompts()
         for (shop in shops) {
             val password = shop.sipPassword?.takeIf { it.isNotBlank() } ?: generateSipPassword().also {
                 db.upsertShopTelephonyConfig(shop.copy(sipPassword = it))
             }
             ariClient.upsertEndpoint(shop.shopId, password)
+            regenerateShopPrompts(shop.shopId)
         }
         regenerateFiles()
         shops.forEach { db.markShopTelephonyProvisioned(it.shopId) }
         println("[Asterisk] Full provisioning pass complete (${shops.size} shop(s))")
+    }
+
+    /**
+     * Re-renders one shop's TTS prompts from its voice-config texts. Called on
+     * provisioning and whenever the voice config is saved in the admin UI
+     * (prompt files are read per call, so no Asterisk reload is needed).
+     */
+    fun regenerateShopPrompts(shopId: Int) {
+        promptGenerator.generateShopPrompts(shopId, db.getShopVoiceConfig(shopId))
     }
 
     private fun regenerateFiles() {

@@ -30,6 +30,7 @@ import asterisk.AsteriskProvisioner
 import asterisk.AsteriskTelephonyService
 import asterisk.DialplanWriter
 import asterisk.ModemScanner
+import asterisk.PromptGenerator
 import asterisk.QuectelConfigWriter
 import asterisk.internalTelephonyRoutes
 import telephony.TelephonyService
@@ -100,6 +101,7 @@ object ShopBackend {
             ariClient = ariClient,
             quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
             dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
+            promptGenerator = PromptGenerator(asteriskConfig),
         )
         val asteriskAdmin = AsteriskAdmin(
             config = asteriskConfig,
@@ -176,8 +178,8 @@ object ShopBackend {
                 }
                 smsRoutes(db, telephonyService, callAppScreening)
 
-                // Asterisk dialplan → backend callbacks (inbound SMS/call, provisioning)
-                internalTelephonyRoutes(db, asteriskConfig, provisioner, callAppScreening)
+                // Asterisk dialplan → backend callbacks (inbound SMS/call, menu actions, provisioning)
+                internalTelephonyRoutes(db, asteriskConfig, provisioner, telephonyService, callAppScreening)
             }
         }.start(wait = true)
     }

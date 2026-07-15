@@ -17,6 +17,8 @@ ASTERISK_INTERNAL_SECRET=...   # required — auths the dialplan→backend callb
 ASTERISK_SIP_HOST=...          # host the MANAGER APP registers SIP against
                                # (Tailscale IP/hostname; LAN IP while testing)
 ASTERISK_SIP_PORT=5060
+ASTERISK_PROMPTS_PATH=/usr/share/asterisk/sounds/shopbackend
+ASTERISK_TTS_LANG=en-GB        # pico2wave voice for the menu prompts
 ```
 
 ## What the backend does
@@ -34,11 +36,20 @@ ASTERISK_SIP_PORT=5060
     `[from-sip-shop{id}]` (app outbound via `Dial(Quectel/shop{id}/${EXTEN})`)
 - **Internal endpoints** (`asterisk/InternalTelephonyRoutes.kt`), secret-authenticated:
   - `POST /api/internal/telephony/sms/inbound` — dialplan hands over inbound SMS
-  - `POST /api/internal/telephony/call/inbound` — creates the call log, answers
-    `reject` for blacklisted callers (dialplan hook), `ok` otherwise
+  - `POST /api/internal/telephony/call/inbound` — creates the call log and returns the
+    routing verdict: `reject` (blacklist, or unknown caller while closed), `ring`
+    (unknown caller while open → plain ringing to the app), `menu_open` /
+    `menu_closed` / `menu_temp` (known customer → welcome + DTMF menu variant)
+  - `POST /api/internal/telephony/booking-link` — menu digit 1: creates a booking token
+    and texts the link via the shop's SIM; answers `ok`/`fail` for the prompt choice
+  - `POST /api/internal/telephony/call/event` — menu bookkeeping (`operator`,
+    `menu_timeout`) so the call log mirrors the flow
   - `POST /api/internal/telephony/provision` — trigger provisioning via curl until the
     admin UI gets a button, e.g.
     `curl -X POST localhost:8080/api/internal/telephony/provision -d "secret=...&shopId=3"`
+- **TTS prompts** (`asterisk/PromptGenerator.kt`): welcome/menu texts from the shop's
+  voice config are rendered to WAV via pico2wave (+sox → 8 kHz) into
+  `$ASTERISK_PROMPTS_PATH`; regenerated on provisioning and on voice-config save.
 - **Event handler** (`asterisk/AsteriskEventHandler.kt`): AMI DialEnd/Hangup events
   close call-log rows (keyed by Asterisk UNIQUEID stored in `voice_call.twilio_call_sid`).
 

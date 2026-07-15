@@ -1276,6 +1276,9 @@ class WebAdmin(
                     )
                     db.upsertShopVoiceConfig(voice)
 
+                    // Re-render this shop's TTS voice prompts from the new texts (best-effort).
+                    asteriskAdmin?.let { runCatching { it.provisioner.regenerateShopPrompts(id) } }
+
                     // Opening hours
                     fun parseMin(s: String?): Int? {
                         if (s.isNullOrBlank()) return null
@@ -2955,6 +2958,10 @@ class WebAdmin(
                         smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
                     )
                     db.upsertShopVoiceConfig(voice)
+
+                    // Re-render this shop's TTS voice prompts from the new texts (best-effort).
+                    asteriskAdmin?.let { adm -> runCatching { voice.shopId.let { adm.provisioner.regenerateShopPrompts(it) } } }
+
                     fun parseMin(s: String?): Int? {
                         if (s.isNullOrBlank()) return null
                         val parts = s.trim().split(":")

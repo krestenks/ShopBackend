@@ -21,6 +21,9 @@ package asterisk
  *                              against (Tailscale IP/hostname of the phone server;
  *                              LAN IP during testing). No default.
  *   ASTERISK_SIP_PORT          default 5060
+ *   ASTERISK_PROMPTS_PATH      where generated TTS voice prompts go
+ *                              (default /usr/share/asterisk/sounds/shopbackend)
+ *   ASTERISK_TTS_LANG          pico2wave language for prompts (default en-GB)
  */
 data class AsteriskConfig(
     val amiHost: String,
@@ -35,6 +38,8 @@ data class AsteriskConfig(
     val internalSecret: String,
     val sipHost: String,
     val sipPort: Int,
+    val promptsPath: String,
+    val ttsLang: String,
 ) {
     companion object {
         fun fromEnv(): AsteriskConfig = AsteriskConfig(
@@ -50,6 +55,8 @@ data class AsteriskConfig(
             internalSecret = env("ASTERISK_INTERNAL_SECRET", ""),
             sipHost = env("ASTERISK_SIP_HOST", ""),
             sipPort = System.getenv("ASTERISK_SIP_PORT")?.toIntOrNull() ?: 5060,
+            promptsPath = env("ASTERISK_PROMPTS_PATH", "/usr/share/asterisk/sounds/shopbackend").trimEnd('/'),
+            ttsLang = env("ASTERISK_TTS_LANG", "en-GB"),
         )
 
         private fun env(name: String, default: String): String =
