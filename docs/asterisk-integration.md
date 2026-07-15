@@ -1,10 +1,9 @@
-# Asterisk Integration (Phase 2 — backend module)
+# Asterisk Integration (backend module)
 
-The backend can run against Twilio (default) or the self-hosted Asterisk/Quectel GSM
-stack. The provider is chosen at startup:
+The self-hosted Asterisk/Quectel GSM stack is the ONLY telephony provider
+(Twilio was removed 2026-07-15). Configuration:
 
 ```
-ASTERISK_ENABLED=true          # switch provider to Asterisk
 ASTERISK_AMI_HOST=127.0.0.1    # defaults shown
 ASTERISK_AMI_PORT=5038
 ASTERISK_AMI_USERNAME=kotlinbackend
@@ -20,7 +19,7 @@ ASTERISK_SIP_HOST=...          # host the MANAGER APP registers SIP against
 ASTERISK_SIP_PORT=5060
 ```
 
-## What the backend does when enabled
+## What the backend does
 
 - **AMI** (`asterisk/AmiClient.kt`): persistent connection for events, outbound SMS
   (`QuectelSendSMS` action with CLI fallback `quectel sms send ...`), call originate,

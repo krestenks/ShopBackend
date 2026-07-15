@@ -108,12 +108,11 @@ After=network-online.target asterisk.service
 [Service]
 User=phone
 Environment=PORT=8080
-Environment=ASTERISK_ENABLED=true
 Environment=ASTERISK_AMI_SECRET=...
 Environment=ASTERISK_ARI_PASSWORD=...
 Environment=ASTERISK_INTERNAL_SECRET=...
 Environment=ASTERISK_SIP_HOST=192.168.0.192   ; LAN for now; Tailscale IP later (Phase 10)
-# plus the usual TWILIO_*/ADMIN_* vars as needed
+# plus the usual ADMIN_* vars as needed
 ExecStart=/usr/bin/java -jar /opt/shopbackend/ShopBackend.jar --db /opt/shopbackend/data/ShopManager.db
 Restart=always
 
@@ -160,7 +159,8 @@ addressing per USB path. Configure the resulting name in the shop's
   `InternalTelephonyRoutes.kt` (backend) once FCM exists.
 - **Phase 9 (LTE failover) & Phase 10 (Tailscale/DDNS)**: infra on the box;
   `ASTERISK_SIP_HOST` switches to the Tailscale hostname when done.
-- **Twilio inbound call-flow parity** (blacklist works; DTMF menu / opening-hours
-  routing / operator whisper from the old Phone flow spec are not yet in the
-  generated dialplan — inbound currently rings the app directly after a 2 s
-  push-wake pause).
+- **Inbound call-flow extras from the old Phone flow spec**: blacklist,
+  opening-hours and temporary-closure rejection ARE enforced (backend answers
+  "reject" → dialplan hangs up with cause 21 before ringing the app). Still
+  missing vs the old spec: the known-customer DTMF menu (press 1 = SMS booking
+  link) and spoken welcome/closed messages — needs TTS/sound files on the box.
