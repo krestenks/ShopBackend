@@ -177,8 +177,10 @@ addressing per USB path. Configure the resulting name in the shop's
   Until then the app keeps SIP registered via a persistent foreground service —
   acceptable for dedicated manager phones. TODO hook is in
   `InternalTelephonyRoutes.kt` (backend) once FCM exists.
-- **Phase 9 (LTE failover) & Phase 10 (Tailscale/DDNS)**: infra on the box;
+- **Phase 9 (LTE failover)**: infra on the box.
+- **Phase 10 (Tailscale)**: setup plan in `docs/tailscale-setup.md`;
   `ASTERISK_SIP_HOST` switches to the Tailscale hostname when done.
+  DDNS half stays deferred (nothing external needs to reach the box).
 - ~~Inbound call-flow extras~~ **DONE**: the full phone flow now runs in the
   dialplan — blacklist/closed rejection, known-customer welcome + DTMF menu
   (1 = SMS booking link, 2 = operator when open), unknown callers ring the app
