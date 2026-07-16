@@ -48,15 +48,10 @@ class AsteriskProvisioner(
      * @return the (possibly updated) telephony config, including the SIP password.
      */
     suspend fun provisionShop(shopId: Int): ShopTelephonyConfig {
-        var telephony = db.getShopTelephonyConfig(shopId)
+        val telephony = db.getShopTelephonyConfig(shopId)
         require(!telephony.imsi.isNullOrBlank()) { "Shop $shopId has no SIM (IMSI) assigned" }
 
-        if (telephony.sipPassword.isNullOrBlank()) {
-            telephony = telephony.copy(sipPassword = generateSipPassword())
-            db.upsertShopTelephonyConfig(telephony)
-        }
-
-        ariClient.upsertEndpoint(shopId, telephony.sipPassword!!)
+        ensureSipAccounts(shopId)
         regenerateShopPrompts(shopId)
         promptGenerator.generateSharedPrompts()
         regenerateFiles()   // resolves the current modem for every shop's IMSI, then writes + reloads
@@ -82,18 +77,47 @@ class AsteriskProvisioner(
      * files. Safe to run at startup: brings a rebuilt/blank Asterisk back in sync.
      */
     suspend fun provisionAllConfigured() {
-        val shops = db.getAllConfiguredShopTelephonyConfigs()
         promptGenerator.generateSharedPrompts()
-        for (shop in shops) {
-            val password = shop.sipPassword?.takeIf { it.isNotBlank() } ?: generateSipPassword().also {
-                db.upsertShopTelephonyConfig(shop.copy(sipPassword = it))
-            }
-            ariClient.upsertEndpoint(shop.shopId, password)
-            regenerateShopPrompts(shop.shopId)
+        // Internal SIP accounts (manager + in-shop device) exist for EVERY shop —
+        // intercom calling must not depend on a SIM being assigned.
+        val allShops = db.getAllShops()
+        for (shop in allShops) {
+            ensureSipAccounts(shop.id)
         }
+        // GSM extras only for SIM-assigned shops.
+        val gsmShops = db.getAllConfiguredShopTelephonyConfigs()
+        gsmShops.forEach { regenerateShopPrompts(it.shopId) }
         regenerateFiles()
-        shops.forEach { db.markShopTelephonyProvisioned(it.shopId) }
-        println("[Asterisk] Full provisioning pass complete (${shops.size} shop(s))")
+        allShops.forEach { db.markShopTelephonyProvisioned(it.id) }
+        println("[Asterisk] Full provisioning pass complete (${allShops.size} shop(s), ${gsmShops.size} with SIM)")
+    }
+
+    /**
+     * Makes sure both SIP accounts (manager app + in-shop device) exist for a shop:
+     * generates missing passwords and pushes the PJSIP objects via ARI.
+     */
+    suspend fun ensureSipAccounts(shopId: Int): ShopTelephonyConfig {
+        var cfg = db.getShopTelephonyConfig(shopId)
+        if (cfg.sipPassword.isNullOrBlank() || cfg.sipPhonePassword.isNullOrBlank()) {
+            cfg = cfg.copy(
+                sipPassword = cfg.sipPassword?.takeIf { it.isNotBlank() } ?: generateSipPassword(),
+                sipPhonePassword = cfg.sipPhonePassword?.takeIf { it.isNotBlank() } ?: generateSipPassword(),
+            )
+            db.upsertShopTelephonyConfig(cfg)
+        }
+        ariClient.upsertEndpoint(shopId, cfg.sipPassword!!)
+        ariClient.upsertPhoneEndpoint(shopId, cfg.sipPhonePassword!!)
+        return cfg
+    }
+
+    /** Internal-intercom groups: each shop with all shops sharing its manager. */
+    private fun internalEntries(): List<InternalShopEntry> {
+        val shops = db.getAllShops()
+        val byManager = shops.groupBy { it.managerId }
+        return shops.map { s ->
+            val group = byManager[s.managerId].orEmpty().map { it.id }.ifEmpty { listOf(s.id) }
+            InternalShopEntry(s.id, group)
+        }
     }
 
     /**
@@ -134,14 +158,18 @@ class AsteriskProvisioner(
         // Only write trunks whose device actually resolved (a modem is present).
         val shops = db.getAllConfiguredShopTelephonyConfigs().filter { !it.modemDataDevice.isNullOrBlank() }
         quectelConfigWriter.regenerate(shops)
-        dialplanWriter.regenerate(shops)
+        dialplanWriter.regenerate(shops, internalEntries())
     }
 
-    /** Removes a shop's SIM binding and re-provisions the rest. */
+    /**
+     * Removes a shop's SIM binding (GSM trunk goes away) and regenerates. The SIP
+     * accounts stay — internal intercom keeps working without a SIM.
+     */
     suspend fun unassignShop(shopId: Int) {
         val cfg = db.getShopTelephonyConfig(shopId)
         db.upsertShopTelephonyConfig(cfg.copy(imsi = null, modemDataDevice = null, modemAlsaDevice = null))
-        deprovisionShop(shopId)
+        regenerateFiles()
+        println("[Asterisk] Unassigned SIM from shop $shopId (intercom endpoints kept)")
     }
 
     private fun generateSipPassword(): String {

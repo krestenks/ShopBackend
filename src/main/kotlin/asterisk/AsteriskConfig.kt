@@ -69,9 +69,18 @@ data class AsteriskConfig(
     /** PJSIP endpoint id the manager app registers as, e.g. "shop3-manager". */
     fun endpointId(shopId: Int) = "shop$shopId-manager"
 
+    /** PJSIP endpoint id the IN-SHOP device registers as, e.g. "shop3-phone". */
+    fun phoneEndpointId(shopId: Int) = "shop$shopId-phone"
+
     /** Dialplan context for calls/SMS arriving on a shop's GSM trunk. */
     fun inboundContext(shopId: Int) = "from-gsm-shop$shopId"
 
-    /** Dialplan context the shop's SIP endpoint dials out from. */
+    /** Dialplan context the shop's MANAGER SIP endpoint dials out from (GSM + internal). */
     fun outboundContext(shopId: Int) = "from-sip-shop$shopId"
+
+    /** Dialplan context the IN-SHOP device dials from (internal extensions only — no GSM). */
+    fun internalContext(shopId: Int) = "from-shopphone-shop$shopId"
+
+    /** Internal extension that rings shop [shopId]'s in-shop device. */
+    fun shopPhoneExten(shopId: Int) = "shopphone$shopId"
 }

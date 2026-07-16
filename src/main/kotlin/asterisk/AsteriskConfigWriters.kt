@@ -84,7 +84,11 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
 
     private val file: Path = Paths.get(config.configPath, "extensions_shops.conf")
 
-    fun regenerate(shops: List<ShopTelephonyConfig>, reload: Boolean = true) {
+    fun regenerate(
+        shops: List<ShopTelephonyConfig>,
+        internal: List<InternalShopEntry> = emptyList(),
+        reload: Boolean = true,
+    ) {
         val d = "$"  // avoids Kotlin template/Asterisk ${...} collisions below
         val content = buildString {
             append(GENERATED_HEADER)
@@ -178,10 +182,47 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                 appendLine(" same => n,Hangup()")
                 appendLine("exten => _0X.,1,Dial(Quectel/$trunk/$d{EXTEN},60)")
                 appendLine(" same => n,Hangup()")
+                appendLine("include => ${internalIncludeName(id)}")
+            }
+
+            // ── Internal intercom (shop devices ↔ manager), per manager group ──
+            val gsmShopIds = shops.filter { !it.modemDataDevice.isNullOrBlank() }.map { it.shopId }.toSet()
+            for (entry in internal) {
+                val id = entry.shopId
+
+                // Extensions this shop's manager-family can dial (shared include).
+                appendLine()
+                appendLine("[${internalIncludeName(id)}]")
+                appendLine("; Internal extensions for shop $id's manager group (intercom, no GSM).")
+                for (sibling in entry.groupShopIds) {
+                    appendLine("exten => ${config.shopPhoneExten(sibling)},1,Dial(PJSIP/${config.phoneEndpointId(sibling)},45)")
+                    appendLine(" same => n,Hangup()")
+                }
+
+                // The in-shop device's own context: internal extens + "manager".
+                appendLine()
+                appendLine("[${config.internalContext(id)}]")
+                appendLine("; In-shop device for shop $id — internal calls only, no GSM access.")
+                appendLine("exten => manager,1,Dial(PJSIP/${config.endpointId(id)},45)")
+                appendLine(" same => n,Hangup()")
+                appendLine("include => ${internalIncludeName(id)}")
+
+                // Manager endpoints of SIM-less shops still need a dialable context.
+                if (id !in gsmShopIds) {
+                    appendLine()
+                    appendLine("[${config.outboundContext(id)}]")
+                    appendLine("; Manager endpoint for shop $id (no SIM assigned) — internal calls only.")
+                    appendLine("include => ${internalIncludeName(id)}")
+                }
             }
         }
         writeAtomically(file, content)
         if (reload) amiClient.reloadDialplan()
-        println("[Asterisk] Wrote $file (${shops.size} shop context set(s))")
+        println("[Asterisk] Wrote $file (${shops.size} GSM + ${internal.size} internal context set(s))")
     }
+
+    private fun internalIncludeName(shopId: Int) = "internal-shop$shopId"
 }
+
+/** One shop's internal-intercom entry: itself + all shops sharing its manager. */
+data class InternalShopEntry(val shopId: Int, val groupShopIds: List<Int>)

@@ -30,11 +30,18 @@ class AriClient(private val config: AsteriskConfig) {
     private val client = HttpClient(CIO)
 
     /** Creates or updates the PJSIP endpoint+auth+aor triplet for a shop's manager app. */
-    suspend fun upsertEndpoint(shopId: Int, sipPassword: String) {
-        val endpointId = config.endpointId(shopId)
+    suspend fun upsertEndpoint(shopId: Int, sipPassword: String) =
+        upsertSipAccount(config.endpointId(shopId), sipPassword, config.outboundContext(shopId))
 
-        // The AOR id MUST equal the registering SIP username (= endpointId), or
-        // PJSIP's AOR lookup on REGISTER fails with 404 Not Found.
+    /** Creates or updates the endpoint the IN-SHOP device registers as (internal-only context). */
+    suspend fun upsertPhoneEndpoint(shopId: Int, sipPassword: String) =
+        upsertSipAccount(config.phoneEndpointId(shopId), sipPassword, config.internalContext(shopId))
+
+    /**
+     * Generic endpoint+auth+aor triplet. The AOR id MUST equal the registering SIP
+     * username (= endpointId), or PJSIP's AOR lookup on REGISTER fails with 404.
+     */
+    private suspend fun upsertSipAccount(endpointId: String, sipPassword: String, context: String) {
         putConfig("aor", endpointId, mapOf(
             "max_contacts" to "3",
             "qualify_frequency" to "30",
@@ -46,7 +53,7 @@ class AriClient(private val config: AsteriskConfig) {
             "password" to sipPassword,
         ))
         putConfig("endpoint", endpointId, mapOf(
-            "context" to config.outboundContext(shopId),
+            "context" to context,
             "allow" to "!all,ulaw,alaw,g722",
             "direct_media" to "no",
             "rtp_symmetric" to "yes",
@@ -58,11 +65,12 @@ class AriClient(private val config: AsteriskConfig) {
     }
 
     suspend fun deleteEndpoint(shopId: Int) {
-        val endpointId = config.endpointId(shopId)
-        deleteConfig("endpoint", endpointId)
-        deleteConfig("auth", "$endpointId-auth")
-        deleteConfig("aor", endpointId)
-        deleteConfig("aor", "$endpointId-aor")   // clean up the pre-fix AOR name if present
+        for (endpointId in listOf(config.endpointId(shopId), config.phoneEndpointId(shopId))) {
+            deleteConfig("endpoint", endpointId)
+            deleteConfig("auth", "$endpointId-auth")
+            deleteConfig("aor", endpointId)
+        }
+        deleteConfig("aor", "${config.endpointId(shopId)}-aor")   // pre-fix AOR name, if present
     }
 
     private suspend fun putConfig(objectType: String, id: String, fields: Map<String, String>) {

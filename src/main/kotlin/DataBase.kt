@@ -208,6 +208,8 @@ data class ShopTelephonyConfig(
     val modemAlsaDevice: String? = null,
     /** SIP password the manager app registers with (username = shop{id}-manager). */
     val sipPassword: String? = null,
+    /** SIP password the IN-SHOP device registers with (username = shop{id}-phone). */
+    val sipPhonePassword: String? = null,
     /** Epoch ms of last successful Asterisk provisioning; null = never. */
     val provisionedAt: Long? = null,
 )
@@ -741,6 +743,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
             // IMSI-keyed telephony assignment (shop bound to a SIM, not a USB port)
             "ALTER TABLE shop_telephony_config ADD COLUMN imsi TEXT",
+            // SIP credential for the in-shop device (internal intercom calls)
+            "ALTER TABLE shop_telephony_config ADD COLUMN sip_phone_password TEXT",
             // Appointment workflow status tracking
             "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
@@ -951,11 +955,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         modemDataDevice = rs.getString("modem_data_device"),
         modemAlsaDevice = rs.getString("modem_alsa_device"),
         sipPassword = rs.getString("sip_password"),
+        sipPhonePassword = rs.getString("sip_phone_password"),
         provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
     )
 
     private val telephonySelect =
-        "SELECT shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at FROM shop_telephony_config"
+        "SELECT shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at FROM shop_telephony_config"
 
     fun getShopTelephonyConfig(shopId: Int): ShopTelephonyConfig {
         connection.prepareStatement("$telephonySelect WHERE shop_id = ?").use { stmt ->
@@ -991,14 +996,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun upsertShopTelephonyConfig(config: ShopTelephonyConfig) {
         val sql = """
             INSERT INTO shop_telephony_config
-                (shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, provisioned_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 imsi = excluded.imsi,
                 phone_number = excluded.phone_number,
                 modem_data_device = excluded.modem_data_device,
                 modem_alsa_device = excluded.modem_alsa_device,
                 sip_password = excluded.sip_password,
+                sip_phone_password = excluded.sip_phone_password,
                 provisioned_at = excluded.provisioned_at
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -1008,7 +1014,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(4, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
             stmt.setString(5, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
             stmt.setString(6, config.sipPassword?.takeIf { it.isNotBlank() })
-            if (config.provisionedAt != null) stmt.setLong(7, config.provisionedAt) else stmt.setNull(7, java.sql.Types.BIGINT)
+            stmt.setString(7, config.sipPhonePassword?.takeIf { it.isNotBlank() })
+            if (config.provisionedAt != null) stmt.setLong(8, config.provisionedAt) else stmt.setNull(8, java.sql.Types.BIGINT)
             stmt.executeUpdate()
         }
     }

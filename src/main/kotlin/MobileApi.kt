@@ -146,6 +146,13 @@ data class SipCredentialsResponse(
     val shopPhoneNumber: String? = null,
 )
 
+/** One callable intercom colleague (internal SIP extension). */
+@Serializable
+data class SipContact(val name: String, val exten: String, val type: String)
+
+@Serializable
+data class SipContactsResponse(val contacts: List<SipContact>)
+
 data class LoginInfo(val role: String, val managerId: Int?, val shopId: Int?, val ownerId: Int = 0)
 
 // ─── Availability screen models ───────────────────────────────────────────────
@@ -303,7 +310,13 @@ class MobileApi(
                     val admin = asteriskAdmin
                         ?: return@get call.respond(HttpStatusCode.NotFound, "Self-hosted telephony not enabled")
                     val tele = db.getShopTelephonyConfig(shopId)
-                    if (tele.sipPassword.isNullOrBlank() || tele.provisionedAt == null) {
+                    // Manager app registers shop{id}-manager; the in-shop device shop{id}-phone.
+                    val (username, password) = if (loginInfo.role == "shop") {
+                        admin.config.phoneEndpointId(shopId) to tele.sipPhonePassword
+                    } else {
+                        admin.config.endpointId(shopId) to tele.sipPassword
+                    }
+                    if (password.isNullOrBlank()) {
                         call.respond(HttpStatusCode.NotFound, "Shop not provisioned for telephony")
                         return@get
                     }
@@ -313,13 +326,44 @@ class MobileApi(
                     }
                     call.respond(SipCredentialsResponse(
                         shopId = shopId,
-                        username = admin.config.endpointId(shopId),
-                        password = tele.sipPassword!!,
+                        username = username,
+                        password = password,
                         host = admin.config.sipHost,
                         port = admin.config.sipPort,
                         transport = "udp",
                         shopPhoneNumber = tele.phoneNumber,
                     ))
+                }
+
+                /**
+                 * Callable intercom colleagues for the caller.
+                 * Shop role: its manager + sibling shops. Manager role: all their shops.
+                 *
+                 * GET /api/mobile/telephony/contacts
+                 */
+                get("/api/mobile/telephony/contacts") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    if (asteriskAdmin == null) {
+                        call.respond(SipContactsResponse(emptyList()))
+                        return@get
+                    }
+                    val contacts = mutableListOf<SipContact>()
+                    if (loginInfo.role == "shop") {
+                        val shopId = loginInfo.shopId ?: return@get call.respond(HttpStatusCode.Forbidden)
+                        val managerId = db.getShopById(shopId)?.managerId
+                        if (managerId != null && managerId > 0) {
+                            val managerName = db.getManagerById(managerId)?.name ?: "Manager"
+                            contacts += SipContact(name = managerName, exten = "manager", type = "manager")
+                            db.getShopsForManager(managerId)
+                                .filter { it.id != shopId }
+                                .forEach { contacts += SipContact(name = it.name, exten = "shopphone${it.id}", type = "shop") }
+                        }
+                    } else {
+                        val managerId = loginInfo.managerId ?: return@get call.respond(HttpStatusCode.Forbidden)
+                        db.getShopsForManager(managerId)
+                            .forEach { contacts += SipContact(name = it.name, exten = "shopphone${it.id}", type = "shop") }
+                    }
+                    call.respond(SipContactsResponse(contacts))
                 }
 
                 // ─────────────────────────────────────────────────────────────

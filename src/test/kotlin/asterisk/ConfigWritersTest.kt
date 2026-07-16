@@ -74,6 +74,38 @@ class ConfigWritersTest {
     }
 
     @Test
+    fun `internal intercom contexts generated per manager group`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(
+            shops = listOf(shop),  // shop 7 has a SIM
+            internal = listOf(
+                InternalShopEntry(7, listOf(7, 9)),
+                InternalShopEntry(9, listOf(7, 9)),   // shop 9: no SIM, intercom only
+            ),
+            reload = false,
+        )
+        val text = java.nio.file.Paths.get(dir, "extensions_shops.conf").readText()
+
+        // Shared internal extens per group member
+        assertTrue(text.contains("[internal-shop7]"))
+        assertTrue(text.contains("exten => shopphone9,1,Dial(PJSIP/shop9-phone,45)"))
+        // In-shop device context: manager exten + group include, and NO GSM patterns
+        val ctx7 = text.substringAfter("[from-shopphone-shop7]").substringBefore("[")
+        assertTrue(ctx7.contains("exten => manager,1,Dial(PJSIP/shop7-manager,45)"))
+        assertTrue(ctx7.contains("include => internal-shop7"))
+        assertFalse(ctx7.contains("Quectel/"))
+        // GSM shop's manager context includes the internal extens
+        val sip7 = text.substringAfter("[from-sip-shop7]").substringBefore("[")
+        assertTrue(sip7.contains("include => internal-shop7"))
+        assertTrue(sip7.contains("Quectel/shop7"))
+        // SIM-less shop still gets a manager context (internal only)
+        val sip9 = text.substringAfter("[from-sip-shop9]").substringBefore("[")
+        assertTrue(sip9.contains("include => internal-shop9"))
+        assertFalse(sip9.contains("Quectel/"))
+    }
+
+    @Test
     fun `quectel trunk section uses RoEdAl UAC keys`() {
         val dir = Files.createTempDirectory("astconf").toString()
         val config = testConfig(dir)
