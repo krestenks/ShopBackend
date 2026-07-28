@@ -38,12 +38,28 @@ class AriClient(private val config: AsteriskConfig) {
         upsertSipAccount(config.phoneEndpointId(shopId), sipPassword, config.internalContext(shopId))
 
     /**
+     * Creates or updates a MANAGER's single SIP identity (mgr{id}). A pool of managers
+     * each register their own endpoint; the duty-aware routing forks the inbound call to
+     * every on-duty covering manager's endpoint. Higher max_contacts so one manager can
+     * be logged in on several devices.
+     */
+    suspend fun upsertManagerEndpoint(managerId: Int, sipPassword: String) =
+        upsertSipAccount(config.managerEndpointId(managerId), sipPassword, config.managerContext(managerId), maxContacts = 5)
+
+    suspend fun deleteManagerEndpoint(managerId: Int) {
+        val endpointId = config.managerEndpointId(managerId)
+        deleteConfig("endpoint", endpointId)
+        deleteConfig("auth", "$endpointId-auth")
+        deleteConfig("aor", endpointId)
+    }
+
+    /**
      * Generic endpoint+auth+aor triplet. The AOR id MUST equal the registering SIP
      * username (= endpointId), or PJSIP's AOR lookup on REGISTER fails with 404.
      */
-    private suspend fun upsertSipAccount(endpointId: String, sipPassword: String, context: String) {
+    private suspend fun upsertSipAccount(endpointId: String, sipPassword: String, context: String, maxContacts: Int = 3) {
         putConfig("aor", endpointId, mapOf(
-            "max_contacts" to "3",
+            "max_contacts" to maxContacts.toString(),
             "qualify_frequency" to "30",
             "remove_existing" to "yes",
         ))

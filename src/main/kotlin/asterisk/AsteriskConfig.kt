@@ -69,14 +69,27 @@ data class AsteriskConfig(
     /** PJSIP endpoint id the manager app registers as, e.g. "shop3-manager". */
     fun endpointId(shopId: Int) = "shop$shopId-manager"
 
+    /**
+     * Per-MANAGER PJSIP endpoint id, e.g. "mgr5". One identity per manager (not per
+     * shop), so a manager registers a single SIP account regardless of how many shops
+     * they cover. Used as the ring target by the duty-aware pool routing.
+     */
+    fun managerEndpointId(managerId: Int) = "mgr$managerId"
+
+    /** Dialplan context a manager's SIP endpoint dials out from (GSM per-shop + intercom). */
+    fun managerContext(managerId: Int) = "from-mgr$managerId"
+
     /** PJSIP endpoint id the IN-SHOP device registers as, e.g. "shop3-phone". */
     fun phoneEndpointId(shopId: Int) = "shop$shopId-phone"
 
     /** Dialplan context for calls/SMS arriving on a shop's GSM trunk. */
     fun inboundContext(shopId: Int) = "from-gsm-shop$shopId"
 
+    /** Prefix of the per-shop outbound context; append a shop id (or dialplan var). */
+    val outboundContextPrefix get() = "from-sip-shop"
+
     /** Dialplan context the shop's MANAGER SIP endpoint dials out from (GSM + internal). */
-    fun outboundContext(shopId: Int) = "from-sip-shop$shopId"
+    fun outboundContext(shopId: Int) = "$outboundContextPrefix$shopId"
 
     /** Dialplan context the IN-SHOP device dials from (internal extensions only — no GSM). */
     fun internalContext(shopId: Int) = "from-shopphone-shop$shopId"

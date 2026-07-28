@@ -815,6 +815,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
             // ── Tenant-wide blacklist: add owner_id to phone_blacklist ──
             "ALTER TABLE phone_blacklist ADD COLUMN owner_id INTEGER",
+            // ── Per-manager SIP identity (mgr{id}) for the duty-aware call pool ──
+            "ALTER TABLE managers ADD COLUMN sip_password TEXT",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -3104,6 +3106,23 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      */
     fun getOnDutyManagerIdsForShop(shopId: Int): List<Int> =
         getManagerIdsForShop(shopId).filter { isManagerOnDuty(it) }
+
+    /** The per-manager SIP password (mgr{id} endpoint), or null if not provisioned yet. */
+    fun getManagerSipPassword(managerId: Int): String? {
+        connection.prepareStatement("SELECT sip_password FROM managers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("sip_password")?.takeIf { it.isNotBlank() } else null
+        }
+    }
+
+    fun setManagerSipPassword(managerId: Int, password: String) {
+        connection.prepareStatement("UPDATE managers SET sip_password = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, password)
+            stmt.setInt(2, managerId)
+            stmt.executeUpdate()
+        }
+    }
 
     fun getAllShops(): List<Shop> {
         val shops = mutableListOf<Shop>()

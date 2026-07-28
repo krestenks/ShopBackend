@@ -87,6 +87,7 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
     fun regenerate(
         shops: List<ShopTelephonyConfig>,
         internal: List<InternalShopEntry> = emptyList(),
+        managers: List<ManagerDialEntry> = emptyList(),
         reload: Boolean = true,
     ) {
         val d = "$"  // avoids Kotlin template/Asterisk ${...} collisions below
@@ -215,10 +216,40 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                     appendLine("include => ${internalIncludeName(id)}")
                 }
             }
+
+            // ── Per-manager identity contexts (duty-aware call pool) ──
+            // Each manager registers ONE endpoint (mgr{id}) and dials out from here.
+            // GSM: the app dials "shop{id}-{number}" so a manager covering several
+            // shops picks which SIM to use; the number is handed to that shop's existing
+            // outbound context. A manager with exactly one SIM shop may also dial a bare
+            // number. Intercom extensions come from the covered shops' internal includes.
+            for (entry in managers) {
+                appendLine()
+                appendLine("[${config.managerContext(entry.managerId)}]")
+                appendLine("; Manager ${entry.managerId} — single SIP identity for the call pool.")
+                appendLine("; GSM outbound: app dials shop{id}-{number} to select the shop's SIM.")
+                appendLine("exten => _shopX.,1,NoOp(mgr${entry.managerId} GSM out ${d}{EXTEN})")
+                appendLine(" same => n,Set(REST=${d}{EXTEN:4})")
+                appendLine(" same => n,Set(SHOPSEL=${d}{CUT(REST,-,1)})")
+                appendLine(" same => n,Set(NUM=${d}{CUT(REST,-,2)})")
+                appendLine(" same => n,GotoIf(${d}[\"${d}{NUM}\" = \"\"]?badnum,1)")
+                appendLine(" same => n,Goto(${config.outboundContextPrefix}${d}{SHOPSEL},${d}{NUM},1)")
+                appendLine("exten => badnum,1,Hangup()")
+                // Single-SIM convenience: a bare +45.../0... number uses the only SIM shop.
+                val soloGsm = entry.gsmShopIds.singleOrNull()
+                if (soloGsm != null) {
+                    appendLine("; Single SIM: a bare number routes to shop $soloGsm.")
+                    appendLine("exten => _+X.,1,Goto(${config.outboundContext(soloGsm)},${d}{EXTEN},1)")
+                    appendLine("exten => _0X.,1,Goto(${config.outboundContext(soloGsm)},${d}{EXTEN},1)")
+                }
+                for (shopId in entry.coveredShopIds) {
+                    appendLine("include => ${internalIncludeName(shopId)}")
+                }
+            }
         }
         writeAtomically(file, content)
         if (reload) amiClient.reloadDialplan()
-        println("[Asterisk] Wrote $file (${shops.size} GSM + ${internal.size} internal context set(s))")
+        println("[Asterisk] Wrote $file (${shops.size} GSM + ${internal.size} internal + ${managers.size} manager context set(s))")
     }
 
     private fun internalIncludeName(shopId: Int) = "internal-shop$shopId"
@@ -226,3 +257,14 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
 
 /** One shop's internal-intercom entry: itself + all shops sharing its manager. */
 data class InternalShopEntry(val shopId: Int, val groupShopIds: List<Int>)
+
+/**
+ * One manager's dial context. [coveredShopIds] = every shop the manager covers (for
+ * intercom includes); [gsmShopIds] = the subset of those that currently have a SIM (a
+ * single one enables bare-number dialing).
+ */
+data class ManagerDialEntry(
+    val managerId: Int,
+    val coveredShopIds: List<Int>,
+    val gsmShopIds: List<Int>,
+)

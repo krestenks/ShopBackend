@@ -52,6 +52,7 @@ class AsteriskProvisioner(
         require(!telephony.imsi.isNullOrBlank()) { "Shop $shopId has no SIM (IMSI) assigned" }
 
         ensureSipAccounts(shopId)
+        ensureAllManagerEndpoints()
         regenerateShopPrompts(shopId)
         promptGenerator.generateSharedPrompts()
         regenerateFiles()   // resolves the current modem for every shop's IMSI, then writes + reloads
@@ -84,6 +85,8 @@ class AsteriskProvisioner(
         for (shop in allShops) {
             ensureSipAccounts(shop.id)
         }
+        // One SIP identity per manager for the duty-aware call pool.
+        ensureAllManagerEndpoints()
         // GSM extras only for SIM-assigned shops.
         val gsmShops = db.getAllConfiguredShopTelephonyConfigs()
         gsmShops.forEach { regenerateShopPrompts(it.shopId) }
@@ -110,6 +113,23 @@ class AsteriskProvisioner(
         return cfg
     }
 
+    /**
+     * Ensures a manager's single SIP identity (mgr{id}) exists: generates a password
+     * if missing and pushes the PJSIP objects via ARI. Returns the password.
+     */
+    suspend fun ensureManagerEndpoint(managerId: Int): String {
+        val pw = db.getManagerSipPassword(managerId) ?: generateSipPassword().also {
+            db.setManagerSipPassword(managerId, it)
+        }
+        ariClient.upsertManagerEndpoint(managerId, pw)
+        return pw
+    }
+
+    /** Pushes a mgr{id} endpoint for every manager. */
+    suspend fun ensureAllManagerEndpoints() {
+        for (m in db.getAllManagers()) ensureManagerEndpoint(m.id)
+    }
+
     /** Internal-intercom groups: each shop with all shops sharing its manager. */
     private fun internalEntries(): List<InternalShopEntry> {
         val shops = db.getAllShops()
@@ -117,6 +137,25 @@ class AsteriskProvisioner(
         return shops.map { s ->
             val group = byManager[s.managerId].orEmpty().map { it.id }.ifEmpty { listOf(s.id) }
             InternalShopEntry(s.id, group)
+        }
+    }
+
+    /**
+     * One dial context per manager: the shops they cover (primary ∪ call pool) for
+     * intercom, and the subset with a live SIM for bare-number dialing.
+     */
+    private fun managerEntries(): List<ManagerDialEntry> {
+        val gsmShopIds = db.getAllConfiguredShopTelephonyConfigs()
+            .filter { !it.modemDataDevice.isNullOrBlank() }
+            .map { it.shopId }
+            .toSet()
+        return db.getAllManagers().map { m ->
+            val covered = db.getShopsForManager(m.id).map { it.id }
+            ManagerDialEntry(
+                managerId = m.id,
+                coveredShopIds = covered,
+                gsmShopIds = covered.filter { it in gsmShopIds },
+            )
         }
     }
 
@@ -158,7 +197,7 @@ class AsteriskProvisioner(
         // Only write trunks whose device actually resolved (a modem is present).
         val shops = db.getAllConfiguredShopTelephonyConfigs().filter { !it.modemDataDevice.isNullOrBlank() }
         quectelConfigWriter.regenerate(shops)
-        dialplanWriter.regenerate(shops, internalEntries())
+        dialplanWriter.regenerate(shops, internalEntries(), managerEntries())
     }
 
     /**

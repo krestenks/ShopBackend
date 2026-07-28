@@ -310,7 +310,33 @@ class MobileApi(
                 get("/api/mobile/telephony/sip-credentials") {
                     val loginInfo = authenticateManager() ?: return@get
                     val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
-                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    // No shopId + manager role → the manager's single pool identity (mgr{id}).
+                    // This is the identity the duty-aware routing forks the call to.
+                    if (shopId == null) {
+                        if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                            return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                        }
+                        val admin = asteriskAdmin
+                            ?: return@get call.respond(HttpStatusCode.NotFound, "Self-hosted telephony not enabled")
+                        val pw = db.getManagerSipPassword(loginInfo.managerId)
+                        if (pw.isNullOrBlank()) {
+                            return@get call.respond(HttpStatusCode.NotFound, "Manager not provisioned for telephony")
+                        }
+                        if (admin.config.sipHost.isBlank()) {
+                            return@get call.respond(HttpStatusCode.ServiceUnavailable, "ASTERISK_SIP_HOST not configured on server")
+                        }
+                        return@get call.respond(SipCredentialsResponse(
+                            shopId = 0,
+                            username = admin.config.managerEndpointId(loginInfo.managerId),
+                            password = pw,
+                            host = admin.config.sipHost,
+                            port = admin.config.sipPort,
+                            transport = "udp",
+                            shopPhoneNumber = null,
+                        ))
+                    }
+
                     if (!isAuthorizedForShop(loginInfo, shopId, db)) {
                         call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
                         return@get

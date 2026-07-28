@@ -106,6 +106,32 @@ class ConfigWritersTest {
     }
 
     @Test
+    fun `per-manager dial context routes GSM by shop prefix and includes intercom`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(
+            shops = listOf(shop),  // shop 7 has a SIM
+            internal = listOf(InternalShopEntry(7, listOf(7, 9)), InternalShopEntry(9, listOf(7, 9))),
+            managers = listOf(ManagerDialEntry(managerId = 3, coveredShopIds = listOf(7, 9), gsmShopIds = listOf(7))),
+            reload = false,
+        )
+        val text = java.nio.file.Paths.get(dir, "extensions_shops.conf").readText()
+        val ctx = text.substringAfter("[from-mgr3]").substringBefore("\n[")
+
+        // GSM outbound: parse "shop{id}-{number}" and hand to that shop's outbound context.
+        assertTrue(ctx.contains("exten => _shopX.,1"))
+        assertTrue(ctx.contains("Set(SHOPSEL=$" + "{CUT(REST,-,1)})"))
+        assertTrue(ctx.contains("Goto(from-sip-shop$" + "{SHOPSEL},$" + "{NUM},1)"))
+        // Single-SIM convenience → bare number to the only GSM shop (7).
+        assertTrue(ctx.contains("exten => _+X.,1,Goto(from-sip-shop7,"))
+        // Intercom includes for every covered shop.
+        assertTrue(ctx.contains("include => internal-shop7"))
+        assertTrue(ctx.contains("include => internal-shop9"))
+        // No unresolved Kotlin templates.
+        assertFalse(text.contains("${'$'}d{"))
+    }
+
+    @Test
     fun `quectel trunk section uses RoEdAl UAC keys`() {
         val dir = Files.createTempDirectory("astconf").toString()
         val config = testConfig(dir)
