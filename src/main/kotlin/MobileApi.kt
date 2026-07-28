@@ -190,6 +190,18 @@ data class DutyStatusResponse(val onDuty: Boolean)
 @Serializable
 data class SetDutyRequest(val onDuty: Boolean)
 
+/** One manager in the tenant's duty roster (shown to colleagues). */
+@Serializable
+data class DutyMember(
+    val managerId: Int,
+    val name: String,
+    val onDuty: Boolean,
+    val isSelf: Boolean = false,
+)
+
+@Serializable
+data class DutyTeamResponse(val members: List<DutyMember>)
+
 /** Push (FCM) device-token registration from the app. */
 @Serializable
 data class RegisterDeviceTokenRequest(
@@ -629,6 +641,23 @@ class MobileApi(
                     db.setManagerDuty(loginInfo.managerId, body.onDuty)
                     println("[Duty] manager=${loginInfo.managerId} onDuty=${body.onDuty}")
                     call.respond(DutyStatusResponse(body.onDuty))
+                }
+
+                /**
+                 * GET /api/mobile/duty/team → the tenant's managers and who is on duty,
+                 * so a manager can see which colleagues are available. Sorted on-duty first.
+                 */
+                get("/api/mobile/duty/team") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+                    }
+                    val ownerId = loginInfo.ownerId.takeIf { it != 0 } ?: db.getOwnerIdForManager(loginInfo.managerId)
+                    val managers = if (ownerId != null) db.getManagersByOwner(ownerId) else db.getAllManagers()
+                    val members = managers
+                        .map { m -> DutyMember(m.id, m.name, db.isManagerOnDuty(m.id), isSelf = m.id == loginInfo.managerId) }
+                        .sortedWith(compareByDescending<DutyMember> { it.onDuty }.thenBy { it.name.lowercase() })
+                    call.respond(DutyTeamResponse(members))
                 }
 
                 // ─────────────────────────────────────────────────────────────

@@ -66,6 +66,7 @@ class WebAdmin(
                         NavItem("/employees", "Employees", "👥"),
                         NavItem("/services", "Services", "🧾"),
                         NavItem("/managers", "Managers", "🧑‍💼"),
+                        NavItem("/availability", "Availability", "🟢"),
                         NavItem("/appointments", "Appointments", "📅"),
                         NavItem("/customers", "Customers", "👤"),
                         NavItem("/reports", "Reports", "💰"),
@@ -564,6 +565,78 @@ class WebAdmin(
 
                                 br()
                                 submitInput(classes = "btn primary") { value = "Add manager" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            get("/availability") {
+                val impOwnerId = call.impersonatedOwnerId()
+                val managers = if (impOwnerId != null) db.getManagersByOwner(impOwnerId) else db.getAllManagers()
+                val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
+                val dutyById = managers.associate { it.id to db.isManagerOnDuty(it.id) }
+                val nameById = managers.associate { it.id to it.name }
+
+                fun FlowContent.dutyBadge(on: Boolean, label: String) {
+                    span {
+                        style = "display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;" +
+                            "font-size:12px;white-space:nowrap;" +
+                            if (on) "background:#e6f4ea;color:#137333;" else "background:#f1f3f4;color:#5f6368;"
+                        +("${if (on) "🟢" else "⚪"} $label")
+                    }
+                }
+
+                call.respondAdminPage(
+                    titleText = "Availability",
+                    subtitle = "Who is on duty (receiving calls) right now",
+                    activePath = "/availability",
+                ) {
+                    val onCount = dutyById.values.count { it }
+                    div("panel") {
+                        h3 { +"Manager duty" }
+                        p("hint") { +"$onCount of ${managers.size} manager(s) on duty. Managers set this in the app (Availability). No row yet = on duty by default." }
+                        table {
+                            thead { tr { th { +"Manager" }; th { +"Status" } } }
+                            tbody {
+                                for (m in managers.sortedByDescending { dutyById[it.id] == true }) {
+                                    tr {
+                                        td { +m.name }
+                                        td { dutyBadge(dutyById[m.id] == true, if (dutyById[m.id] == true) "On duty" else "Off duty") }
+                                    }
+                                }
+                                if (managers.isEmpty()) tr { td { colSpan = "2"; +"No managers." } }
+                            }
+                        }
+                    }
+
+                    div("panel") {
+                        h3 { +"Coverage by shop" }
+                        p("hint") { +"Managers who can receive each shop's calls (primary + call pool) and their duty. A shop with nobody on duty falls back to the shop's own line." }
+                        table {
+                            thead { tr { th { +"Shop" }; th { +"Covering managers" }; th { +"On duty" } } }
+                            tbody {
+                                for (shop in shops.sortedBy { it.id }) {
+                                    val coverIds = db.getManagerIdsForShop(shop.id)
+                                    val onHere = coverIds.count { dutyById[it] == true }
+                                    tr {
+                                        td { +shop.name }
+                                        td {
+                                            if (coverIds.isEmpty()) span { style = "color:#5f6368;"; +"— none —" }
+                                            for (mid in coverIds.sortedByDescending { dutyById[it] == true }) {
+                                                dutyBadge(dutyById[mid] == true, nameById[mid] ?: "Manager $mid")
+                                            }
+                                        }
+                                        td {
+                                            if (coverIds.isNotEmpty() && onHere == 0) {
+                                                span { style = "color:#b3261e;font-weight:600;"; +"⚠ none" }
+                                            } else {
+                                                +"$onHere"
+                                            }
+                                        }
+                                    }
+                                }
+                                if (shops.isEmpty()) tr { td { colSpan = "3"; +"No shops." } }
                             }
                         }
                     }
