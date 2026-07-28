@@ -167,6 +167,9 @@ object ShopBackend {
             null
         }
 
+        // Push-wake (FCM) — no-op logger until Firebase creds are configured.
+        val pushService = telephony.PushService.fromEnv()
+
         // Server
         val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
         val host = "0.0.0.0"
@@ -212,7 +215,7 @@ object ShopBackend {
                 smsRoutes(db, telephonyService, callAppScreening, translationService)
 
                 // Asterisk dialplan → backend callbacks (inbound SMS/call, menu actions, provisioning)
-                internalTelephonyRoutes(db, asteriskConfig, provisioner, telephonyService, callAppScreening, translationService)
+                internalTelephonyRoutes(db, asteriskConfig, provisioner, telephonyService, callAppScreening, translationService, pushService)
             }
         }.start(wait = true)
     }

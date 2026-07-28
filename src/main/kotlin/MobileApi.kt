@@ -190,6 +190,14 @@ data class DutyStatusResponse(val onDuty: Boolean)
 @Serializable
 data class SetDutyRequest(val onDuty: Boolean)
 
+/** Push (FCM) device-token registration from the app. */
+@Serializable
+data class RegisterDeviceTokenRequest(
+    val token: String,
+    val platform: String? = null,
+    val deviceName: String? = null,
+)
+
 // ─── Phone status (open/closed) override ──────────────────────────────────────
 
 @Serializable
@@ -621,6 +629,34 @@ class MobileApi(
                     db.setManagerDuty(loginInfo.managerId, body.onDuty)
                     println("[Duty] manager=${loginInfo.managerId} onDuty=${body.onDuty}")
                     call.respond(DutyStatusResponse(body.onDuty))
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // Push (FCM) device-token registration. Used to wake on-duty
+                // managers on an incoming call (Phase 5; sender not yet live).
+                // ─────────────────────────────────────────────────────────────
+
+                /** POST /api/mobile/device-token  body {token, platform?, deviceName?} */
+                post("/api/mobile/device-token") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val body = runCatching { call.receive<RegisterDeviceTokenRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+                    if (body.token.isBlank()) {
+                        return@post call.respond(HttpStatusCode.BadRequest, "token required")
+                    }
+                    val refId = (if (loginInfo.role == "shop") loginInfo.shopId else loginInfo.managerId)
+                        ?: return@post call.respond(HttpStatusCode.Forbidden)
+                    db.upsertDeviceToken(loginInfo.role, refId, body.token, body.platform, body.deviceName)
+                    call.respond(HttpStatusCode.NoContent)
+                }
+
+                /** DELETE /api/mobile/device-token?token=... — deregister on logout. */
+                delete("/api/mobile/device-token") {
+                    authenticateManager() ?: return@delete
+                    val token = call.request.queryParameters["token"]?.takeIf { it.isNotBlank() }
+                        ?: return@delete call.respond(HttpStatusCode.BadRequest, "token required")
+                    db.deleteDeviceToken(token)
+                    call.respond(HttpStatusCode.NoContent)
                 }
 
                 /**

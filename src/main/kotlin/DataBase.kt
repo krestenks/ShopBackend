@@ -940,6 +940,26 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
         ensureManagerPoolBackfill()
 
+        // Push device tokens (FCM) — one row per (ref_type, ref_id, token). Used to
+        // push-wake on-duty managers on an incoming call. Firebase creds are supplied
+        // via env; without them the push layer is a no-op (see telephony/PushService).
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS device_token (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref_type    TEXT    NOT NULL,          -- 'manager' | 'shop'
+                ref_id      INTEGER NOT NULL,
+                token       TEXT    NOT NULL UNIQUE,
+                platform    TEXT,
+                device_name TEXT,
+                updated_at  INTEGER NOT NULL
+            )
+        """.trimIndent()) }
+        try {
+            connection.createStatement().use { it.execute(
+                "CREATE INDEX IF NOT EXISTS idx_device_token_ref ON device_token(ref_type, ref_id)"
+            ) }
+        } catch (_: Exception) {}
+
         // Performance indexes for the high-frequency polling queries (SMS threads/conversations
         // and the every-2s active-calls poll). Without these, each poll is a full table scan that
         // gets slower as messages accumulate. CREATE INDEX IF NOT EXISTS is idempotent, so this
@@ -3121,6 +3141,53 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setString(1, password)
             stmt.setInt(2, managerId)
             stmt.executeUpdate()
+        }
+    }
+
+    // ── Push device tokens (FCM) ─────────────────────────────────────────────
+
+    /** Registers or refreshes a device's push token for a caller (manager/shop). */
+    fun upsertDeviceToken(refType: String, refId: Int, token: String, platform: String?, deviceName: String?) {
+        val now = System.currentTimeMillis()
+        connection.prepareStatement("""
+            INSERT INTO device_token (ref_type, ref_id, token, platform, device_name, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                ref_type = excluded.ref_type,
+                ref_id = excluded.ref_id,
+                platform = excluded.platform,
+                device_name = excluded.device_name,
+                updated_at = excluded.updated_at
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, refType)
+            stmt.setInt(2, refId)
+            stmt.setString(3, token)
+            stmt.setString(4, platform)
+            stmt.setString(5, deviceName)
+            stmt.setLong(6, now)
+            stmt.executeUpdate()
+        }
+    }
+
+    fun deleteDeviceToken(token: String) {
+        connection.prepareStatement("DELETE FROM device_token WHERE token = ?").use { stmt ->
+            stmt.setString(1, token)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** All push tokens registered by the given managers. */
+    fun getDeviceTokensForManagers(managerIds: List<Int>): List<String> {
+        if (managerIds.isEmpty()) return emptyList()
+        val placeholders = managerIds.joinToString(",") { "?" }
+        connection.prepareStatement(
+            "SELECT token FROM device_token WHERE ref_type = 'manager' AND ref_id IN ($placeholders)"
+        ).use { stmt ->
+            managerIds.forEachIndexed { i, id -> stmt.setInt(i + 1, id) }
+            val rs = stmt.executeQuery()
+            val tokens = mutableListOf<String>()
+            while (rs.next()) tokens.add(rs.getString("token"))
+            return tokens
         }
     }
 

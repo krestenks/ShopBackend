@@ -32,7 +32,18 @@ fun Routing.internalTelephonyRoutes(
     telephonyService: TelephonyService,
     callAppScreening: callapp.CallAppScreeningService? = null,
     translationService: telephony.TranslationService? = null,
+    pushService: telephony.PushService = telephony.NoopPushService,
 ) {
+
+    // Wakes the shop's on-duty covering managers so their apps register in time to
+    // ring. Best-effort: any failure is swallowed so the call path is never blocked.
+    suspend fun pushWakeOnDuty(shopId: Int, callId: Int, from: String) {
+        runCatching {
+            val managerIds = db.getOnDutyManagerIdsForShop(shopId)
+            val tokens = db.getDeviceTokensForManagers(managerIds)
+            pushService.wakeManagers(tokens, callId.toLong(), shopId, from)
+        }.onFailure { println("[Asterisk/push] wake failed shop=$shopId: ${it.message}") }
+    }
 
     suspend fun ApplicationCall.authorizedParams(): Parameters? {
         val params = runCatching { receiveParameters() }.getOrDefault(Parameters.Empty)
@@ -131,6 +142,8 @@ fun Routing.internalTelephonyRoutes(
                 tempClosed -> "menu_temp"
                 else -> "menu_open"
             }
+            // A known customer while open may reach the operator (menu digit 2) — wake the pool.
+            if (verdict == "menu_open") pushWakeOnDuty(shopId, callId, from)
             println("[Asterisk/call-inbound] $verdict callId=$callId shop=$shopId from=$from")
             call.respondText(verdict)
             return@post
@@ -153,7 +166,8 @@ fun Routing.internalTelephonyRoutes(
         }
 
         db.updateCallState(callId, VoiceCallState.UNKNOWN_CUSTOMER_ROUTE)
-        // TODO(FCM): push-wake the manager app here before Asterisk Dial()s the SIP endpoint.
+        // Push-wake the on-duty pool before Asterisk Dial()s the SIP endpoints.
+        pushWakeOnDuty(shopId, callId, from)
         println("[Asterisk/call-inbound] RING callId=$callId shop=$shopId from=$from uniqueid=$uniqueId")
         call.respondText("ring")
     }
