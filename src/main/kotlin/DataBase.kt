@@ -906,6 +906,38 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ) }
         } catch (_: Exception) {}
 
+        // ── Manager pool per tenant ──────────────────────────────────────────
+        // Many-to-many "which managers can receive a shop's calls". shops.manager_id
+        // stays as the shop's PRIMARY manager (intercom grouping, group chat, fallback);
+        // the covering set for a shop = primary ∪ shop_manager rows. Backfilled from
+        // manager_id below so behaviour is unchanged until owners populate pools.
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS shop_manager (
+                shop_id    INTEGER NOT NULL,
+                manager_id INTEGER NOT NULL,
+                owner_id   INTEGER,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (shop_id, manager_id)
+            )
+        """.trimIndent()) }
+        try {
+            connection.createStatement().use { it.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shop_manager_manager ON shop_manager(manager_id)"
+            ) }
+        } catch (_: Exception) {}
+
+        // Tenant-wide on/off-duty flag per manager. Absent row = off duty.
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS manager_duty (
+                manager_id INTEGER PRIMARY KEY,
+                owner_id   INTEGER,
+                on_duty    INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            )
+        """.trimIndent()) }
+
+        ensureManagerPoolBackfill()
+
         // Performance indexes for the high-frequency polling queries (SMS threads/conversations
         // and the every-2s active-calls poll). Without these, each poll is a full table scan that
         // gets slower as messages accumulate. CREATE INDEX IF NOT EXISTS is idempotent, so this
@@ -2737,11 +2769,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * True if [managerId] covers [shopId] — either as the shop's PRIMARY manager
+     * (shops.manager_id) or as a member of the shop's call pool (shop_manager).
+     */
     fun isManagerOfShop(managerId: Int, shopId: Int): Boolean {
-        val sql = "SELECT 1 FROM shops WHERE id = ? AND manager_id = ? LIMIT 1"
+        val sql = """
+            SELECT 1 FROM shops WHERE id = ? AND manager_id = ?
+            UNION ALL
+            SELECT 1 FROM shop_manager WHERE shop_id = ? AND manager_id = ?
+            LIMIT 1
+        """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setInt(2, managerId)
+            stmt.setInt(3, shopId)
+            stmt.setInt(4, managerId)
             val rs = stmt.executeQuery()
             val isAuthorized = rs.next()
             rs.close()
@@ -2929,11 +2972,21 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * All shops a manager covers: the shops they PRIMARY-manage (shops.manager_id)
+     * plus any shop whose call pool (shop_manager) includes them. Deduplicated.
+     */
     fun getShopsForManager(managerId: Int): List<Shop> {
         val stmt = connection.prepareStatement(
-            "SELECT * FROM shops WHERE manager_id = ?"
+            """
+            SELECT DISTINCT s.id, s.name, s.address, s.directions, s.manager_id
+            FROM shops s
+            LEFT JOIN shop_manager sm ON sm.shop_id = s.id
+            WHERE s.manager_id = ? OR sm.manager_id = ?
+            """.trimIndent()
         )
         stmt.setInt(1, managerId)
+        stmt.setInt(2, managerId)
         val rs = stmt.executeQuery()
 
         val shops = mutableListOf<Shop>()
@@ -2952,6 +3005,105 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         stmt.close()
         return shops
     }
+
+    // =========================================================================
+    // Manager pool + duty  (see docs/manager-pool-plan.md)
+    // =========================================================================
+
+    /**
+     * All manager ids that cover [shopId]: the shop's primary manager (shops.manager_id)
+     * ∪ its call pool (shop_manager). Deduplicated; order not guaranteed.
+     */
+    fun getManagerIdsForShop(shopId: Int): List<Int> {
+        val sql = """
+            SELECT manager_id FROM shops        WHERE id = ?      AND manager_id IS NOT NULL
+            UNION
+            SELECT manager_id FROM shop_manager WHERE shop_id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setInt(2, shopId)
+            val rs = stmt.executeQuery()
+            val ids = mutableListOf<Int>()
+            while (rs.next()) rs.getInt(1).takeIf { !rs.wasNull() && it > 0 }?.let { ids.add(it) }
+            return ids
+        }
+    }
+
+    /** The additional call-pool members for a shop (shop_manager rows only, excludes primary). */
+    fun getShopPoolManagerIds(shopId: Int): List<Int> {
+        connection.prepareStatement("SELECT manager_id FROM shop_manager WHERE shop_id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            val ids = mutableListOf<Int>()
+            while (rs.next()) ids.add(rs.getInt(1))
+            return ids
+        }
+    }
+
+    /**
+     * Replaces a shop's call pool with exactly [managerIds]. Rows carry the shop's
+     * owner_id for tenant scoping. The primary manager (shops.manager_id) is managed
+     * separately via [updateShop]; passing it here too is harmless (union deduplicates).
+     */
+    fun setShopPool(shopId: Int, managerIds: List<Int>) {
+        val ownerId = getOwnerIdForShop(shopId)
+        val now = System.currentTimeMillis()
+        val wanted = managerIds.filter { it > 0 }.toSet()
+        connection.prepareStatement("DELETE FROM shop_manager WHERE shop_id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.executeUpdate()
+        }
+        if (wanted.isEmpty()) return
+        connection.prepareStatement(
+            "INSERT OR IGNORE INTO shop_manager (shop_id, manager_id, owner_id, created_at) VALUES (?, ?, ?, ?)"
+        ).use { stmt ->
+            for (mid in wanted) {
+                stmt.setInt(1, shopId)
+                stmt.setInt(2, mid)
+                if (ownerId != null) stmt.setInt(3, ownerId) else stmt.setNull(3, java.sql.Types.INTEGER)
+                stmt.setLong(4, now)
+                stmt.addBatch()
+            }
+            stmt.executeBatch()
+        }
+    }
+
+    /** Tenant-wide on/off-duty state for a manager. Absent row = off duty. */
+    fun isManagerOnDuty(managerId: Int): Boolean {
+        connection.prepareStatement("SELECT on_duty FROM manager_duty WHERE manager_id = ?").use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            return rs.next() && rs.getInt("on_duty") != 0
+        }
+    }
+
+    /** Sets a manager's tenant-wide duty flag (upsert). */
+    fun setManagerDuty(managerId: Int, onDuty: Boolean) {
+        val ownerId = getOwnerIdForManager(managerId)
+        val now = System.currentTimeMillis()
+        connection.prepareStatement("""
+            INSERT INTO manager_duty (manager_id, owner_id, on_duty, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(manager_id) DO UPDATE SET
+                on_duty = excluded.on_duty,
+                owner_id = excluded.owner_id,
+                updated_at = excluded.updated_at
+        """.trimIndent()).use { stmt ->
+            stmt.setInt(1, managerId)
+            if (ownerId != null) stmt.setInt(2, ownerId) else stmt.setNull(2, java.sql.Types.INTEGER)
+            stmt.setInt(3, if (onDuty) 1 else 0)
+            stmt.setLong(4, now)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * The manager ids that should ring for an inbound call to [shopId]: covering
+     * managers (primary ∪ pool) who are currently on duty. Used by Phase-3 routing.
+     */
+    fun getOnDutyManagerIdsForShop(shopId: Int): List<Int> =
+        getManagerIdsForShop(shopId).filter { isManagerOnDuty(it) }
 
     fun getAllShops(): List<Shop> {
         val shops = mutableListOf<Shop>()
@@ -4738,6 +4890,27 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 val updated = connection.createStatement().use { it.executeUpdate(sql) }
                 if (updated > 0) println("[Owner] Backfilled $updated rows: $sql")
             } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Seeds shop_manager from the legacy 1:1 shops.manager_id so the covering set
+     * equals today's behaviour on first run. Idempotent (INSERT OR IGNORE), and only
+     * ever adds a shop's own primary manager — it never removes owner-curated pool rows.
+     */
+    private fun ensureManagerPoolBackfill() {
+        try {
+            val inserted = connection.createStatement().use {
+                it.executeUpdate("""
+                    INSERT OR IGNORE INTO shop_manager (shop_id, manager_id, owner_id, created_at)
+                    SELECT id, manager_id, owner_id, ${System.currentTimeMillis()}
+                    FROM shops
+                    WHERE manager_id IS NOT NULL AND manager_id > 0
+                """.trimIndent())
+            }
+            if (inserted > 0) println("[ManagerPool] Backfilled $inserted shop_manager row(s) from shops.manager_id")
+        } catch (e: Exception) {
+            println("[ManagerPool] Backfill skipped: ${e.message}")
         }
     }
 

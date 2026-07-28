@@ -885,7 +885,7 @@ class WebAdmin(
                             p("hint") { +"Arrival instructions (door code, parking, floor, etc.). Will be included in booking confirmation SMS." }
                             textArea { name = "directions"; +(shop.directions ?: "") }
                             br()
-                            label { +"Assign Manager: " }
+                            label { +"Assign Manager (primary): " }
                             select {
                                 name = "managerId"
                                 option { value = ""; +"Unassigned" }
@@ -894,6 +894,22 @@ class WebAdmin(
                                         value = mgr.id.toString()
                                         if (mgr.id == shop.managerId) selected = true
                                         +mgr.name
+                                    }
+                                }
+                            }
+                            br(); br()
+                            label { +"Call pool (additional managers who can receive this shop's calls):" }
+                            p("hint") { +"When on duty, every checked manager (plus the primary) rings for this shop's calls and sees its messages." }
+                            run {
+                                val pool = db.getShopPoolManagerIds(id).toSet()
+                                for (mgr in managers) {
+                                    div {
+                                        checkBoxInput {
+                                            name = "poolManagerIds"
+                                            value = mgr.id.toString()
+                                            checked = mgr.id in pool
+                                        }
+                                        +(" " + mgr.name)
                                     }
                                 }
                             }
@@ -1286,9 +1302,11 @@ class WebAdmin(
                 val address = params["address"] ?: ""
                 val directions = params["directions"] ?: ""
                 val managerId = params["managerId"]?.toIntOrNull()
+                val poolManagerIds = params.getAll("poolManagerIds")?.mapNotNull { it.toIntOrNull() } ?: emptyList()
 
                 if (id != null) {
                     db.updateShop(id, name, address, directions, managerId)
+                    db.setShopPool(id, poolManagerIds)
 
                     // Voice config — operator_phone removed; operator comes from manager phone
                     val voice = ShopVoiceConfig(
@@ -2857,11 +2875,27 @@ class WebAdmin(
                             label { +"Shop name" }; textInput { name = "name"; value = shop.name }
                             label { +"Address" }; textInput { name = "address"; value = shop.address ?: "" }
                             label { +"Directions" }; textArea { name = "directions"; +(shop.directions ?: "") }
-                            label { +"Manager" }
+                            label { +"Manager (primary)" }
                             select {
                                 name = "managerId"
                                 option { value = ""; +"Unassigned" }
                                 for (m in managers) { option { value = m.id.toString(); if (m.id == shop.managerId) selected = true; +m.name } }
+                            }
+                            br(); br()
+                            label { +"Call pool (additional managers who can receive this shop's calls):" }
+                            p("hint") { +"When on duty, every checked manager (plus the primary) rings for this shop's calls and sees its messages." }
+                            run {
+                                val pool = db.getShopPoolManagerIds(id).toSet()
+                                for (m in managers) {
+                                    div {
+                                        checkBoxInput {
+                                            name = "poolManagerIds"
+                                            value = m.id.toString()
+                                            checked = m.id in pool
+                                        }
+                                        +(" " + m.name)
+                                    }
+                                }
                             }
 
                             hr()
@@ -2998,6 +3032,10 @@ class WebAdmin(
                     ?.takeIf { db.isManagerOwnedBy(it, session.ownerId) }
                 if (name.isNotBlank()) {
                     db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                    // Call pool — only managers belonging to this owner may be assigned.
+                    val poolManagerIds = (params.getAll("poolManagerIds")?.mapNotNull { it.toIntOrNull() } ?: emptyList())
+                        .filter { db.isManagerOwnedBy(it, session.ownerId) }
+                    db.setShopPool(id, poolManagerIds)
                     val voice = ShopVoiceConfig(
                         shopId = id,
                         businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },

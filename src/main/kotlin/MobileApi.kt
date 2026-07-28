@@ -182,6 +182,14 @@ data class AvailabilityResponse(val shops: List<AvailabilityShop>)
 @Serializable
 data class SetEmployeeAvailabilityRequest(val available: Boolean)
 
+// ─── Manager on/off-duty (tenant-wide) — controls call ringing + notifications ──
+
+@Serializable
+data class DutyStatusResponse(val onDuty: Boolean)
+
+@Serializable
+data class SetDutyRequest(val onDuty: Boolean)
+
 // ─── Phone status (open/closed) override ──────────────────────────────────────
 
 @Serializable
@@ -560,6 +568,33 @@ class MobileApi(
                     }
 
                     call.respond(AvailabilityResponse(shops = out))
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // On/off duty (tenant-wide). Off-duty managers are excluded from
+                // call ringing (Phase 3) and should mute local notifications.
+                // ─────────────────────────────────────────────────────────────
+
+                /** GET /api/mobile/duty → {"onDuty": true|false} */
+                get("/api/mobile/duty") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+                    }
+                    call.respond(DutyStatusResponse(db.isManagerOnDuty(loginInfo.managerId)))
+                }
+
+                /** POST /api/mobile/duty  body {"onDuty": true|false} → the new state */
+                post("/api/mobile/duty") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@post call.respond(HttpStatusCode.Forbidden, "Managers only")
+                    }
+                    val body = runCatching { call.receive<SetDutyRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+                    db.setManagerDuty(loginInfo.managerId, body.onDuty)
+                    println("[Duty] manager=${loginInfo.managerId} onDuty=${body.onDuty}")
+                    call.respond(DutyStatusResponse(body.onDuty))
                 }
 
                 /**
