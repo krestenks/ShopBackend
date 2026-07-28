@@ -158,6 +158,9 @@ object ShopBackend {
             val translationConfig = telephony.TranslationConfig(
                 url = translateUrl,
                 model = System.getenv("TRANSLATE_LLM_MODEL")?.trim()?.takeIf { it.isNotBlank() } ?: "gemma2:9b",
+                // Ollama native /api/chat with think:false (skips the reasoning pass). Set
+                // TRANSLATE_OLLAMA_THINK_OFF=false for non-Ollama backends (LM Studio, llama.cpp).
+                ollamaThinkOff = System.getenv("TRANSLATE_OLLAMA_THINK_OFF")?.trim()?.toBooleanStrictOrNull() ?: true,
             )
             telephony.TranslationService(translationConfig).also {
                 println("[Translate] Inbound-SMS translation enabled. endpoint=${translationConfig.url} model=${translationConfig.model}")

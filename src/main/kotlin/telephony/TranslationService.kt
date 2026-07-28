@@ -39,6 +39,14 @@ data class TranslationConfig(
      * little randomness.
      */
     val maxCleanupRetries: Int = 2,
+    /**
+     * Use Ollama's native `/api/chat` with `think:false` instead of the OpenAI `/chat/completions`
+     * endpoint. Reasoning models (e.g. the Gemma4 QAT variants) otherwise spend 20–30s emitting a
+     * chain-of-thought before the answer; the OpenAI endpoint ignores `think`, so we must call the
+     * native API to turn it off (drops a hop from ~30s to ~1.5s with identical output). Set false
+     * for non-Ollama backends (LM Studio, llama.cpp), which have no `/api/chat`.
+     */
+    val ollamaThinkOff: Boolean = true,
 )
 
 /**
@@ -150,8 +158,12 @@ class TranslationService(private val config: TranslationConfig) {
         return hasThai(s) && !hasForeignScript(s)
     }
 
-    /** One OpenAI-compatible chat call with a single user turn. Returns trimmed content or null. */
-    private suspend fun chat(user: String, temperature: Double): String? {
+    /** One chat call with a single user turn. Returns trimmed content or null. */
+    private suspend fun chat(user: String, temperature: Double): String? =
+        if (config.ollamaThinkOff) chatOllamaNative(user, temperature) else chatOpenAi(user, temperature)
+
+    /** OpenAI-compatible `/chat/completions` call (portable; cannot disable thinking). */
+    private suspend fun chatOpenAi(user: String, temperature: Double): String? {
         val requestBody = buildJsonObject {
             put("model", config.model)
             put("stream", false)
@@ -174,6 +186,40 @@ class TranslationService(private val config: TranslationConfig) {
                 ?.takeIf { it.isNotBlank() }
         } catch (e: Exception) {
             println("[Translate] failed (${config.url}, model=${config.model}): ${e.message}")
+            System.out.flush()
+            null
+        }
+    }
+
+    /**
+     * Ollama native `/api/chat` with `think:false` — skips the reasoning pass. The base URL is the
+     * config URL with any trailing `/v1` stripped (so `.../v1` → `.../api/chat`). The native response
+     * shape is `{message:{content, thinking}}` (not `choices[]`).
+     */
+    private suspend fun chatOllamaNative(user: String, temperature: Double): String? {
+        val base = config.url.trimEnd('/').removeSuffix("/v1")
+        val requestBody = buildJsonObject {
+            put("model", config.model)
+            put("stream", false)
+            put("think", false)
+            put("messages", buildJsonArray {
+                add(buildJsonObject { put("role", "user"); put("content", user) })
+            })
+            put("options", buildJsonObject { put("temperature", temperature) })
+        }
+        return try {
+            val responseBody = client.post("$base/api/chat") {
+                contentType(ContentType.Application.Json)
+                setBody(requestBody.toString())
+            }.body<String>()
+
+            Json.parseToJsonElement(responseBody)
+                .jsonObject["message"]?.jsonObject?.get("content")
+                ?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            println("[Translate] failed (native ${config.url}, model=${config.model}): ${e.message}")
             System.out.flush()
             null
         }
