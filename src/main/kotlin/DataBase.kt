@@ -3941,6 +3941,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun digitsOf(q: String): String = q.filter { it.isDigit() }
 
     /**
+     * Digits to match a phone by. Numbers are stored E.164 ("+45########"), but users type them
+     * many ways — "0045 …", "+45 …", or just the local 8 digits. Matching the last 8 digits (the
+     * Danish national number) makes all of those forms find the same contact.
+     */
+    private fun phoneMatchDigits(q: String): String? {
+        val d = digitsOf(q)
+        if (d.isEmpty()) return null
+        return if (d.length > 8) d.takeLast(8) else d
+    }
+
+    /**
      * SMS messages whose original body OR cached translation matches [q]. Used to jump to a
      * specific message inside a thread. Newest first, capped at [limit].
      */
@@ -3995,8 +4006,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         if (shopIds.isEmpty() || q.isBlank()) return emptyList()
         val ph = shopIds.joinToString(",") { "?" }
         val like = "%$q%"
-        val digits = digitsOf(q)
-        val phoneLike = if (digits.isNotEmpty()) "%$digits%" else null
+        val phoneLike = phoneMatchDigits(q)?.let { "%$it%" }
         val sql = """
             SELECT m.shop_id, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
@@ -4044,8 +4054,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         if (shopIds.isEmpty() || q.isBlank()) return emptyList()
         val ph = shopIds.joinToString(",") { "?" }
         val like = "%$q%"
-        val digits = digitsOf(q)
-        val phoneLike = if (digits.isNotEmpty()) "%$digits%" else null
+        val phoneLike = phoneMatchDigits(q)?.let { "%$it%" }
         val sql = """
             $CALL_SELECT
             WHERE vc.shop_id IN ($ph)
