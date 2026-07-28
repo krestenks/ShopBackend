@@ -74,6 +74,23 @@ first answer wins. Nobody on duty → fallback.
 ### Phase 5 — (Deferred) FCM push-wake
 - Push-wake only on-duty covering managers' device tokens before Asterisk dials.
 
+## Status (2026-07-28) — all phases implemented
+
+All five phases are committed on `feature/asterisk-phone-system` (backend: Phases 1/2/3/5;
+app repo `AndroidStudioProjects\ShopManager`: Phase 4). Backend + app both compile;
+`ConfigWritersTest` covers the new dialplan. Not yet deployed.
+
+**Deploy the backend and the app together** — the pieces interlock:
+- Until the app registers `mgr{id}` (Phase 4) and a manager is on duty, Phase 3's
+  `dial-targets` returns empty and the dialplan falls back to the legacy
+  `PJSIP/shop{id}-manager`, so current single-manager behaviour is preserved.
+- Once deployed, run a provisioning pass (startup does this) so every manager gets a
+  `mgr{id}` endpoint and `managers.sip_password`.
+- FCM (Phase 5) is a no-op logger until `FCM_SERVICE_ACCOUNT_JSON` + a real HTTP v1 sender
+  exist; the app does not yet register a device token (needs Firebase/`google-services.json`).
+- App outbound from a manager identity dials `shop{id}-{number}` (handled by `from-mgr{id}`);
+  the current app still places outbound via its per-shop accounts, which remain registered.
+
 ## Open decisions
 - **Coverage granularity:** explicit `shop_manager` assignment (chosen) vs. auto-link every
   manager to every shop in the tenant.
