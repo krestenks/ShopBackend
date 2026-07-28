@@ -3091,12 +3091,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    /** Tenant-wide on/off-duty state for a manager. Absent row = off duty. */
+    /**
+     * Tenant-wide on/off-duty state for a manager. Absent row = ON duty (opt-out model):
+     * a manager rings by default and must explicitly go off duty. This also preserves the
+     * pre-feature "always rings" behaviour for managers who never touch the toggle.
+     */
     fun isManagerOnDuty(managerId: Int): Boolean {
         connection.prepareStatement("SELECT on_duty FROM manager_duty WHERE manager_id = ?").use { stmt ->
             stmt.setInt(1, managerId)
             val rs = stmt.executeQuery()
-            return rs.next() && rs.getInt("on_duty") != 0
+            return if (rs.next()) rs.getInt("on_duty") != 0 else true
         }
     }
 
