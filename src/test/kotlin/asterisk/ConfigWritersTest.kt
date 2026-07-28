@@ -60,7 +60,10 @@ class ConfigWritersTest {
         // Menu actions
         assertTrue(text.contains("/api/internal/telephony/booking-link,secret=SECRET&shopId=7"))
         assertTrue(text.contains("/api/internal/telephony/call/event,secret=SECRET&uniqueid="))
-        assertTrue(text.contains("Dial(PJSIP/shop7-manager,30)"))
+        // Duty-aware routing: dial the backend-computed targets, fall back to the legacy endpoint.
+        assertTrue(text.contains("/api/internal/telephony/call/dial-targets,secret=SECRET&shopId=7"))
+        assertTrue(text.contains("Set(TARGETS=PJSIP/shop7-manager)"))
+        assertTrue(text.contains("Dial($" + "{TARGETS},30)"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/operator-unavailable)"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/sms-sent)"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/menu-invalid-goodbye)"))

@@ -158,6 +158,23 @@ fun Routing.internalTelephonyRoutes(
         call.respondText("ring")
     }
 
+    // Duty-aware pool routing: the &-joined PJSIP targets to ring for this shop —
+    // every on-duty covering manager (primary ∪ pool) that has a provisioned mgr{id}
+    // endpoint. Empty response → the dialplan falls back to the legacy shop endpoint.
+    post("/api/internal/telephony/call/dial-targets") {
+        val params = call.authorizedParams() ?: return@post
+        val shopId = params["shopId"]?.toIntOrNull()
+            ?: run { call.respond(HttpStatusCode.BadRequest, "shopId required"); return@post }
+
+        val targets = db.getOnDutyManagerIdsForShop(shopId)
+            .filter { !db.getManagerSipPassword(it).isNullOrBlank() }
+            .map { "PJSIP/${config.managerEndpointId(it)}" }
+            .joinToString("&")
+
+        println("[Asterisk/dial-targets] shop=$shopId targets=${targets.ifBlank { "(none → legacy fallback)" }}")
+        call.respondText(targets)
+    }
+
     // Digit 1 in the menu: create a booking token and text the link via the shop's SIM.
     post("/api/internal/telephony/booking-link") {
         val params = call.authorizedParams() ?: return@post
