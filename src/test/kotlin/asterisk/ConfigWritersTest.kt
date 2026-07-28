@@ -99,11 +99,16 @@ class ConfigWritersTest {
         assertTrue(ctx7.contains("include => internal-shop7"))
         assertFalse(ctx7.contains("Quectel/"))
         // GSM shop's manager context includes the internal extens
-        val sip7 = text.substringAfter("[from-sip-shop7]").substringBefore("[")
+        // Extract up to the next context header (\n[) — the body itself now contains a
+        // '[' in the ExecIf $[...] expression, so a bare "[" delimiter would truncate it.
+        val sip7 = text.substringAfter("[from-sip-shop7]").substringBefore("\n[")
         assertTrue(sip7.contains("include => internal-shop7"))
         assertTrue(sip7.contains("Quectel/shop7"))
+        // SIM occupied / congestion / far-end busy → report line busy to the app.
+        assertTrue(sip7.contains("DIALSTATUS"))
+        assertTrue(sip7.contains("Busy(3)"))
         // SIM-less shop still gets a manager context (internal only)
-        val sip9 = text.substringAfter("[from-sip-shop9]").substringBefore("[")
+        val sip9 = text.substringAfter("[from-sip-shop9]").substringBefore("\n[")
         assertTrue(sip9.contains("include => internal-shop9"))
         assertFalse(sip9.contains("Quectel/"))
     }
