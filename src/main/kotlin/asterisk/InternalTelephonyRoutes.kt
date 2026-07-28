@@ -31,6 +31,7 @@ fun Routing.internalTelephonyRoutes(
     provisioner: AsteriskProvisioner,
     telephonyService: TelephonyService,
     callAppScreening: callapp.CallAppScreeningService? = null,
+    translationService: telephony.TranslationService? = null,
 ) {
 
     suspend fun ApplicationCall.authorizedParams(): Parameters? {
@@ -59,6 +60,7 @@ fun Routing.internalTelephonyRoutes(
             body = body,
             providerMessageSid = null,
             callAppScreening = callAppScreening,
+            translationService = translationService,
         )
         call.respondText(result.name.lowercase())
     }

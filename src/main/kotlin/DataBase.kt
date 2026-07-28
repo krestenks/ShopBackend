@@ -184,6 +184,12 @@ data class ShopVoiceConfig(
      * "Send price list" in the messaging interface. Null/blank = no footer appended.
      */
     val smsPriceListFooter: String? = null,
+    /**
+     * ISO-639-1 language code (e.g. "th") that the shop's staff reads. When set and the
+     * translation model is configured, inbound customer SMS are translated into this language
+     * for display alongside the original. Null/blank = no SMS translation for this shop.
+     */
+    val smsTranslateLang: String? = null,
 )
 
 /**
@@ -299,6 +305,12 @@ data class SmsMessage(
     val providerMessageSid: String?,
     val errorMessage: String?,
     val createdAt: Long,
+    /**
+     * Cached translation of [body] into the shop's staff language (inbound messages only).
+     * Null when translation is disabled, not yet computed, or the message is outbound.
+     * Display-only — the app shows this alongside the original [body].
+     */
+    val translatedBody: String? = null,
 )
 
 @Serializable
@@ -325,6 +337,36 @@ data class SmsUnhandledNotification(
     val lastBody: String,
     val lastAt: Long,
     val unreadCount: Int,
+)
+
+// ─── Search ─────────────────────────────────────────────────────────────────
+
+/** A single SMS message matched by body or translation content. Opens the thread at this message. */
+@Serializable
+data class SmsSearchHit(
+    val messageId: Int,
+    val shopId: Int,
+    val counterpartyPhone: String,
+    val customerId: Int?,
+    val customerName: String?,
+    val callappName: String?,
+    /** "outbound" | "inbound" */
+    val direction: String,
+    val body: String,
+    val translatedBody: String?,
+    val createdAt: Long,
+)
+
+/** A conversation matched by counterparty name or number (no body match). Opens the thread. */
+@Serializable
+data class SmsThreadHit(
+    val shopId: Int,
+    val counterpartyPhone: String,
+    val customerId: Int?,
+    val customerName: String?,
+    val callappName: String?,
+    val lastBody: String,
+    val lastAt: Long,
 )
 
 // ─── Group chat ───────────────────────────────────────────────────────────────
@@ -662,6 +704,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 error_message       TEXT,
                 created_at          INTEGER NOT NULL
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sms_translation (
+                message_id       INTEGER NOT NULL,
+                target_lang      TEXT    NOT NULL,
+                translated_body  TEXT    NOT NULL,
+                created_at       INTEGER NOT NULL,
+                PRIMARY KEY (message_id, target_lang),
+                FOREIGN KEY (message_id) REFERENCES sms_message(id) ON DELETE CASCADE
+            );
             """
         )
 
@@ -741,6 +793,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE employee_shop ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
             // Price-list SMS footer appended when manager taps "Send price list" in the app
             "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
+            // ISO-639-1 staff language for inbound-SMS auto-translation (null = disabled)
+            "ALTER TABLE shop_voice_config ADD COLUMN sms_translate_lang TEXT",
             // IMSI-keyed telephony assignment (shop bound to a SIM, not a USB port)
             "ALTER TABLE shop_telephony_config ADD COLUMN imsi TEXT",
             // SIP credential for the in-shop device (internal intercom calls)
@@ -883,7 +937,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             SELECT shop_id, operator_phone, welcome_open_message, welcome_closed_message,
                    temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override,
-                   communication_retention_days, customer_retention_days, sms_price_list_footer
+                   communication_retention_days, customer_retention_days, sms_price_list_footer,
+                   sms_translate_lang
             FROM shop_voice_config WHERE shop_id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -903,6 +958,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     communicationRetentionDays = try { rs.getInt("communication_retention_days").takeIf { !rs.wasNull() } ?: 5 } catch (_: Exception) { 5 },
                     customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 90 } catch (_: Exception) { 90 },
                     smsPriceListFooter = try { rs.getString("sms_price_list_footer")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
+                    smsTranslateLang = try { rs.getString("sms_translate_lang")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -915,8 +971,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             INSERT INTO shop_voice_config (shop_id, operator_phone, welcome_open_message,
                 welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message,
                 business_name, phone_override, communication_retention_days, customer_retention_days,
-                sms_price_list_footer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sms_price_list_footer, sms_translate_lang)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 operator_phone = excluded.operator_phone,
                 welcome_open_message = excluded.welcome_open_message,
@@ -927,7 +983,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 phone_override = excluded.phone_override,
                 communication_retention_days = excluded.communication_retention_days,
                 customer_retention_days = excluded.customer_retention_days,
-                sms_price_list_footer = excluded.sms_price_list_footer
+                sms_price_list_footer = excluded.sms_price_list_footer,
+                sms_translate_lang = excluded.sms_translate_lang
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -942,6 +999,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(9, config.communicationRetentionDays)
             stmt.setInt(10, config.customerRetentionDays)
             stmt.setString(11, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(12, config.smsTranslateLang?.trim()?.takeIf { it.isNotBlank() })
             stmt.executeUpdate()
         }
     }
@@ -3638,7 +3696,13 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /** Full thread for a shop + counterparty phone, oldest first. */
-    fun getSmsThread(shopId: Int, counterpartyPhone: String, limit: Int = 200): List<SmsMessage> {
+    fun getSmsThread(
+        shopId: Int,
+        counterpartyPhone: String,
+        limit: Int = 200,
+        /** When non-null, inbound messages are enriched with their cached translation into this language. */
+        translateLang: String? = null,
+    ): List<SmsMessage> {
         val sql = """
             SELECT id, shop_id, customer_id, counterparty_phone, from_phone, to_phone,
                    body, direction, status, provider_message_sid, error_message, created_at
@@ -3647,10 +3711,88 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ORDER BY created_at ASC
             LIMIT ?
         """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
+        val messages = connection.prepareStatement(sql).use { stmt ->
             stmt.setInt(1, shopId)
             stmt.setString(2, counterpartyPhone.trim())
             stmt.setInt(3, limit)
+            buildSmsMessageList(stmt.executeQuery())
+        }
+        val lang = translateLang?.trim()?.takeIf { it.isNotBlank() } ?: return messages
+        val translations = getSmsTranslations(messages.filter { it.direction == "inbound" }.map { it.id }, lang)
+        if (translations.isEmpty()) return messages
+        return messages.map { m ->
+            if (m.direction == "inbound") m.copy(translatedBody = translations[m.id]) else m
+        }
+    }
+
+    // ─── Inbound-SMS translation cache ───────────────────────────────────────
+    // Each inbound message is translated at most once per target language. The original
+    // sms_message.body is never modified; translations live here and are shown alongside.
+
+    /** Cached translation of one message into [targetLang], or null if not yet computed. */
+    fun getSmsTranslation(messageId: Int, targetLang: String): String? {
+        connection.prepareStatement(
+            "SELECT translated_body FROM sms_translation WHERE message_id = ? AND target_lang = ?"
+        ).use { stmt ->
+            stmt.setInt(1, messageId)
+            stmt.setString(2, targetLang.trim())
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("translated_body") else null
+        }
+    }
+
+    /** Batch lookup: message_id → translated_body for the given [targetLang]. */
+    fun getSmsTranslations(messageIds: List<Int>, targetLang: String): Map<Int, String> {
+        if (messageIds.isEmpty()) return emptyMap()
+        val placeholders = messageIds.joinToString(",") { "?" }
+        val sql = "SELECT message_id, translated_body FROM sms_translation " +
+            "WHERE target_lang = ? AND message_id IN ($placeholders)"
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, targetLang.trim())
+            messageIds.forEachIndexed { i, id -> stmt.setInt(i + 2, id) }
+            val rs = stmt.executeQuery()
+            val out = HashMap<Int, String>()
+            while (rs.next()) out[rs.getInt("message_id")] = rs.getString("translated_body")
+            return out
+        }
+    }
+
+    /** Store (or replace) the translation of [messageId] into [targetLang]. */
+    fun upsertSmsTranslation(messageId: Int, targetLang: String, translatedBody: String) {
+        connection.prepareStatement(
+            """
+            INSERT INTO sms_translation (message_id, target_lang, translated_body, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(message_id, target_lang) DO UPDATE SET
+                translated_body = excluded.translated_body,
+                created_at = excluded.created_at
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, messageId)
+            stmt.setString(2, targetLang.trim())
+            stmt.setString(3, translatedBody)
+            stmt.setLong(4, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Inbound messages in a thread that still lack a translation into [targetLang]. Used to lazily backfill. */
+    fun getUntranslatedInboundSms(shopId: Int, counterpartyPhone: String, targetLang: String, limit: Int = 200): List<SmsMessage> {
+        val sql = """
+            SELECT m.id, m.shop_id, m.customer_id, m.counterparty_phone, m.from_phone, m.to_phone,
+                   m.body, m.direction, m.status, m.provider_message_sid, m.error_message, m.created_at
+            FROM sms_message m
+            LEFT JOIN sms_translation t ON t.message_id = m.id AND t.target_lang = ?
+            WHERE m.shop_id = ? AND m.counterparty_phone = ? AND m.direction = 'inbound'
+                  AND m.body <> '' AND t.message_id IS NULL
+            ORDER BY m.created_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, targetLang.trim())
+            stmt.setInt(2, shopId)
+            stmt.setString(3, counterpartyPhone.trim())
+            stmt.setInt(4, limit)
             return buildSmsMessageList(stmt.executeQuery())
         }
     }
@@ -3790,6 +3932,137 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 )
             }
             return result
+        }
+    }
+
+    // ─── Search (SMS + calls, across the caller's shops) ─────────────────────
+
+    /** Digits only — lets a search for "51941736" match a stored "+4551941736". */
+    private fun digitsOf(q: String): String = q.filter { it.isDigit() }
+
+    /**
+     * SMS messages whose original body OR cached translation matches [q]. Used to jump to a
+     * specific message inside a thread. Newest first, capped at [limit].
+     */
+    fun searchSmsMessages(shopIds: List<Int>, q: String, limit: Int = 50): List<SmsSearchHit> {
+        if (shopIds.isEmpty() || q.isBlank()) return emptyList()
+        val ph = shopIds.joinToString(",") { "?" }
+        val like = "%$q%"
+        val sql = """
+            SELECT m.id, m.shop_id, m.counterparty_phone, m.customer_id,
+                   c.name AS customer_name, cs.name AS callapp_name,
+                   m.direction, m.body, m.created_at,
+                   (SELECT tr.translated_body FROM sms_translation tr WHERE tr.message_id = m.id LIMIT 1) AS translated_body
+            FROM sms_message m
+            LEFT JOIN customers c   ON c.id = m.customer_id
+            LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
+            LEFT JOIN customer_callapp_screening cs
+                                    ON cs.customer_id = COALESCE(m.customer_id, cph.id) AND cs.found = 1
+            WHERE m.shop_id IN ($ph)
+              AND ( m.body LIKE ?
+                    OR EXISTS (SELECT 1 FROM sms_translation t2 WHERE t2.message_id = m.id AND t2.translated_body LIKE ?) )
+            ORDER BY m.created_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            var i = 1
+            shopIds.forEach { stmt.setInt(i++, it) }
+            stmt.setString(i++, like)
+            stmt.setString(i++, like)
+            stmt.setInt(i, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<SmsSearchHit>()
+            while (rs.next()) {
+                out += SmsSearchHit(
+                    messageId = rs.getInt("id"),
+                    shopId = rs.getInt("shop_id"),
+                    counterpartyPhone = rs.getString("counterparty_phone"),
+                    customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
+                    callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                    direction = rs.getString("direction") ?: "inbound",
+                    body = rs.getString("body") ?: "",
+                    translatedBody = rs.getString("translated_body")?.trim()?.takeIf { it.isNotBlank() },
+                    createdAt = rs.getLong("created_at"),
+                )
+            }
+            return out
+        }
+    }
+
+    /** Conversations whose counterparty name or number matches [q] (one row per thread, newest first). */
+    fun searchSmsThreads(shopIds: List<Int>, q: String, limit: Int = 50): List<SmsThreadHit> {
+        if (shopIds.isEmpty() || q.isBlank()) return emptyList()
+        val ph = shopIds.joinToString(",") { "?" }
+        val like = "%$q%"
+        val digits = digitsOf(q)
+        val phoneLike = if (digits.isNotEmpty()) "%$digits%" else null
+        val sql = """
+            SELECT m.shop_id, m.counterparty_phone, m.customer_id,
+                   c.name AS customer_name, cs.name AS callapp_name,
+                   m.body AS last_body, m.created_at AS last_at
+            FROM sms_message m
+            LEFT JOIN customers c   ON c.id = m.customer_id
+            LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
+            LEFT JOIN customer_callapp_screening cs
+                                    ON cs.customer_id = COALESCE(m.customer_id, cph.id) AND cs.found = 1
+            WHERE m.shop_id IN ($ph)
+              AND m.id = (SELECT id FROM sms_message WHERE shop_id = m.shop_id
+                          AND counterparty_phone = m.counterparty_phone ORDER BY created_at DESC LIMIT 1)
+              AND ( c.name LIKE ? OR cs.name LIKE ?
+                    OR (? IS NOT NULL AND m.counterparty_phone LIKE ?) )
+            ORDER BY m.created_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            var i = 1
+            shopIds.forEach { stmt.setInt(i++, it) }
+            stmt.setString(i++, like)
+            stmt.setString(i++, like)
+            stmt.setString(i++, phoneLike)
+            stmt.setString(i++, phoneLike ?: "")
+            stmt.setInt(i, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<SmsThreadHit>()
+            while (rs.next()) {
+                out += SmsThreadHit(
+                    shopId = rs.getInt("shop_id"),
+                    counterpartyPhone = rs.getString("counterparty_phone"),
+                    customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
+                    customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
+                    callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                    lastBody = rs.getString("last_body") ?: "",
+                    lastAt = rs.getLong("last_at"),
+                )
+            }
+            return out
+        }
+    }
+
+    /** Calls whose counterparty name or number matches [q] (newest first, capped at [limit]). */
+    fun searchCalls(shopIds: List<Int>, q: String, limit: Int = 50): List<VoiceCallRecord> {
+        if (shopIds.isEmpty() || q.isBlank()) return emptyList()
+        val ph = shopIds.joinToString(",") { "?" }
+        val like = "%$q%"
+        val digits = digitsOf(q)
+        val phoneLike = if (digits.isNotEmpty()) "%$digits%" else null
+        val sql = """
+            $CALL_SELECT
+            WHERE vc.shop_id IN ($ph)
+              AND ( c.name LIKE ? OR cs.name LIKE ?
+                    OR (? IS NOT NULL AND vc.from_phone LIKE ?) )
+            ORDER BY vc.started_at DESC
+            LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            var i = 1
+            shopIds.forEach { stmt.setInt(i++, it) }
+            stmt.setString(i++, like)
+            stmt.setString(i++, like)
+            stmt.setString(i++, phoneLike)
+            stmt.setString(i++, phoneLike ?: "")
+            stmt.setInt(i, limit)
+            return buildCallRecordList(stmt.executeQuery())
         }
     }
 

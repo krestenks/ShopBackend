@@ -935,6 +935,27 @@ class WebAdmin(
                                 style = "width: 100%; height: 60px;"
                                 +(voiceConfig.smsPriceListFooter ?: "")
                             }
+                            br(); br()
+
+                            label { +"Translate incoming SMS to (staff language):" }
+                            br()
+                            p("hint") { +"When set, incoming customer texts are auto-translated into this language for the staff to read. The original is always kept. Requires the translation model to be configured on the server." }
+                            select {
+                                name = "sms_translate_lang"
+                                val current = voiceConfig.smsTranslateLang ?: ""
+                                listOf(
+                                    "" to "Off (no translation)",
+                                    "th" to "Thai",
+                                    "da" to "Danish",
+                                    "en" to "English",
+                                ).forEach { (code, labelText) ->
+                                    option {
+                                        value = code
+                                        if (code == current) selected = true
+                                        +labelText
+                                    }
+                                }
+                            }
 
                             hr()
                             h3 { +"Data retention (per shop)" }
@@ -1281,6 +1302,10 @@ class WebAdmin(
                         communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
                         customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
                         smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
+                        // Preserve the existing value when this form doesn't render the selector.
+                        smsTranslateLang = if (params.contains("sms_translate_lang"))
+                            params["sms_translate_lang"]?.trim()?.takeIf { it.isNotBlank() }
+                        else db.getShopVoiceConfig(id).smsTranslateLang,
                     )
                     db.upsertShopVoiceConfig(voice)
 
@@ -2853,6 +2878,25 @@ class WebAdmin(
                             label { +"Price list SMS footer (appended after generated price list):" }; br()
                             p("hint") { +"Leave blank for no footer." }
                             textArea { name = "sms_price_list_footer"; style = "width:100%;height:60px;"; +(voiceConfig.smsPriceListFooter ?: "") }
+                            br(); br()
+                            label { +"Translate incoming SMS to (staff language):" }; br()
+                            p("hint") { +"When set, incoming customer texts are auto-translated into this language for the staff to read. The original is always kept. Requires the translation model to be configured on the server." }
+                            select {
+                                name = "sms_translate_lang"
+                                val current = voiceConfig.smsTranslateLang ?: ""
+                                listOf(
+                                    "" to "Off (no translation)",
+                                    "th" to "Thai",
+                                    "da" to "Danish",
+                                    "en" to "English",
+                                ).forEach { (code, labelText) ->
+                                    option {
+                                        value = code
+                                        if (code == current) selected = true
+                                        +labelText
+                                    }
+                                }
+                            }
 
                             hr()
                             h3 { +"Data retention" }
@@ -2964,6 +3008,9 @@ class WebAdmin(
                         communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
                         customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
                         smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
+                        smsTranslateLang = if (params.contains("sms_translate_lang"))
+                            params["sms_translate_lang"]?.trim()?.takeIf { it.isNotBlank() }
+                        else db.getShopVoiceConfig(id).smsTranslateLang,
                     )
                     db.upsertShopVoiceConfig(voice)
 

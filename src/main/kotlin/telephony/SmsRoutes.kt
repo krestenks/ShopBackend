@@ -3,7 +3,10 @@ package telephony
 import DataBase
 import SmsConversationSummary
 import SmsMessage
+import SmsSearchHit
+import SmsThreadHit
 import SmsUnhandledNotification
+import VoiceCallRecord
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -58,6 +61,13 @@ data class SendSmsResponse(
 data class SmsThreadResponse(val messages: List<SmsMessage>)
 
 @Serializable
+data class SearchResponse(
+    val messages: List<SmsSearchHit>,
+    val threads: List<SmsThreadHit>,
+    val calls: List<VoiceCallRecord>,
+)
+
+@Serializable
 data class SmsConversationsResponse(val conversations: List<SmsConversationSummary>)
 
 @Serializable
@@ -69,12 +79,21 @@ data class UnhandledNotificationsResponse(val notifications: List<SmsUnhandledNo
 @Serializable
 data class MarkHandledRequest(val shopId: Int, val phone: String)
 
+/**
+ * Message IDs whose inbound-translation is currently running or queued. The thread endpoint
+ * re-checks for untranslated messages on every poll (~5s); without this guard each poll would
+ * re-launch translation for the same messages, piling concurrent calls onto the single translation
+ * model until they all time out. Shared across the inbound path and the thread backfill.
+ */
+private val smsTranslateInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
 // ─── Route installer ──────────────────────────────────────────────────────────
 
 fun Routing.smsRoutes(
     db: DataBase,
     smsService: TelephonyService,
     callAppScreening: callapp.CallAppScreeningService? = null,
+    translationService: TranslationService? = null,
 ) {
 
     // ── Manager API endpoints (JWT authenticated) ─────────────────────────────
@@ -287,11 +306,63 @@ fun Routing.smsRoutes(
                 return@get
             }
 
-            val messages = db.getSmsThread(shopId, phone)
+            // Staff language for inbound-SMS translation (per-shop opt-in; null = disabled).
+            val translateLang = db.getShopVoiceConfig(shopId).smsTranslateLang
+            val messages = db.getSmsThread(shopId, phone, translateLang = translateLang)
+
+            // Lazily translate any inbound messages that aren't cached yet (old threads, or a
+            // shop that just enabled translation). Fire-and-forget so the read path never blocks
+            // on the model — the translations surface on the next poll.
+            if (translationService != null && !translateLang.isNullOrBlank()) {
+                // Skip messages already being translated by an earlier poll (see smsTranslateInFlight).
+                val pending = db.getUntranslatedInboundSms(shopId, phone, translateLang)
+                    .filter { smsTranslateInFlight.add(it.id) }
+                if (pending.isNotEmpty()) {
+                    @Suppress("OPT_IN_USAGE")
+                    GlobalScope.launch(Dispatchers.IO) {
+                        for (m in pending) {
+                            try {
+                                translationService.translate(m.body, translateLang)
+                                    ?.let { db.upsertSmsTranslation(m.id, translateLang, it) }
+                            } finally {
+                                smsTranslateInFlight.remove(m.id)
+                            }
+                        }
+                    }
+                }
+            }
+
             if (SMS_DEBUG_POLL) {
                 smsLog("[SMS-POLL] ${smsTs()} thread caller=$refType:$refId shop=$shopId phone=$phone msgs=${messages.size}")
             }
             call.respond(SmsThreadResponse(messages))
+        }
+
+        // ── Global search: matching SMS messages/threads + calls across the caller's shops ──
+        get("/api/mobile/search") {
+            val principal = call.principal<JWTPrincipal>()
+            val refId     = principal?.payload?.getClaim("userId")?.asInt()
+            val refType   = principal?.payload?.getClaim("role")?.asString()
+            if (principal == null || refId == null || refType == null) {
+                call.respond(HttpStatusCode.Unauthorized, "Invalid token")
+                return@get
+            }
+            val q = call.request.queryParameters["q"]?.trim().orEmpty()
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 100) ?: 50
+            if (q.length < 2) {
+                call.respond(SearchResponse(emptyList(), emptyList(), emptyList()))
+                return@get
+            }
+            val shopIds = getShopIdsForPrincipal(db, refType, refId)
+            if (shopIds.isEmpty()) {
+                call.respond(SearchResponse(emptyList(), emptyList(), emptyList()))
+                return@get
+            }
+            call.respond(SearchResponse(
+                messages = db.searchSmsMessages(shopIds, q, limit),
+                threads  = db.searchSmsThreads(shopIds, q, limit),
+                calls    = db.searchCalls(shopIds, q, limit),
+            ))
         }
     }
 }
@@ -312,6 +383,7 @@ fun persistInboundSms(
     body: String,
     providerMessageSid: String?,
     callAppScreening: callapp.CallAppScreeningService? = null,
+    translationService: TranslationService? = null,
     elapsedSinceNs: Long = System.nanoTime(),
 ): InboundSmsPersistResult {
     // Blacklist check (tenant-wide) — silently drop messages from blocked senders
@@ -366,6 +438,23 @@ fun persistInboundSms(
         InboundSmsPersistResult.SUPPRESSED_DUPLICATE
     } else {
         smsLog("[SMS-IN] STORED id=$insertedId From=$fromPhone shop=$shopId Sid=$providerMessageSid handledIn=${elapsedMs}ms")
+
+        // Translate the incoming message into the shop staff's language (display-only) so it's
+        // cached before the manager opens the thread. Fire-and-forget — never delays the webhook.
+        val translateLang = db.getShopVoiceConfig(shopId).smsTranslateLang
+        if (translationService != null && !translateLang.isNullOrBlank() && body.isNotBlank() &&
+            smsTranslateInFlight.add(insertedId)) {
+            @Suppress("OPT_IN_USAGE")
+            GlobalScope.launch(Dispatchers.IO) {
+                try {
+                    translationService.translate(body, translateLang)
+                        ?.let { db.upsertSmsTranslation(insertedId, translateLang, it) }
+                } finally {
+                    smsTranslateInFlight.remove(insertedId)
+                }
+            }
+        }
+
         InboundSmsPersistResult.STORED
     }
 }

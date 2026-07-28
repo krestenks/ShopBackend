@@ -150,6 +150,23 @@ object ShopBackend {
             null
         }
 
+        // Optional inbound-SMS translation via a self-hosted model on the tailnet (Ollama, LM
+        // Studio, …). Set TRANSLATE_LLM_URL to an OpenAI-compatible endpoint to enable; per shop,
+        // translation only runs when the shop's staff language (sms_translate_lang) is also set.
+        val translateUrl = System.getenv("TRANSLATE_LLM_URL")?.trim()
+        val translationService: telephony.TranslationService? = if (!translateUrl.isNullOrBlank()) {
+            val translationConfig = telephony.TranslationConfig(
+                url = translateUrl,
+                model = System.getenv("TRANSLATE_LLM_MODEL")?.trim()?.takeIf { it.isNotBlank() } ?: "gemma2:9b",
+            )
+            telephony.TranslationService(translationConfig).also {
+                println("[Translate] Inbound-SMS translation enabled. endpoint=${translationConfig.url} model=${translationConfig.model}")
+            }
+        } else {
+            println("[Translate] Inbound-SMS translation DISABLED — TRANSLATE_LLM_URL not set.")
+            null
+        }
+
         // Server
         val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
         val host = "0.0.0.0"
@@ -192,10 +209,10 @@ object ShopBackend {
                     chatTestRoutes(db, chatbotService)
                     chatApiRoutes(db, chatbotService)
                 }
-                smsRoutes(db, telephonyService, callAppScreening)
+                smsRoutes(db, telephonyService, callAppScreening, translationService)
 
                 // Asterisk dialplan → backend callbacks (inbound SMS/call, menu actions, provisioning)
-                internalTelephonyRoutes(db, asteriskConfig, provisioner, telephonyService, callAppScreening)
+                internalTelephonyRoutes(db, asteriskConfig, provisioner, telephonyService, callAppScreening, translationService)
             }
         }.start(wait = true)
     }
@@ -211,6 +228,8 @@ object ShopBackend {
             "ADMIN_PASSWORD",
             "LM_STUDIO_URL",
             "LM_MODEL",
+            "TRANSLATE_LLM_URL",
+            "TRANSLATE_LLM_MODEL",
             "ASTERISK_AMI_SECRET",
             "ASTERISK_ARI_PASSWORD",
             "ASTERISK_INTERNAL_SECRET",
