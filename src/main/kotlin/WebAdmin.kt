@@ -688,6 +688,13 @@ class WebAdmin(
                                 }
 
                                 br()
+                                label {
+                                    checkBoxInput { name = "web_admin_access"; checked = db.getManagerWebAdminAccess(manager.id) }
+                                    +" Allow opening the web backend (admin UI) inside the app"
+                                }
+                                p("hint") { +"Off by default. When on, this manager's app shows an \"Admin\" item that opens this site over the tunnel (they still log in here)." }
+
+                                br()
                                 submitInput(classes = "btn primary") { value = "Save changes" }
                             }
                         }
@@ -762,6 +769,7 @@ class WebAdmin(
                 if (id != null) {
                     if (impOwnerId == null || db.isManagerOwnedBy(id, impOwnerId)) {
                         db.updateManager(id, name, phone, username)
+                        db.setManagerWebAdminAccess(id, params["web_admin_access"] == "on")
                     }
                 }
                 call.respondRedirect("/managers")
@@ -3685,6 +3693,11 @@ class WebAdmin(
                                 label { +"Username" }; textInput { name = "username"; value = mgr.username }
                                 label { +"Phone" }; textInput { name = "phone"; value = mgr.phone ?: "" }
                                 br()
+                                label {
+                                    checkBoxInput { name = "web_admin_access"; checked = db.getManagerWebAdminAccess(id) }
+                                    +" Allow opening the web backend inside the app"
+                                }
+                                br()
                                 submitInput(classes = "btn primary") { value = "Save" }
                             }
                             hr()
@@ -3766,6 +3779,7 @@ class WebAdmin(
                 val username = params["username"]?.trim().orEmpty()
                 val phone = params["phone"]?.trim().orEmpty()
                 if (name.isNotBlank() && username.isNotBlank()) db.updateManager(id, name, phone, username)
+                db.setManagerWebAdminAccess(id, params["web_admin_access"] == "on")
                 call.respondRedirect("/owner/managers")
             }
 

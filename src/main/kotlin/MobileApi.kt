@@ -132,6 +132,8 @@ data class MeResponse(
     val managerId: Int?,
     val shopId: Int?,
     val username: String?,
+    /** Manager opted-in to open the web backend (admin UI) inside the app. Default false. */
+    val webAdminAccess: Boolean = false,
 )
 
 /** SIP registration details for the manager app's softphone (Asterisk mode only). */
@@ -1086,12 +1088,14 @@ class MobileApi(
                         }
                         else -> Pair(null, null)
                     }
+                    val webAdminAccess = loginInfo.managerId?.let { db.getManagerWebAdminAccess(it) } ?: false
                     call.respond(MeResponse(
                         role = loginInfo.role,
                         userId = loginInfo.managerId ?: loginInfo.shopId ?: -1,
                         managerId = loginInfo.managerId,
                         shopId = loginInfo.shopId,
                         username = username,
+                        webAdminAccess = webAdminAccess,
                     ))
                 }
 

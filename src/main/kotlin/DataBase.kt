@@ -831,6 +831,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE phone_blacklist ADD COLUMN owner_id INTEGER",
             // ── Per-manager SIP identity (mgr{id}) for the duty-aware call pool ──
             "ALTER TABLE managers ADD COLUMN sip_password TEXT",
+            // Per-manager opt-in: allow opening the web backend (admin UI) inside the app. Default off.
+            "ALTER TABLE managers ADD COLUMN web_admin_access INTEGER NOT NULL DEFAULT 0",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -2931,6 +2933,23 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
         connection.prepareStatement("DELETE FROM managers WHERE id = ?").use {
             it.setInt(1, id); it.executeUpdate()
+        }
+    }
+
+    /** Whether this manager may open the web backend (admin UI) inside the app. Default off. */
+    fun getManagerWebAdminAccess(id: Int): Boolean {
+        connection.prepareStatement("SELECT web_admin_access FROM managers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            val rs = stmt.executeQuery()
+            return rs.next() && rs.getInt(1) != 0
+        }
+    }
+
+    fun setManagerWebAdminAccess(id: Int, allowed: Boolean) {
+        connection.prepareStatement("UPDATE managers SET web_admin_access = ? WHERE id = ?").use { stmt ->
+            stmt.setInt(1, if (allowed) 1 else 0)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
         }
     }
 
