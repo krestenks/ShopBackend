@@ -2935,9 +2935,12 @@ class WebAdmin(
                 val voiceConfig = db.getShopVoiceConfig(id)
                 db.ensureDefaultShopOpeningHours(id)
                 val openingHours = db.getShopOpeningHours(id).associateBy { it.dayOfWeek }
+                val tele = db.getShopTelephonyConfig(id)
+                val tmsg = call.request.queryParameters["tmsg"]
                 fun fmtMin(min: Int): String { val h = min / 60; val m = min % 60; return "%02d:%02d".format(h, m) }
                 call.respondOwnerPage(session, "Edit shop — ${shop.name}", "/owner/shops") {
                     div("panel") {
+                        if (!tmsg.isNullOrBlank()) p { b { +tmsg } }
                         form(action = "/owner/shops/edit", method = FormMethod.post) {
                             hiddenInput { name = "id"; value = id.toString() }
                             label { +"Shop name" }; textInput { name = "name"; value = shop.name }
@@ -3055,8 +3058,38 @@ class WebAdmin(
                                 }
                             }
                         }
+
+                        // Lebara prepaid top-up (owner self-service). Carrier is set by the platform admin.
+                        if (tele.carrier == "lebara") {
+                            hr()
+                            h3 { +"💳 Lebara top-up" }
+                            p("hint") { +"Enter the two voucher codes from the top-up card — sends \"Topup <8-digit> <6-digit>\" to 5010 from this shop's SIM." }
+                            form(action = "/owner/shops/telephony/topup", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = id.toString() }
+                                textInput { name = "code1"; placeholder = "8-digit code"; attributes["inputmode"] = "numeric" }
+                                +" "
+                                textInput { name = "code2"; placeholder = "6-digit code"; attributes["inputmode"] = "numeric" }
+                                +" "
+                                submitInput(classes = "btn primary") { value = "Send top-up" }
+                            }
+                        }
                     }
                 }
+            }
+
+            post("/owner/shops/telephony/topup") {
+                val session = call.sessions.get<OwnerSession>()!!
+                val params = call.receiveParameters()
+                val sid = params["id"]?.toIntOrNull() ?: return@post call.respondRedirect("/owner/shops")
+                if (!db.isShopOwnedBy(sid, session.ownerId)) return@post call.respondRedirect("/owner/shops")
+                val msg = if (db.getShopTelephonyConfig(sid).carrier != telephony.LebaraTopup.CARRIER) {
+                    "⚠️ This SIM is not a Lebara line."
+                } else {
+                    val result = telephony.LebaraTopup.send(telephonyService, sid, params["code1"], params["code2"])
+                    if (result.success) "✅ Top-up SMS sent to 5010 from this shop's SIM."
+                    else "⚠️ Top-up failed: ${result.errorMessage ?: result.body}"
+                }
+                call.respondRedirect("/owner/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
             }
 
             post("/owner/shops/app-login") {
