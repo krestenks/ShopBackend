@@ -197,6 +197,15 @@ class TailnetService(private val config: TailnetConfig) {
 
     suspend fun deleteNode(id: String) { req(HttpMethod.Delete, "/node/$id") }
 
+    /** Expires (logs out) a node without deleting it — it must re-authenticate to return. */
+    suspend fun expireNode(id: String) { req(HttpMethod.Post, "/node/$id/expire") }
+
+    /** The ACL tags of a single node (e.g. `["tag:tenant-1"]`); empty if the node is unknown.
+     *  Read from the node's `tags` field — NOT `forcedTags`/`validTags`, which the REST API leaves null. */
+    suspend fun nodeTags(id: String): List<String> =
+        listNodes().firstOrNull { it["id"]?.jsonPrimitive?.content == id }
+            ?.get("tags")?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+
     // ── Policy (ACL) ─────────────────────────────────────────────────────────
 
     suspend fun getPolicy(): String =

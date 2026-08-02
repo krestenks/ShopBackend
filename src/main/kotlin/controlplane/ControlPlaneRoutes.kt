@@ -11,6 +11,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.html.*
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -43,29 +44,42 @@ class ControlPlaneRoutes(
     @Serializable data class CreateInviteReq(val ownerId: Int = 0, val deviceLabel: String, val edgeApiUrl: String? = null)
     @Serializable data class TenantDto(val ownerId: Int, val userId: String, val userName: String)
     @Serializable data class InviteDto(val ownerId: Int, val deviceLabel: String, val deepLink: String, val expiration: String?, val preAuthKey: String)
-    @Serializable data class NodeDto(val id: String, val name: String, val user: String, val tags: List<String>, val addresses: List<String>)
+    @Serializable data class NodeDto(val id: String, val name: String, val user: String, val tags: List<String>, val addresses: List<String>, val online: Boolean = false)
     @Serializable data class DownloadDto(val token: String, val url: String, val expiresInMinutes: Int)
     @Serializable data class Tenants(val tenants: List<TenantDto>)
     @Serializable data class Nodes(val nodes: List<NodeDto>)
     @Serializable data class ErrorDto(val error: String)
+    @Serializable data class OkDto(val ok: Boolean, val message: String)
 
     /** Set on the call when authenticated with a per-tenant edge token → forces that ownerId. */
     private val edgeOwnerKey = io.ktor.util.AttributeKey<Int>("cp.edgeOwner")
 
     private fun edgeApiFor(ownerId: Int) = edgeApiTemplate.replace("{ownerId}", ownerId.toString())
 
+    /** Authorization for node revoke: the admin token (no edge owner) may manage any node; an
+     *  edge token may only manage a node that carries its own tenant tag. */
+    private suspend fun callMayManageNode(call: ApplicationCall, nodeId: String): Boolean {
+        val owner = call.attributes.getOrNull(edgeOwnerKey) ?: return true
+        return tailnet.nodeTags(nodeId).contains(tailnet.tenantTag(owner))
+    }
+
     private suspend fun listTenants(): List<TenantDto> =
         tailnet.listUsers().mapNotNull { u ->
             u.name.removePrefix("tenant-").toIntOrNull()?.let { TenantDto(it, u.id, u.name) }
         }.sortedBy { it.ownerId }
 
-    private suspend fun listNodeDtos(): List<NodeDto> = tailnet.listNodes().map { n ->
+    /** @param ownerFilter when non-null (edge-token caller), return only nodes carrying that tenant's tag. */
+    private suspend fun listNodeDtos(ownerFilter: Int?): List<NodeDto> = tailnet.listNodes().mapNotNull { n ->
+        // The tenant tag lives in `tags` (REST API leaves forcedTags/validTags null).
+        val tags = n["tags"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+        if (ownerFilter != null && !tags.contains(tailnet.tenantTag(ownerFilter))) return@mapNotNull null
         NodeDto(
             id = n["id"]?.jsonPrimitive?.content ?: "?",
             name = (n["givenName"] ?: n["name"])?.jsonPrimitive?.content ?: "?",
             user = n["user"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: "?",
-            tags = (n["forcedTags"] ?: n["validTags"])?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
+            tags = tags,
             addresses = n["ipAddresses"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
+            online = n["online"]?.jsonPrimitive?.booleanOrNull ?: false,
         )
     }
 
@@ -102,7 +116,27 @@ class ControlPlaneRoutes(
         }
 
         get("/api/tenants") { call.respond(Tenants(listTenants())) }
-        get("/api/nodes") { call.respond(Nodes(listNodeDtos())) }
+        // Edge-token callers see only their own tenant's nodes; the admin token sees all.
+        get("/api/nodes") { call.respond(Nodes(listNodeDtos(call.attributes.getOrNull(edgeOwnerKey)))) }
+
+        // Revoke a device. An edge token may only act on nodes carrying its own tenant tag; the
+        // admin token may act on any. `expire` logs the node out (re-auth to return); DELETE removes it.
+        post("/api/nodes/{id}/expire") {
+            val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest, ErrorDto("missing id"))
+            if (!callMayManageNode(call, id)) {
+                call.respond(HttpStatusCode.Forbidden, ErrorDto("node not in your tenant")); return@post
+            }
+            tailnet.expireNode(id)
+            call.respond(OkDto(true, "expired"))
+        }
+        delete("/api/nodes/{id}") {
+            val id = call.parameters["id"] ?: return@delete call.respond(HttpStatusCode.BadRequest, ErrorDto("missing id"))
+            if (!callMayManageNode(call, id)) {
+                call.respond(HttpStatusCode.Forbidden, ErrorDto("node not in your tenant")); return@delete
+            }
+            tailnet.deleteNode(id)
+            call.respond(OkDto(true, "deleted"))
+        }
 
         post("/api/tenants") {
             val req = call.receive<CreateTenantReq>()

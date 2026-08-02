@@ -81,6 +81,45 @@ class SetupAppRoutes(
         return Onboarding(deepLink, downloadUrl, inv["expiration"]?.jsonPrimitive?.contentOrNull)
     }
 
+    // ── Tenant device list / revoke (proxied to the control plane via the scoped edge token) ──
+    @Serializable
+    private data class CpNode(
+        val id: String,
+        val name: String = "",
+        val user: String = "",
+        val tags: List<String> = emptyList(),
+        val addresses: List<String> = emptyList(),
+        val online: Boolean = false,
+    )
+    @Serializable
+    private data class CpNodes(val nodes: List<CpNode> = emptyList())
+
+    private val cpJson = Json { ignoreUnknownKeys = true }
+
+    /** Lists this tenant's *phones*. The control plane scopes the result to this edge's tenant via
+     *  [edgeToken]; we additionally hide the tenant's own edge/server node (named `edge-{ownerId}`)
+     *  so it can't be shown or accidentally revoked from this handset-management page. */
+    private suspend fun listDevices(): List<CpNode> {
+        val body = cpClient.get("$controlPlaneUrl/api/nodes") {
+            header(HttpHeaders.Authorization, "Bearer $edgeToken")
+        }.bodyAsText()
+        return cpJson.decodeFromString(CpNodes.serializer(), body).nodes
+            .filterNot { Regex("^edge-\\d+$").matches(it.name) }
+    }
+
+    /** Revokes a node: [remove] deletes it (must re-onboard), otherwise expires (logs out). */
+    private suspend fun revokeDevice(id: String, remove: Boolean): Boolean {
+        val resp = if (remove)
+            cpClient.delete("$controlPlaneUrl/api/nodes/$id") {
+                header(HttpHeaders.Authorization, "Bearer $edgeToken")
+            }
+        else
+            cpClient.post("$controlPlaneUrl/api/nodes/$id/expire") {
+                header(HttpHeaders.Authorization, "Bearer $edgeToken")
+            }
+        return resp.status.isSuccess()
+    }
+
     private fun String.enc() = URLEncoder.encode(this, "UTF-8")
 
     private val fmt = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Europe/Copenhagen"))
@@ -140,6 +179,14 @@ class SetupAppRoutes(
         .qr-wrap img { max-width:240px; border:1px solid #ddd; padding:8px; border-radius:8px; background:#fff; }
         .qr-expiry { font-size:0.85em; color:#666; margin-top:6px; }
         .badge-required { background:#e53935; color:#fff; border-radius:4px; padding:1px 6px; font-size:0.8em; }
+        table.devices { border-collapse:collapse; width:100%; margin:8px 0; }
+        table.devices th, table.devices td { border:1px solid #e2e8f0; padding:8px 10px; text-align:left; font-size:0.9em; }
+        table.devices th { background:#f1f5f9; }
+        .dev-online { color:#0a8a5f; font-weight:600; }
+        .dev-offline { color:#999; }
+        .btn.danger { background:#e53935; color:#fff; }
+        table.devices form { display:inline; margin:0 2px; }
+        table.devices .btn { padding:4px 10px; font-size:0.85em; }
     """.trimIndent()
 
     private fun HTML.setupHead(titleText: String) {
@@ -172,6 +219,7 @@ class SetupAppRoutes(
                             a(href = "/") { span { +"🏠" }; span { +"Admin" } }
                             a(href = "/setup-app/download", classes = "active") { span { +"📲" }; span { +"Install app" } }
                             a(href = "/setup-app/add-phone") { span { +"➕" }; span { +"Add phone" } }
+                            a(href = "/setup-app/devices") { span { +"📱" }; span { +"Devices" } }
                             div("spacer") {}
                             a(href = "/setup-app/logout") { span { +"🚪" }; span { +"Logout" } }
                         }
@@ -449,6 +497,70 @@ class SetupAppRoutes(
                     ?: return@get call.respond(HttpStatusCode.BadRequest)
                 call.response.headers.append(HttpHeaders.CacheControl, "no-store")
                 call.respondBytes(generateQrPng(data, size = 320), ContentType.Image.PNG)
+            }
+
+            // ── GET /setup-app/devices — this tenant's joined phones + revoke ──
+            get("/setup-app/devices") {
+                if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) {
+                    call.respondSetupPage("Devices") {
+                        p { +"Device management isn't configured on this edge box." }
+                        p("hint") { +"Set CONTROL_PLANE_URL and CONTROL_PLANE_EDGE_TOKEN, then restart the backend." }
+                    }
+                    return@get
+                }
+                val devices = runCatching { listDevices() }.getOrElse { e ->
+                    call.respondSetupPage("Devices") {
+                        p { +"Couldn't reach the control plane." }
+                        p("hint") { +(e.message ?: "unknown error") }
+                        a(href = "/setup-app/devices", classes = "btn") { +"Retry" }
+                    }
+                    return@get
+                }
+                call.respondSetupPage("Devices") {
+                    p("hint") { +"Phones joined to your secure network. \"Log out\" disconnects a phone (it can rejoin); \"Remove\" revokes it (must be re-onboarded)." }
+                    if (devices.isEmpty()) {
+                        p { +"No phones have joined yet." }
+                    } else {
+                        table(classes = "devices") {
+                            tr { th { +"Phone" }; th { +"Address" }; th { +"Status" }; th { +"Actions" } }
+                            devices.sortedBy { it.name }.forEach { d ->
+                                tr {
+                                    td { +d.name }
+                                    td { +(d.addresses.firstOrNull { it.startsWith("100.") } ?: d.addresses.firstOrNull() ?: "—") }
+                                    td {
+                                        if (d.online) span("dev-online") { +"● online" }
+                                        else span("dev-offline") { +"○ offline" }
+                                    }
+                                    td {
+                                        form(action = "/setup-app/devices/${d.id}/logout", method = FormMethod.post) {
+                                            submitInput(classes = "btn") { value = "Log out" }
+                                        }
+                                        form(action = "/setup-app/devices/${d.id}/remove", method = FormMethod.post) {
+                                            attributes["onsubmit"] =
+                                                "return confirm('Remove ${d.name}? The phone must be re-onboarded to return.')"
+                                            submitInput(classes = "btn danger") { value = "Remove" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    form(action = "/setup-app/devices", method = FormMethod.get) {
+                        submitInput(classes = "btn") { value = "⟳ Refresh" }
+                    }
+                }
+            }
+
+            // ── POST /setup-app/devices/{id}/logout | /remove — revoke (scoped to tenant) ──
+            post("/setup-app/devices/{id}/logout") {
+                val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
+                runCatching { revokeDevice(id, remove = false) }
+                call.respondRedirect("/setup-app/devices")
+            }
+            post("/setup-app/devices/{id}/remove") {
+                val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
+                runCatching { revokeDevice(id, remove = true) }
+                call.respondRedirect("/setup-app/devices")
             }
 
             // ── GET /setup-app/install/t/{token} — public install page ─────────
