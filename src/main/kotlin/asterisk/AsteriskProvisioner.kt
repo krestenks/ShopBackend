@@ -146,38 +146,25 @@ class AsteriskProvisioner(
     }
 
     /** Internal-intercom groups: each shop with all shops sharing its manager. */
-    private fun internalEntries(): List<InternalShopEntry> {
-        val shops = db.getAllShops()
-        val byManager = shops.groupBy { it.managerId }
-        return shops.map { s ->
-            val group = byManager[s.managerId].orEmpty().map { it.id }.ifEmpty { listOf(s.id) }
-            InternalShopEntry(s.id, group)
-        }
-    }
+    private fun internalEntries(): List<InternalShopEntry> =
+        RoutingPlanner.internalEntries(db.getAllShops().map { it.id to it.managerId })
 
     /**
      * One dial context per manager: the shops they cover (primary ∪ call pool) for
-     * intercom, and the subset with a live SIM for bare-number dialing.
+     * intercom, the subset with a live SIM for bare-number dialing, and the co-managers
+     * of those shops as manager-to-manager peers. Reads the DB, then delegates the
+     * (pure) assembly to [RoutingPlanner].
      */
     private fun managerEntries(): List<ManagerDialEntry> {
         val gsmShopIds = db.getAllConfiguredShopTelephonyConfigs()
             .filter { !it.modemDataDevice.isNullOrBlank() }
             .map { it.shopId }
             .toSet()
-        return db.getAllManagers().map { m ->
-            val covered = db.getShopsForManager(m.id).map { it.id }
-            // Peers = co-managers of any covered shop (primary ∪ pool), excluding self.
-            val peers = covered
-                .flatMap { db.getManagerIdsForShop(it) }
-                .filter { it != m.id }
-                .distinct()
-            ManagerDialEntry(
-                managerId = m.id,
-                coveredShopIds = covered,
-                gsmShopIds = covered.filter { it in gsmShopIds },
-                peerManagerIds = peers,
-            )
-        }
+        val managerIds = db.getAllManagers().map { it.id }
+        val coveredByManager = managerIds.associateWith { db.getShopsForManager(it).map { s -> s.id } }
+        val managersByShop = coveredByManager.values.flatten().toSet()
+            .associateWith { db.getManagerIdsForShop(it) }
+        return RoutingPlanner.managerEntries(managerIds, coveredByManager, managersByShop, gsmShopIds)
     }
 
     /**

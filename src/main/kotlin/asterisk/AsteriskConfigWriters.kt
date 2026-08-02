@@ -292,3 +292,49 @@ data class ManagerDialEntry(
     val gsmShopIds: List<Int>,
     val peerManagerIds: List<Int> = emptyList(),
 )
+
+/**
+ * Pure assembly of the dialplan's routing entries from plain DB projections — no IO,
+ * so it is unit-testable without Asterisk or a live DB. The provisioner supplies the
+ * current shop/manager/pool state; the writer turns the result into dialplan text.
+ */
+internal object RoutingPlanner {
+
+    /**
+     * Intercom groups: each shop paired with every shop sharing its PRIMARY manager
+     * (historical grouping — pool membership drives the per-manager contexts, not this).
+     * [shops] = (shopId, primaryManagerId).
+     */
+    fun internalEntries(shops: List<Pair<Int, Int>>): List<InternalShopEntry> {
+        val byManager = shops.groupBy { it.second }
+        return shops.map { (shopId, managerId) ->
+            val group = byManager[managerId].orEmpty().map { it.first }.ifEmpty { listOf(shopId) }
+            InternalShopEntry(shopId, group)
+        }
+    }
+
+    /**
+     * Per-manager dial entries. [coveredShopsByManager] = managerId → shops the manager
+     * covers (primary ∪ pool); [managerIdsByShop] = shopId → managers covering it. Peers =
+     * co-managers of any covered shop, deduped and minus self. [gsmShopIds] = shops with a
+     * live SIM (a covered SIM shop enables that manager's bare-number dialing).
+     */
+    fun managerEntries(
+        managerIds: List<Int>,
+        coveredShopsByManager: Map<Int, List<Int>>,
+        managerIdsByShop: Map<Int, List<Int>>,
+        gsmShopIds: Set<Int>,
+    ): List<ManagerDialEntry> = managerIds.map { mid ->
+        val covered = coveredShopsByManager[mid].orEmpty()
+        val peers = covered
+            .flatMap { managerIdsByShop[it].orEmpty() }
+            .filter { it != mid }
+            .distinct()
+        ManagerDialEntry(
+            managerId = mid,
+            coveredShopIds = covered,
+            gsmShopIds = covered.filter { it in gsmShopIds },
+            peerManagerIds = peers,
+        )
+    }
+}
