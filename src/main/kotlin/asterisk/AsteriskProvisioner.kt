@@ -145,9 +145,13 @@ class AsteriskProvisioner(
         for (m in db.getAllManagers()) ensureManagerEndpoint(m.id)
     }
 
-    /** Internal-intercom groups: each shop with all shops sharing its manager. */
-    private fun internalEntries(): List<InternalShopEntry> =
-        RoutingPlanner.internalEntries(db.getAllShops().map { it.id to it.managerId })
+    /** Internal-intercom groups: each shop with all shops sharing its manager, plus the
+     *  managers covering it (dialable as mgr{id} for manager-to-manager intercom). */
+    private fun internalEntries(): List<InternalShopEntry> {
+        val shops = db.getAllShops()
+        val managersByShop = shops.associate { it.id to db.getManagerIdsForShop(it.id) }
+        return RoutingPlanner.internalEntries(shops.map { it.id to it.managerId }, managersByShop)
+    }
 
     /**
      * One dial context per manager: the shops they cover (primary ∪ call pool) for

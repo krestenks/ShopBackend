@@ -83,8 +83,8 @@ class ConfigWritersTest {
         DialplanWriter(config, AmiClient(config)).regenerate(
             shops = listOf(shop),  // shop 7 has a SIM
             internal = listOf(
-                InternalShopEntry(7, listOf(7, 9)),
-                InternalShopEntry(9, listOf(7, 9)),   // shop 9: no SIM, intercom only
+                InternalShopEntry(7, listOf(7, 9), managerIds = listOf(3, 5)),
+                InternalShopEntry(9, listOf(7, 9), managerIds = listOf(3, 5)),   // shop 9: no SIM, intercom only
             ),
             reload = false,
         )
@@ -93,6 +93,11 @@ class ConfigWritersTest {
         // Shared internal extens per group member
         assertTrue(text.contains("[internal-shop7]"))
         assertTrue(text.contains("exten => shopphone9,1,Dial(PJSIP/shop9-phone,45)"))
+        // Manager-to-manager: covering managers are dialable as mgr{id} in the shared
+        // include, so a call from shop{id}-manager (from-sip-shop{id}) resolves them.
+        val internal7 = text.substringAfter("[internal-shop7]").substringBefore("\n[")
+        assertTrue(internal7.contains("exten => mgr3,1,Dial(PJSIP/mgr3,45)"))
+        assertTrue(internal7.contains("exten => mgr5,1,Dial(PJSIP/mgr5,45)"))
         // In-shop device context: manager exten + group include, and NO GSM patterns
         val ctx7 = text.substringAfter("[from-shopphone-shop7]").substringBefore("[")
         assertTrue(ctx7.contains("exten => manager,1,Dial(PJSIP/shop7-manager,45)"))

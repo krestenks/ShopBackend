@@ -212,6 +212,15 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                     appendLine("exten => ${config.shopPhoneExten(sibling)},1,Dial(PJSIP/${config.phoneEndpointId(sibling)},45)")
                     appendLine(" same => n,Hangup()")
                 }
+                // Manager-to-manager intercom. The app places colleague calls from its
+                // shop{id}-manager identity (context from-sip-shop{id}), which includes this
+                // block — so mgr{id} must resolve HERE, not only in from-mgr{id}. Every
+                // manager covering this shop is dialable; PJSIP/mgr{id} exists via
+                // ensureAllManagerEndpoints(). The exten collides with no shopphone*/GSM pattern.
+                for (mgrId in entry.managerIds) {
+                    appendLine("exten => ${config.managerEndpointId(mgrId)},1,Dial(PJSIP/${config.managerEndpointId(mgrId)},45)")
+                    appendLine(" same => n,Hangup()")
+                }
 
                 // The in-shop device's own context: internal extens + "manager".
                 appendLine()
@@ -277,8 +286,17 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
     private fun internalIncludeName(shopId: Int) = "internal-shop$shopId"
 }
 
-/** One shop's internal-intercom entry: itself + all shops sharing its manager. */
-data class InternalShopEntry(val shopId: Int, val groupShopIds: List<Int>)
+/**
+ * One shop's internal-intercom entry. [groupShopIds] = shops whose in-shop device is
+ * dialable (itself + shops sharing its primary manager). [managerIds] = every manager
+ * covering this shop (primary ∪ pool) — made dialable as mgr{id} so manager-to-manager
+ * calls resolve from ANY identity that includes this context.
+ */
+data class InternalShopEntry(
+    val shopId: Int,
+    val groupShopIds: List<Int>,
+    val managerIds: List<Int> = emptyList(),
+)
 
 /**
  * One manager's dial context. [coveredShopIds] = every shop the manager covers (for
@@ -305,11 +323,14 @@ internal object RoutingPlanner {
      * (historical grouping — pool membership drives the per-manager contexts, not this).
      * [shops] = (shopId, primaryManagerId).
      */
-    fun internalEntries(shops: List<Pair<Int, Int>>): List<InternalShopEntry> {
+    fun internalEntries(
+        shops: List<Pair<Int, Int>>,
+        managersByShop: Map<Int, List<Int>> = emptyMap(),
+    ): List<InternalShopEntry> {
         val byManager = shops.groupBy { it.second }
         return shops.map { (shopId, managerId) ->
             val group = byManager[managerId].orEmpty().map { it.first }.ifEmpty { listOf(shopId) }
-            InternalShopEntry(shopId, group)
+            InternalShopEntry(shopId, group, managersByShop[shopId].orEmpty())
         }
     }
 

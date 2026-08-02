@@ -60,11 +60,19 @@ class RoutingPlannerTest {
     }
 
     @Test
-    fun `internal intercom groups shops by their primary manager`() {
+    fun `internal intercom groups shops by primary manager and lists covering managers`() {
         // shops 1 & 2 share primary mgr 10; shop 3's primary is mgr 20.
-        val entries = RoutingPlanner.internalEntries(listOf(1 to 10, 2 to 10, 3 to 20))
+        // Covering sets (primary ∪ pool): shop 1 = {10,20}, shop 2 = {10}, shop 3 = {20}.
+        val managersByShop = mapOf(1 to listOf(10, 20), 2 to listOf(10), 3 to listOf(20))
+        val entries = RoutingPlanner.internalEntries(listOf(1 to 10, 2 to 10, 3 to 20), managersByShop)
+
         assertEquals(setOf(1, 2), entries.first { it.shopId == 1 }.groupShopIds.toSet())
         assertEquals(setOf(1, 2), entries.first { it.shopId == 2 }.groupShopIds.toSet())
         assertEquals(listOf(3), entries.first { it.shopId == 3 }.groupShopIds)
+
+        // Covering managers become mgr{id} intercom targets in that shop's shared include.
+        assertEquals(listOf(10, 20), entries.first { it.shopId == 1 }.managerIds)
+        assertEquals(listOf(10), entries.first { it.shopId == 2 }.managerIds)
+        assertEquals(listOf(20), entries.first { it.shopId == 3 }.managerIds)
     }
 }
