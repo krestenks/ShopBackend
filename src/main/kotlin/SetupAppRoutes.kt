@@ -82,6 +82,19 @@ class SetupAppRoutes(
         return Onboarding(deepLink, downloadUrl, inv["expiration"]?.jsonPrimitive?.contentOrNull)
     }
 
+    /** Pushes [apk] to the control-plane onboarding slot so the add-phone install QR serves the
+     *  current release. Returns false if the control plane is unconfigured or the upload failed. */
+    private suspend fun pushOnboardingApk(apk: File): Boolean {
+        if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) return false
+        val resp = cpClient.post("$controlPlaneUrl/api/onboarding-apk") {
+            header(HttpHeaders.Authorization, "Bearer $edgeToken")
+            contentType(ContentType.Application.OctetStream)
+            timeout { requestTimeoutMillis = 180_000 }
+            setBody(apk.readBytes())
+        }
+        return resp.status.isSuccess()
+    }
+
     // ── Tenant device list / revoke (proxied to the control plane via the scoped edge token) ──
     @Serializable
     private data class CpNode(
@@ -643,12 +656,19 @@ class SetupAppRoutes(
                     return@post
                 }
                 call.respondSetupPage("Re-onboard — $label", "/setup-app/devices") {
-                    p("hint") { +"On $label, open the ShopManager app and scan this to reconnect it to the secure network. It keeps the name \"$label\"." }
+                    p("hint") { +"On $label, scan these. It reconnects to the secure network and keeps the name \"$label\"." }
+                    h3 { +"1 — Install the app (only if it was removed)" }
+                    div("qr-wrap") {
+                        img(src = "/setup-app/add-phone/qr.png?data=${ob.downloadUrl.enc()}", alt = "Install QR")
+                        p { small { +ob.downloadUrl } }
+                        p("qr-expiry") { +"Single-use install link" }
+                    }
+                    hr {}
+                    h3 { +"2 — Reconnect (open the app, then scan)" }
                     div("qr-wrap") {
                         img(src = "/setup-app/add-phone/qr.png?data=${ob.deepLink.enc()}", alt = "Join QR")
                         ob.expiration?.let { p("qr-expiry") { +"Join code expires $it" } }
                     }
-                    p("hint") { +"If the app was removed from the phone, use \"Add phone\" instead (install + join)." }
                     a(href = "/setup-app/devices", classes = "btn") { +"← Back to Phones" }
                 }
             }
@@ -784,7 +804,20 @@ class SetupAppRoutes(
                     Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), manifest),
                     Charsets.UTF_8,
                 )
-                call.respondRedirect("/setup-app/updates")
+                // Also push the SAME APK to the control-plane onboarding slot so the add-phone
+                // install QR serves the current release (else new phones get a stale app that
+                // can't OTA-update). One publish → every serving location.
+                val cpOk = runCatching { pushOnboardingApk(finalFile) }.getOrDefault(false)
+                call.respondSetupPage("Update published", "/setup-app/updates") {
+                    p { b { +"✅ Published $versionName (build $versionCode)." } }
+                    p { +"• OTA + install QR (edge): updated" }
+                    if (cpOk) {
+                        p { +"• Onboarding install QR (control plane): updated" }
+                    } else {
+                        p("hint") { +"⚠️ Onboarding install QR (control plane) was NOT updated — add-phone installs may serve an old APK. Check CONTROL_PLANE_URL / edge token and the control plane's write access to its APK dir." }
+                    }
+                    a(href = "/setup-app/updates", classes = "btn") { +"← Back to App updates" }
+                }
             }
 
             // ── GET /setup-app/install/t/{token} — public install page ─────────

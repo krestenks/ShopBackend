@@ -41,6 +41,8 @@ class ControlPlaneRoutes(
     private val downloadPublicBase: String = "",
     /** Persistent friendly-name store (pre-auth key id → label typed on Add-phone). */
     private val labelStore: DeviceLabelStore = DeviceLabelStore(java.io.File("device-labels.json")),
+    /** The onboarding install APK served by the add-phone install QR; kept in sync by the edge on publish. */
+    private val onboardingApk: java.io.File = java.io.File("/opt/control-plane/apk/shopmanager.apk"),
 ) {
     @Serializable data class CreateTenantReq(val ownerId: Int)
     @Serializable data class CreateInviteReq(val ownerId: Int = 0, val deviceLabel: String, val edgeApiUrl: String? = null)
@@ -185,6 +187,22 @@ class ControlPlaneRoutes(
             val ttlMs = 60 * 60 * 1000L
             val t = DownloadStore.create(ttlMs)
             call.respond(DownloadDto(t, "${downloadPublicBase.trimEnd('/')}/dl/$t", (ttlMs / 60_000L).toInt()))
+        }
+
+        // Receive a new onboarding install APK from the edge — keeps the add-phone install QR's APK
+        // in sync with each release (so newly-onboarded phones can OTA-update). Written atomically.
+        post("/api/onboarding-apk") {
+            onboardingApk.parentFile?.mkdirs()
+            val tmp = java.io.File(onboardingApk.parentFile, onboardingApk.name + ".upload")
+            call.receiveStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            if (tmp.length() < 100_000) {
+                tmp.delete()
+                return@post call.respond(HttpStatusCode.BadRequest, ErrorDto("APK too small (${tmp.length()} bytes)"))
+            }
+            java.nio.file.Files.move(
+                tmp.toPath(), onboardingApk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+            call.respond(OkDto(true, "onboarding APK updated (${onboardingApk.length()} bytes)"))
         }
     }
 

@@ -68,7 +68,7 @@ fun main() {
 
     embeddedServer(Netty, port = port, host = host) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
-        routing { ControlPlaneRoutes(tailnet, token, edgeTemplate, edgeTokens, downloadPublicBase, labelStore).install(this) }
+        routing { ControlPlaneRoutes(tailnet, token, edgeTemplate, edgeTokens, downloadPublicBase, labelStore, apkFile).install(this) }
     }.start(wait = true)
 }
 
