@@ -380,8 +380,8 @@ data class SmsThreadHit(
 @Serializable
 data class GroupChatMessage(
     val id: Int,
-    /** The manager group this message belongs to */
-    val managerId: Int,
+    /** The shop room this message belongs to (shop + its pool managers share it). */
+    val shopId: Int,
     /** "manager" | "shop" */
     val senderType: String,
     val senderId: Int,
@@ -803,6 +803,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_telephony_config ADD COLUMN sip_phone_password TEXT",
             // SIM carrier (e.g. "lebara") — gates carrier-specific actions like the top-up SMS
             "ALTER TABLE shop_telephony_config ADD COLUMN carrier TEXT",
+            // Group chat re-keyed per SHOP (pool-aware): the shop + all its pool managers share a room.
+            // Legacy manager_id column is kept (NOT NULL, written 0) but no longer the room key.
+            "ALTER TABLE group_chat_message ADD COLUMN shop_id INTEGER",
             // Appointment workflow status tracking
             "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
@@ -4898,17 +4901,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // =========================================================================
 
     fun insertGroupChatMessage(
-        managerId: Int,
+        shopId: Int,
         senderType: String,
         senderId: Int,
         senderName: String,
         body: String,
     ): GroupChatMessage {
         val now = System.currentTimeMillis()
+        // manager_id is a legacy NOT NULL column, no longer the room key — write 0. Room key = shop_id.
         connection.prepareStatement(
-            "INSERT INTO group_chat_message (manager_id, sender_type, sender_id, sender_name, body, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO group_chat_message (manager_id, shop_id, sender_type, sender_id, sender_name, body, created_at) VALUES (0, ?, ?, ?, ?, ?, ?)"
         ).use { stmt ->
-            stmt.setInt(1, managerId)
+            stmt.setInt(1, shopId)
             stmt.setString(2, senderType)
             stmt.setInt(3, senderId)
             stmt.setString(4, senderName)
@@ -4921,22 +4925,22 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             val rs = s.executeQuery("SELECT last_insert_rowid()")
             if (rs.next()) rs.getInt(1) else -1
         }
-        return GroupChatMessage(id = newId, managerId = managerId, senderType = senderType,
+        return GroupChatMessage(id = newId, shopId = shopId, senderType = senderType,
             senderId = senderId, senderName = senderName, body = body, createdAt = now)
     }
 
-    /** Returns up to [limit] messages for the manager group, oldest first. */
-    fun getGroupChatMessages(managerId: Int, limit: Int = 200): List<GroupChatMessage> {
+    /** Returns up to [limit] messages for a shop's room (shop + pool managers), oldest first. */
+    fun getGroupChatMessages(shopId: Int, limit: Int = 200): List<GroupChatMessage> {
         val result = mutableListOf<GroupChatMessage>()
         connection.prepareStatement(
-            "SELECT id, manager_id, sender_type, sender_id, sender_name, body, created_at FROM group_chat_message WHERE manager_id = ? ORDER BY created_at DESC LIMIT ?"
+            "SELECT id, shop_id, sender_type, sender_id, sender_name, body, created_at FROM group_chat_message WHERE shop_id = ? ORDER BY created_at DESC LIMIT ?"
         ).use { stmt ->
-            stmt.setInt(1, managerId)
+            stmt.setInt(1, shopId)
             stmt.setInt(2, limit)
             val rs = stmt.executeQuery()
             while (rs.next()) {
                 result += GroupChatMessage(
-                    id = rs.getInt("id"), managerId = rs.getInt("manager_id"),
+                    id = rs.getInt("id"), shopId = rs.getInt("shop_id"),
                     senderType = rs.getString("sender_type"), senderId = rs.getInt("sender_id"),
                     senderName = rs.getString("sender_name"), body = rs.getString("body"),
                     createdAt = rs.getLong("created_at"),

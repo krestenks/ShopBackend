@@ -1542,21 +1542,26 @@ class MobileApi(
                 // Group chat  (manager + all their shops share one room)
                 // ─────────────────────────────────────────────────────────────
 
-                /** GET /api/mobile/group-chat/messages?limit=200 */
+                /** GET /api/mobile/group-chat/messages?shopId=N&limit=200 — one room per shop (pool). */
                 get("/api/mobile/group-chat/messages") {
                     val loginInfo = authenticateManager() ?: return@get
-                    val managerId = resolveManagerId(loginInfo, db)
-                        ?: return@get call.respond(HttpStatusCode.Forbidden, "Cannot resolve manager group")
+                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
                     val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 500) ?: 200
-                    val messages = db.getGroupChatMessages(managerId, limit)
-                    call.respond(GroupChatMessagesResponse(messages))
+                    call.respond(GroupChatMessagesResponse(db.getGroupChatMessages(shopId, limit)))
                 }
 
-                /** POST /api/mobile/group-chat/messages  body: {"body":"..."} */
+                /** POST /api/mobile/group-chat/messages?shopId=N  body: {"body":"..."} */
                 post("/api/mobile/group-chat/messages") {
                     val loginInfo = authenticateManager() ?: return@post
-                    val managerId = resolveManagerId(loginInfo, db)
-                        ?: return@post call.respond(HttpStatusCode.Forbidden, "Cannot resolve manager group")
+                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@post call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
                     val req = runCatching { call.receive<SendGroupChatMessageRequest>() }.getOrNull()
                         ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
                     val body = req.body.trim()
@@ -1582,7 +1587,7 @@ class MobileApi(
                     }
 
                     val msg = db.insertGroupChatMessage(
-                        managerId  = managerId,
+                        shopId     = shopId,
                         senderType = senderType,
                         senderId   = senderId,
                         senderName = senderName,
