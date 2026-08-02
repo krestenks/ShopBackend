@@ -87,7 +87,7 @@ class ModemScanner(
             imei = st["IMEI"]?.takeIf { it.isNotBlank() },
             provider = st["Provider Name"]?.takeIf { it.isNotBlank() && it != "Unknown" },
             signal = st["RSSI"]?.takeIf { it.isNotBlank() },
-            firmware = st["Firmware"]?.takeIf { it.isNotBlank() },
+            firmware = st["Firmware"]?.substringBefore('_')?.takeIf { it.isNotBlank() },
             trunkState = st["State"]?.takeIf { it.isNotBlank() },
         )
     }
@@ -115,9 +115,13 @@ class ModemScanner(
             val imei = at("AT+CGSN").lines().map { it.trim() }.firstOrNull { it.matches(Regex("\\d{15}")) }
             val csq = Regex("\\+CSQ: (\\d+),").find(at("AT+CSQ"))?.groupValues?.get(1)
             val cops = Regex("\\+COPS: \\d+,\\d+,\"([^\"]+)\"").find(at("AT+COPS?"))?.groupValues?.get(1)
-            // AT+QGMR → the module firmware revision line (e.g. EC25EUXGAR08A19M1G).
+            // AT+QGMR → the module firmware revision line. AT+QGMR returns the FULL build
+            // (e.g. EC25EUXGAR08A19M1G_A0.302.A0.302) while chan_quectel reports only the short
+            // revision (EC25EUXGAR08A19M1G) — normalize to the short form so free vs held modems
+            // show the same value (drop the _A0.302… build suffix).
             val fw = at("AT+QGMR").lines().map { it.trim() }
                 .firstOrNull { it.isNotBlank() && it != "OK" && !it.startsWith("AT") && !it.startsWith("+") }
+                ?.substringBefore('_')
             base.copy(
                 imsi = imsi,
                 imei = imei,
