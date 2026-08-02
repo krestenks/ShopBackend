@@ -1380,9 +1380,23 @@ class WebAdmin(
                                 p { b { +"⏳ Flashing $port… do NOT unplug or power off the modem or the server." } }
                                 script { unsafe { raw("setTimeout(function(){location.reload()},5000);") } }
                             } else {
-                                p { b { +"Finished ($port): result = ${st.result}" } }
-                                p("hint") { +"\"success\" = the unit exited cleanly. Check the log below for QFirehose's own \"Upgrade module successfully\"." }
-                                a(href = "/telephony/setup", classes = "btn") { +"← Back to telephony" }
+                                val flashed = st.log.contains("Upgrade module successfully", ignoreCase = true)
+                                if (flashed) {
+                                    div {
+                                        style = "background:#0f2a18;border-left:4px solid #5CFF9B;padding:12px 16px;border-radius:8px;margin-bottom:12px"
+                                        p { b { +"✅ Firmware flash complete for $port." } }
+                                        p { +"Now POWER-CYCLE this modem — unplug and replug its USB (or power-cycle the hub). After a soft reset the EC25 stays half-booted, so its version won't read until it re-enumerates." }
+                                        p { +"Then rescan: the Firmware column will show the new version." }
+                                    }
+                                    a(href = "/telephony/setup", classes = "btn primary") { +"↻ Rescan modems" }
+                                } else {
+                                    div {
+                                        style = "background:#33122a;border-left:4px solid #ffcc66;padding:12px 16px;border-radius:8px;margin-bottom:12px"
+                                        p { b { +"⚠️ Flash finished but \"Upgrade module successfully\" was NOT found (unit result: ${st.result})." } }
+                                        p { +"Do NOT power-cycle yet — check the log below. If it didn't complete, the modem may still be on the old firmware." }
+                                    }
+                                    a(href = "/telephony/setup", classes = "btn") { +"← Back to telephony" }
+                                }
                             }
                             hr {}
                             h3 { +"QFirehose log" }
