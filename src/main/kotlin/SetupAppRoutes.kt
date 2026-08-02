@@ -200,11 +200,11 @@ class SetupAppRoutes(
         .qr-wrap img { max-width:240px; border:1px solid #ddd; padding:8px; border-radius:8px; background:#fff; }
         .qr-expiry { font-size:0.85em; color:#666; margin-top:6px; }
         .badge-required { background:#e53935; color:#fff; border-radius:4px; padding:1px 6px; font-size:0.8em; }
-        table.devices { border-collapse:collapse; width:100%; margin:8px 0; }
-        table.devices th, table.devices td { border:1px solid #e2e8f0; padding:8px 10px; text-align:left; font-size:0.9em; }
-        table.devices th { background:#f1f5f9; }
-        .dev-online { color:#0a8a5f; font-weight:600; }
-        .dev-offline { color:#999; }
+        table.devices { width:100%; margin:8px 0; border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+        table.devices th, table.devices td { border-bottom:1px solid rgba(255,255,255,0.06); padding:8px 10px; text-align:left; font-size:0.9em; }
+        table.devices th { background:rgba(255,255,255,0.03); color:var(--muted); text-transform:uppercase; font-size:12px; letter-spacing:0.6px; font-weight:700; }
+        .dev-online { color:var(--ok); font-weight:600; }
+        .dev-offline { color:var(--muted); }
         .btn.danger { background:#e53935; color:#fff; }
         table.devices form { display:inline; margin:0 2px; }
         table.devices .btn { padding:4px 10px; font-size:0.85em; }
