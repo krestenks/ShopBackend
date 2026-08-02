@@ -386,7 +386,7 @@ class WebAdmin(
                                     table {
                                         thead { tr {
                                             th { +"USB" }; th { +"IMSI" }; th { +"IMEI" }; th { +"Provider" }
-                                            th { +"Signal" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
+                                            th { +"Signal" }; th { +"Firmware" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
                                         } }
                                         tbody {
                                             val unassignedShops = shops.filter { db.getShopTelephonyConfig(it.id).imsi.isNullOrBlank() }
@@ -397,6 +397,7 @@ class WebAdmin(
                                                     td { +(m.imei ?: "-") }
                                                     td { +(m.provider ?: "-") }
                                                     td { +(m.signal ?: "-") }
+                                                    td { code { +(m.firmware ?: "-") } }
                                                     td { +(m.trunkState ?: "-") }
                                                     td { +(m.atDevice ?: "-") }
                                                     td { +(m.assignedShopName ?: "(unassigned)") }
