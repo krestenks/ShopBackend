@@ -39,12 +39,14 @@ class ControlPlaneRoutes(
     private val edgeTokens: Map<String, Int> = emptyMap(),
     /** Public base of the download listener, e.g. `http://headscale.warpfactor.dk:8091`. */
     private val downloadPublicBase: String = "",
+    /** Persistent friendly-name store (pre-auth key id → label typed on Add-phone). */
+    private val labelStore: DeviceLabelStore = DeviceLabelStore(java.io.File("device-labels.json")),
 ) {
     @Serializable data class CreateTenantReq(val ownerId: Int)
     @Serializable data class CreateInviteReq(val ownerId: Int = 0, val deviceLabel: String, val edgeApiUrl: String? = null)
     @Serializable data class TenantDto(val ownerId: Int, val userId: String, val userName: String)
     @Serializable data class InviteDto(val ownerId: Int, val deviceLabel: String, val deepLink: String, val expiration: String?, val preAuthKey: String)
-    @Serializable data class NodeDto(val id: String, val name: String, val user: String, val tags: List<String>, val addresses: List<String>, val online: Boolean = false)
+    @Serializable data class NodeDto(val id: String, val name: String, val user: String, val tags: List<String>, val addresses: List<String>, val online: Boolean = false, val label: String? = null)
     @Serializable data class DownloadDto(val token: String, val url: String, val expiresInMinutes: Int)
     @Serializable data class Tenants(val tenants: List<TenantDto>)
     @Serializable data class Nodes(val nodes: List<NodeDto>)
@@ -80,6 +82,7 @@ class ControlPlaneRoutes(
             tags = tags,
             addresses = n["ipAddresses"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
             online = n["online"]?.jsonPrimitive?.booleanOrNull ?: false,
+            label = labelStore.get(n["preAuthKey"]?.jsonObject?.get("id")?.jsonPrimitive?.content),
         )
     }
 
@@ -156,6 +159,8 @@ class ControlPlaneRoutes(
                 deviceLabel = req.deviceLabel,
                 edgeApiUrl = req.edgeApiUrl?.takeIf { it.isNotBlank() } ?: edgeApiFor(ownerId),
             )
+            // Remember the friendly name so the node that joins with this key shows it in the phones list.
+            labelStore.put(inv.preAuthKeyId, req.deviceLabel)
             call.respond(InviteDto(inv.ownerId, inv.deviceLabel, inv.deepLink, inv.expiration, inv.preAuthKey))
         }
 

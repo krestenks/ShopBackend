@@ -48,6 +48,10 @@ fun main() {
     val apkFile = File(System.getenv("APK_PATH")?.takeIf { it.isNotBlank() } ?: "/opt/control-plane/apk/shopmanager.apk")
     val apkFilename = System.getenv("APK_FILENAME")?.takeIf { it.isNotBlank() } ?: "ShopManager.apk"
 
+    val labelStore = DeviceLabelStore(
+        File(System.getenv("DEVICE_LABELS_PATH")?.takeIf { it.isNotBlank() } ?: "/opt/control-plane/device-labels.json")
+    )
+
     val tailnet = TailnetService(cfg)
     println("[control-plane] Headscale API=${cfg.apiUrl} magicdns=${cfg.magicDnsBase} " +
             "adminAuth=${if (token != null) "token" else "OPEN"} edgeTokens=${edgeTokens.size} " +
@@ -64,7 +68,7 @@ fun main() {
 
     embeddedServer(Netty, port = port, host = host) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
-        routing { ControlPlaneRoutes(tailnet, token, edgeTemplate, edgeTokens, downloadPublicBase).install(this) }
+        routing { ControlPlaneRoutes(tailnet, token, edgeTemplate, edgeTokens, downloadPublicBase, labelStore).install(this) }
     }.start(wait = true)
 }
 

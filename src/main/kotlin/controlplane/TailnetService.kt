@@ -74,6 +74,9 @@ data class HsPreAuthKey(
 data class DeviceInvite(
     val ownerId: Int,
     val deviceLabel: String,
+    /** Id of the minted pre-auth key — used to attach the friendly [deviceLabel] to the node that
+     *  later joins with it (the node JSON carries `preAuthKey.id`). */
+    val preAuthKeyId: String,
     val preAuthKey: String,
     val deepLink: String,
     val expiration: String?,
@@ -276,6 +279,6 @@ class TailnetService(private val config: TailnetConfig) {
             append("&key=").append(enc(pak.key))
             append("&api=").append(enc(edgeApiUrl))
         }
-        return DeviceInvite(ownerId, deviceLabel, pak.key, link, pak.expiration)
+        return DeviceInvite(ownerId, deviceLabel, pak.id, pak.key, link, pak.expiration)
     }
 }

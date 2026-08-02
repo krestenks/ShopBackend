@@ -91,6 +91,7 @@ class SetupAppRoutes(
         val tags: List<String> = emptyList(),
         val addresses: List<String> = emptyList(),
         val online: Boolean = false,
+        val label: String? = null,
     )
     @Serializable
     private data class CpNodes(val nodes: List<CpNode> = emptyList())
@@ -492,7 +493,20 @@ class SetupAppRoutes(
                     }
                     return@get
                 }
-                val label = call.request.queryParameters["label"]?.trim()?.takeIf { it.isNotBlank() } ?: "phone"
+                val label = call.request.queryParameters["label"]?.trim()?.takeIf { it.isNotBlank() }
+                // No name yet → ask for one first (the name shows in the Phones list once it joins).
+                if (label == null) {
+                    call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
+                        p("hint") { +"Name the phone, then generate its install + join codes. The name appears on the Phones page." }
+                        form(action = "/setup-app/add-phone", method = FormMethod.get) {
+                            label { +"Phone name" }
+                            textInput { name = "label"; attributes["placeholder"] = "e.g. Front desk"; attributes["required"] = "true"; attributes["autofocus"] = "true" }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Generate codes" }
+                        }
+                    }
+                    return@get
+                }
                 val ob = runCatching { requestOnboarding(label) }.getOrElse { e ->
                     call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
                         p { +"Couldn't reach the control plane." }
@@ -502,6 +516,7 @@ class SetupAppRoutes(
                     return@get
                 }
                 call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
+                    p { strong { +"Phone: " }; +label }
                     p("hint") { +"On the new phone, scan these in order:" }
                     h3 { +"1 — Install the app" }
                     div("qr-wrap") {
@@ -515,8 +530,13 @@ class SetupAppRoutes(
                         img(src = "/setup-app/add-phone/qr.png?data=${ob.deepLink.enc()}", alt = "Join QR")
                         ob.expiration?.let { p("qr-expiry") { +"Join code expires $it" } }
                     }
+                    hr {}
+                    h3 { +"Add another phone" }
                     form(action = "/setup-app/add-phone", method = FormMethod.get) {
-                        submitInput(classes = "btn primary") { value = "⟳ Generate new codes" }
+                        label { +"Phone name" }
+                        textInput { name = "label"; attributes["placeholder"] = "e.g. Back office"; attributes["required"] = "true" }
+                        br()
+                        submitInput(classes = "btn primary") { value = "Generate codes" }
                     }
                 }
             }
@@ -553,9 +573,12 @@ class SetupAppRoutes(
                     } else {
                         table(classes = "devices") {
                             tr { th { +"Phone" }; th { +"Address" }; th { +"Status" }; th { +"Actions" } }
-                            devices.sortedBy { it.name }.forEach { d ->
+                            devices.sortedBy { (it.label ?: it.name).lowercase() }.forEach { d ->
                                 tr {
-                                    td { +d.name }
+                                    td {
+                                        +(d.label ?: d.name)
+                                        if (d.label != null) { br(); small("dev-offline") { +d.name } }
+                                    }
                                     td { +(d.addresses.firstOrNull { it.startsWith("100.") } ?: d.addresses.firstOrNull() ?: "—") }
                                     td {
                                         if (d.online) span("dev-online") { +"● online" }
