@@ -462,7 +462,7 @@ class WebAdmin(
                                             }
                                         }
                                         td {
-                                            a(href = "/shops/edit?id=${s.id}", classes = "btn") { +"Edit" }
+                                            a(href = "/telephony/shop?id=${s.id}", classes = "btn") { +"Manage line" }
                                             if (!tele.imsi.isNullOrBlank() && asteriskAdmin != null) {
                                                 +" "
                                                 form(action = "/telephony/unassign", method = FormMethod.post) {
@@ -1117,91 +1117,30 @@ class WebAdmin(
                             }
                         }
 
-                        // ── GSM telephony (self-hosted Asterisk) ──────────────────
+                        // ── Phone line (summary; full controls live on the dedicated line page) ──
                         if (asteriskAdmin != null) {
                             val tele = db.getShopTelephonyConfig(id)
                             val trunkName = asteriskAdmin.config.trunkName(id)
                             val trunkState = asteriskAdmin.amiClient.quectelDeviceStates()[trunkName]
-                            val tmsg = call.request.queryParameters["tmsg"]
-
                             hr()
-                            h3 { +"📡 GSM Telephony (self-hosted Asterisk)" }
-                            if (!tmsg.isNullOrBlank()) {
-                                p { b { +tmsg } }
-                            }
+                            h3 { +"📡 Phone line" }
                             p("hint") {
-                                +"SIM (IMSI): "
                                 if (tele.imsi.isNullOrBlank()) {
-                                    em { +"none — assign a modem on the " }
-                                    a(href = "/telephony/setup") { +"Telephony page" }
+                                    +"No SIM assigned yet."
                                 } else {
-                                    code { +tele.imsi!! }
-                                    +"  •  trunk $trunkName: "
-                                    +(if (!asteriskAdmin.amiClient.connected) "AMI offline"
-                                      else trunkState ?: "not loaded")
-                                    +"  •  device ${tele.modemDataDevice ?: "unresolved"}"
-                                }
-                                +"  •  last provisioned: "
-                                +(tele.provisionedAt?.let {
-                                    java.time.Instant.ofEpochMilli(it)
-                                        .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
-                                        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
-                                } ?: "never")
-                            }
-                            form(action = "/shops/telephony/save", method = FormMethod.post) {
-                                hiddenInput { name = "id"; value = id.toString() }
-                                label { +"SIM phone number (E.164)" }
-                                p("hint") { +"These SIMs don't report their own number — use \"Send test SMS\" to a phone you can read, then type the number here." }
-                                textInput {
-                                    name = "telephony_phone_number"
-                                    value = tele.phoneNumber ?: ""
-                                    placeholder = "+4512345678"
-                                }
-                                +" "
-                                label { +"SIM carrier" }
-                                select {
-                                    name = "telephony_carrier"
-                                    option { value = ""; selected = tele.carrier.isNullOrBlank(); +"— none —" }
-                                    option { value = "lebara"; selected = tele.carrier == "lebara"; +"Lebara" }
-                                }
-                                +" "
-                                submitInput(classes = "btn primary") { value = "Save number & carrier" }
-                            }
-                            // Carrier-specific: Lebara prepaid top-up by SMS to 5010.
-                            if (tele.carrier == "lebara" && !tele.imsi.isNullOrBlank()) {
-                                form(action = "/shops/telephony/topup", method = FormMethod.post) {
-                                    hiddenInput { name = "id"; value = id.toString() }
-                                    label { +"💳 Lebara top-up" }
-                                    p("hint") { +"Enter the two voucher codes from the top-up card — sends \"Topup <8-digit> <6-digit>\" to 5010 from this shop's SIM." }
-                                    textInput { name = "code1"; placeholder = "8-digit code"; attributes["inputmode"] = "numeric" }
-                                    +" "
-                                    textInput { name = "code2"; placeholder = "6-digit code"; attributes["inputmode"] = "numeric" }
-                                    +" "
-                                    submitInput(classes = "btn primary") { value = "Send top-up" }
+                                    +"Number: "; b { +(tele.phoneNumber ?: "unknown") }
+                                    tele.carrier?.let { +"  •  carrier: $it" }
+                                    +"  •  trunk: "
+                                    +(if (!asteriskAdmin.amiClient.connected) "AMI offline" else trunkState ?: "not loaded")
+                                    +"  •  provisioned: "
+                                    +(tele.provisionedAt?.let {
+                                        java.time.Instant.ofEpochMilli(it)
+                                            .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                                    } ?: "never")
                                 }
                             }
-                            p {
-                                +"SIP account for the manager app: "
-                                b { +asteriskAdmin.config.endpointId(id) }
-                                +" / "
-                                if (tele.sipPassword.isNullOrBlank()) em { +"generated on provisioning" } else code { +tele.sipPassword!! }
-                            }
-                            form(action = "/shops/telephony/regenerate-sip", method = FormMethod.post) {
-                                hiddenInput { name = "id"; value = id.toString() }
-                                submitInput(classes = "btn danger") {
-                                    value = "Regenerate SIP password"
-                                    attributes["onclick"] =
-                                        "return confirm('Generate a new SIP password? The manager app must fetch credentials again before it can register.')"
-                                }
-                            }
-                            if (!tele.imsi.isNullOrBlank()) {
-                                form(action = "/shops/telephony/test-sms", method = FormMethod.post) {
-                                    hiddenInput { name = "id"; value = id.toString() }
-                                    textInput { name = "test_to_phone"; placeholder = "+45xxxxxxxx" }
-                                    +" "
-                                    submitInput(classes = "btn") { value = "Send test SMS via this shop's SIM" }
-                                }
-                            }
+                            a(href = "/telephony/shop?id=$id", classes = "btn primary") { +"Manage phone line →" }
                         }
 
                         // ── Owner / Tenant reassignment (platform admin only, not when impersonating) ──
@@ -1288,7 +1227,7 @@ class WebAdmin(
                         phoneNumber = params["telephony_phone_number"]?.trim()?.takeIf { it.isNotBlank() },
                         carrier = params["telephony_carrier"]?.trim()?.lowercase()?.takeIf { it.isNotBlank() },
                     ))
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number & carrier saved.", Charsets.UTF_8)}")
+                    call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number & carrier saved.", Charsets.UTF_8)}")
                 }
 
                 // Lebara prepaid top-up: send "Topup <8-digit> <6-digit>" to 5010 from the shop's SIM.
@@ -1299,7 +1238,7 @@ class WebAdmin(
                     val result = telephony.LebaraTopup.send(telephonyService, sid, params["code1"], params["code2"])
                     val msg = if (result.success) "✅ Top-up SMS sent to 5010 from this shop's SIM."
                         else "⚠️ Top-up failed: ${result.errorMessage ?: result.body}"
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                    call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
                 post("/shops/telephony/regenerate-sip") {
@@ -1313,7 +1252,7 @@ class WebAdmin(
                     } catch (e: Exception) {
                         "⚠️ Password cleared, but provisioning failed: ${e.message}"
                     }
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                    call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
                 post("/shops/telephony/test-sms") {
@@ -1329,7 +1268,7 @@ class WebAdmin(
                         if (result.success) "✅ Test SMS sent to $to. Read the sender number on that phone and enter it above."
                         else "⚠️ Test SMS failed: ${result.errorMessage ?: result.body}"
                     }
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                    call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
                 // Assign a scanned SIM (by IMSI) to a shop, then auto-provision.
@@ -1404,6 +1343,102 @@ class WebAdmin(
                                 style = "white-space:pre-wrap;max-height:60vh;overflow:auto;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;font-size:12px"
                                 +st.log
                             }
+                        }
+                    }
+                }
+
+                // ── Per-shop phone line page: all of one shop's line controls in one place ──
+                get("/telephony/shop") {
+                    val sid = call.request.queryParameters["id"]?.toIntOrNull()
+                        ?: return@get call.respondRedirect("/telephony/setup")
+                    val shop = db.getShopById(sid) ?: return@get call.respondRedirect("/telephony/setup")
+                    val tele = db.getShopTelephonyConfig(sid)
+                    val trunkName = asteriskAdmin.config.trunkName(sid)
+                    val trunkState = asteriskAdmin.amiClient.quectelDeviceStates()[trunkName]
+                    val tmsg = call.request.queryParameters["tmsg"]
+                    call.respondAdminPage("Phone line — ${shop.name}", activePath = "/telephony/setup") {
+                        div("panel") {
+                            if (!tmsg.isNullOrBlank()) p { b { +tmsg } }
+                            p("hint") {
+                                +"SIM (IMSI): "
+                                if (tele.imsi.isNullOrBlank()) {
+                                    em { +"none — assign a modem on the " }
+                                    a(href = "/telephony/setup") { +"Telephony page" }
+                                } else {
+                                    code { +tele.imsi!! }
+                                    +"  •  trunk $trunkName: "
+                                    +(if (!asteriskAdmin.amiClient.connected) "AMI offline"
+                                      else trunkState ?: "not loaded")
+                                    +"  •  device ${tele.modemDataDevice ?: "unresolved"}"
+                                }
+                                +"  •  last provisioned: "
+                                +(tele.provisionedAt?.let {
+                                    java.time.Instant.ofEpochMilli(it)
+                                        .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                                } ?: "never")
+                            }
+                            form(action = "/shops/telephony/save", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = sid.toString() }
+                                label { +"SIM phone number (E.164)" }
+                                p("hint") { +"These SIMs don't report their own number — use \"Send test SMS\" to a phone you can read, then type the number here." }
+                                textInput { name = "telephony_phone_number"; value = tele.phoneNumber ?: ""; placeholder = "+4512345678" }
+                                +" "
+                                label { +"SIM carrier" }
+                                select {
+                                    name = "telephony_carrier"
+                                    option { value = ""; selected = tele.carrier.isNullOrBlank(); +"— none —" }
+                                    option { value = "lebara"; selected = tele.carrier == "lebara"; +"Lebara" }
+                                }
+                                +" "
+                                submitInput(classes = "btn primary") { value = "Save number & carrier" }
+                            }
+                            if (tele.carrier == "lebara" && !tele.imsi.isNullOrBlank()) {
+                                form(action = "/shops/telephony/topup", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = sid.toString() }
+                                    label { +"💳 Lebara top-up" }
+                                    p("hint") { +"Enter the two voucher codes from the top-up card — sends \"Topup <8-digit> <6-digit>\" to 5010 from this shop's SIM." }
+                                    textInput { name = "code1"; placeholder = "8-digit code"; attributes["inputmode"] = "numeric" }
+                                    +" "
+                                    textInput { name = "code2"; placeholder = "6-digit code"; attributes["inputmode"] = "numeric" }
+                                    +" "
+                                    submitInput(classes = "btn primary") { value = "Send top-up" }
+                                }
+                            }
+                            p {
+                                +"SIP account for the manager app: "
+                                b { +asteriskAdmin.config.endpointId(sid) }
+                                +" / "
+                                if (tele.sipPassword.isNullOrBlank()) em { +"generated on provisioning" } else code { +tele.sipPassword!! }
+                            }
+                            form(action = "/shops/telephony/regenerate-sip", method = FormMethod.post) {
+                                hiddenInput { name = "id"; value = sid.toString() }
+                                submitInput(classes = "btn danger") {
+                                    value = "Regenerate SIP password"
+                                    attributes["onclick"] =
+                                        "return confirm('Generate a new SIP password? The manager app must fetch credentials again before it can register.')"
+                                }
+                            }
+                            if (!tele.imsi.isNullOrBlank()) {
+                                form(action = "/shops/telephony/test-sms", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = sid.toString() }
+                                    textInput { name = "test_to_phone"; placeholder = "+45xxxxxxxx" }
+                                    +" "
+                                    submitInput(classes = "btn") { value = "Send test SMS via this shop's SIM" }
+                                }
+                                hr {}
+                                form(action = "/telephony/unassign", method = FormMethod.post) {
+                                    hiddenInput { name = "shopId"; value = sid.toString() }
+                                    submitInput(classes = "btn danger") {
+                                        value = "Unassign SIM"
+                                        attributes["onclick"] = "return confirm('Unassign this shop\\'s SIM? The line stops working until a SIM is reassigned.')"
+                                    }
+                                }
+                            }
+                            hr {}
+                            a(href = "/shops/edit?id=$sid", classes = "btn") { +"← Back to shop" }
+                            +" "
+                            a(href = "/telephony/setup", classes = "btn") { +"Telephony overview" }
                         }
                     }
                 }
