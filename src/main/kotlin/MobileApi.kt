@@ -146,6 +146,12 @@ data class SipCredentialsResponse(
     val shopPhoneNumber: String? = null,
 )
 
+/** Lebara prepaid top-up request (self-service from the app). */
+@Serializable
+data class TopupRequest(val shopId: Int, val code1: String, val code2: String)
+@Serializable
+data class TopupResponse(val success: Boolean, val message: String)
+
 /** One callable intercom colleague (internal SIP extension). */
 @Serializable
 data class SipContact(val name: String, val exten: String, val type: String)
@@ -387,6 +393,28 @@ class MobileApi(
                         transport = "udp",
                         shopPhoneNumber = tele.phoneNumber,
                     ))
+                }
+
+                /**
+                 * Lebara prepaid top-up (self-service): sends "Topup <8-digit> <6-digit>" to 5010
+                 * out the shop's own SIM. Only for shops whose carrier is Lebara.
+                 *
+                 * POST /api/mobile/telephony/topup  { shopId, code1, code2 }
+                 */
+                post("/api/mobile/telephony/topup") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val req = runCatching { call.receive<TopupRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, TopupResponse(false, "Invalid request"))
+                    if (!isAuthorizedForShop(loginInfo, req.shopId, db)) {
+                        return@post call.respond(HttpStatusCode.Forbidden, TopupResponse(false, "Not authorized for this shop"))
+                    }
+                    val tele = db.getShopTelephonyConfig(req.shopId)
+                    if (tele.carrier != telephony.LebaraTopup.CARRIER) {
+                        return@post call.respond(HttpStatusCode.BadRequest, TopupResponse(false, "This SIM is not a Lebara line"))
+                    }
+                    val result = telephony.LebaraTopup.send(telephonyService, req.shopId, req.code1, req.code2)
+                    if (result.success) call.respond(TopupResponse(true, "Top-up sent to 5010"))
+                    else call.respond(HttpStatusCode.fromValue(result.status), TopupResponse(false, result.errorMessage ?: result.body))
                 }
 
                 /**

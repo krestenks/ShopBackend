@@ -208,6 +208,8 @@ data class ShopTelephonyConfig(
     val imsi: String? = null,
     /** E.164 number of the SIM. Entered manually (not readable from these SIMs). */
     val phoneNumber: String? = null,
+    /** SIM carrier, lowercased (e.g. "lebara"); gates carrier-specific actions like the top-up SMS. */
+    val carrier: String? = null,
     /** Last-resolved AT/data device for this shop's SIM, e.g. /dev/ttyUSB3. Cached; re-resolved on scan/provision. */
     val modemDataDevice: String? = null,
     /** Last-resolved ALSA device for UAC voice audio, e.g. hw:CARD=EC25Shop1. Cached. */
@@ -799,6 +801,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_telephony_config ADD COLUMN imsi TEXT",
             // SIP credential for the in-shop device (internal intercom calls)
             "ALTER TABLE shop_telephony_config ADD COLUMN sip_phone_password TEXT",
+            // SIM carrier (e.g. "lebara") — gates carrier-specific actions like the top-up SMS
+            "ALTER TABLE shop_telephony_config ADD COLUMN carrier TEXT",
             // Appointment workflow status tracking
             "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
@@ -1064,6 +1068,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         shopId = rs.getInt("shop_id"),
         imsi = rs.getString("imsi"),
         phoneNumber = rs.getString("phone_number"),
+        carrier = rs.getString("carrier"),
         modemDataDevice = rs.getString("modem_data_device"),
         modemAlsaDevice = rs.getString("modem_alsa_device"),
         sipPassword = rs.getString("sip_password"),
@@ -1072,7 +1077,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     )
 
     private val telephonySelect =
-        "SELECT shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at FROM shop_telephony_config"
+        "SELECT shop_id, imsi, phone_number, carrier, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at FROM shop_telephony_config"
 
     fun getShopTelephonyConfig(shopId: Int): ShopTelephonyConfig {
         connection.prepareStatement("$telephonySelect WHERE shop_id = ?").use { stmt ->
@@ -1108,11 +1113,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun upsertShopTelephonyConfig(config: ShopTelephonyConfig) {
         val sql = """
             INSERT INTO shop_telephony_config
-                (shop_id, imsi, phone_number, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (shop_id, imsi, phone_number, carrier, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 imsi = excluded.imsi,
                 phone_number = excluded.phone_number,
+                carrier = excluded.carrier,
                 modem_data_device = excluded.modem_data_device,
                 modem_alsa_device = excluded.modem_alsa_device,
                 sip_password = excluded.sip_password,
@@ -1123,11 +1129,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(1, config.shopId)
             stmt.setString(2, config.imsi?.trim()?.takeIf { it.isNotBlank() })
             stmt.setString(3, config.phoneNumber?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(4, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(5, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
-            stmt.setString(6, config.sipPassword?.takeIf { it.isNotBlank() })
-            stmt.setString(7, config.sipPhonePassword?.takeIf { it.isNotBlank() })
-            if (config.provisionedAt != null) stmt.setLong(8, config.provisionedAt) else stmt.setNull(8, java.sql.Types.BIGINT)
+            stmt.setString(4, config.carrier?.trim()?.lowercase()?.takeIf { it.isNotBlank() })
+            stmt.setString(5, config.modemDataDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(6, config.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setString(7, config.sipPassword?.takeIf { it.isNotBlank() })
+            stmt.setString(8, config.sipPhonePassword?.takeIf { it.isNotBlank() })
+            if (config.provisionedAt != null) stmt.setLong(9, config.provisionedAt) else stmt.setNull(9, java.sql.Types.BIGINT)
             stmt.executeUpdate()
         }
     }

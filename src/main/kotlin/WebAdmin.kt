@@ -1146,7 +1146,27 @@ class WebAdmin(
                                     placeholder = "+4512345678"
                                 }
                                 +" "
-                                submitInput(classes = "btn primary") { value = "Save number" }
+                                label { +"SIM carrier" }
+                                select {
+                                    name = "telephony_carrier"
+                                    option { value = ""; selected = tele.carrier.isNullOrBlank(); +"— none —" }
+                                    option { value = "lebara"; selected = tele.carrier == "lebara"; +"Lebara" }
+                                }
+                                +" "
+                                submitInput(classes = "btn primary") { value = "Save number & carrier" }
+                            }
+                            // Carrier-specific: Lebara prepaid top-up by SMS to 5010.
+                            if (tele.carrier == "lebara" && !tele.imsi.isNullOrBlank()) {
+                                form(action = "/shops/telephony/topup", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = id.toString() }
+                                    label { +"💳 Lebara top-up" }
+                                    p("hint") { +"Enter the two voucher codes from the top-up card — sends \"Topup <8-digit> <6-digit>\" to 5010 from this shop's SIM." }
+                                    textInput { name = "code1"; placeholder = "8-digit code"; attributes["inputmode"] = "numeric" }
+                                    +" "
+                                    textInput { name = "code2"; placeholder = "6-digit code"; attributes["inputmode"] = "numeric" }
+                                    +" "
+                                    submitInput(classes = "btn primary") { value = "Send top-up" }
+                                }
                             }
                             p {
                                 +"SIP account for the manager app: "
@@ -1254,8 +1274,20 @@ class WebAdmin(
                     val existing = db.getShopTelephonyConfig(sid)
                     db.upsertShopTelephonyConfig(existing.copy(
                         phoneNumber = params["telephony_phone_number"]?.trim()?.takeIf { it.isNotBlank() },
+                        carrier = params["telephony_carrier"]?.trim()?.lowercase()?.takeIf { it.isNotBlank() },
                     ))
-                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number saved.", Charsets.UTF_8)}")
+                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number & carrier saved.", Charsets.UTF_8)}")
+                }
+
+                // Lebara prepaid top-up: send "Topup <8-digit> <6-digit>" to 5010 from the shop's SIM.
+                post("/shops/telephony/topup") {
+                    val params = call.receiveParameters()
+                    val sid = params["id"]?.toIntOrNull()
+                        ?: return@post call.respondRedirect("/shops")
+                    val result = telephony.LebaraTopup.send(telephonyService, sid, params["code1"], params["code2"])
+                    val msg = if (result.success) "✅ Top-up SMS sent to 5010 from this shop's SIM."
+                        else "⚠️ Top-up failed: ${result.errorMessage ?: result.body}"
+                    call.respondRedirect("/shops/edit?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 
                 post("/shops/telephony/regenerate-sip") {
