@@ -2920,10 +2920,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     fun deleteManager(id: Int) {
-        val stmt = connection.prepareStatement("DELETE FROM managers WHERE id = ?")
-        stmt.setInt(1, id)
-        stmt.executeUpdate()
-        stmt.close()
+        // Cascade the manager's call-pool memberships and duty state too. Otherwise a
+        // deleted manager lingers in shops' covering sets (getManagerIdsForShop), which
+        // drives the dialplan's dialable mgr{id} targets, and in duty-aware routing.
+        connection.prepareStatement("DELETE FROM shop_manager WHERE manager_id = ?").use {
+            it.setInt(1, id); it.executeUpdate()
+        }
+        connection.prepareStatement("DELETE FROM manager_duty WHERE manager_id = ?").use {
+            it.setInt(1, id); it.executeUpdate()
+        }
+        connection.prepareStatement("DELETE FROM managers WHERE id = ?").use {
+            it.setInt(1, id); it.executeUpdate()
+        }
     }
 
     private fun hash(input: String): String {

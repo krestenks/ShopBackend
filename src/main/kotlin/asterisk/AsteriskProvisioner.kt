@@ -111,6 +111,17 @@ class AsteriskProvisioner(
     }
 
     /**
+     * Tears down a deleted manager's mgr{id} SIP identity, then refreshes the dialplan.
+     * Call AFTER the manager (and their cascaded pool/duty rows) are removed from the DB,
+     * so the regenerated contexts no longer reference them. Best-effort on the ARI delete
+     * (a 404 is fine); the reprovision reconciles the rest.
+     */
+    suspend fun removeManager(managerId: Int) {
+        runCatching { ariClient.deleteManagerEndpoint(managerId) }
+        reprovisionRouting()
+    }
+
+    /**
      * Makes sure both SIP accounts (manager app + in-shop device) exist for a shop:
      * generates missing passwords and pushes the PJSIP objects via ARI.
      */

@@ -631,6 +631,8 @@ class WebAdmin(
                 } else {
                     db.addManager(name, username, password, phone)
                 }
+                // New manager needs an mgr{id} SIP identity + from-mgr{id} context.
+                asteriskAdmin?.let { adm -> runCatching { adm.provisioner.reprovisionRouting() } }
                 call.respondRedirect("/managers")
             }
 
@@ -771,6 +773,8 @@ class WebAdmin(
                 if (id != null) {
                     if (impOwnerId == null || db.isManagerOwnedBy(id, impOwnerId)) {
                         db.deleteManager(id)
+                        // Drop the mgr{id} endpoint + regenerate (they're gone from covering sets now).
+                        asteriskAdmin?.let { adm -> runCatching { adm.provisioner.removeManager(id) } }
                     }
                 }
                 call.respondRedirect("/managers")
@@ -3659,6 +3663,7 @@ class WebAdmin(
                 val phone = params["phone"]?.trim().takeIf { !it.isNullOrBlank() }
                 if (name.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
                     db.addManagerForOwner(session.ownerId, name, username, password, phone)
+                    asteriskAdmin?.let { adm -> runCatching { adm.provisioner.reprovisionRouting() } }
                 }
                 call.respondRedirect("/owner/managers")
             }
@@ -3778,7 +3783,10 @@ class WebAdmin(
                 val session = call.sessions.get<OwnerSession>()!!
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
                     ?: return@get call.respondRedirect("/owner/managers")
-                if (db.isManagerOwnedBy(id, session.ownerId)) db.deleteManager(id)
+                if (db.isManagerOwnedBy(id, session.ownerId)) {
+                    db.deleteManager(id)
+                    asteriskAdmin?.let { adm -> runCatching { adm.provisioner.removeManager(id) } }
+                }
                 call.respondRedirect("/owner/managers")
             }
 
