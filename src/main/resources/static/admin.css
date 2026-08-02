@@ -99,6 +99,17 @@ body {
     height: 10px;
 }
 
+.nav-group-title {
+    text-transform: uppercase;
+    font-size: 10.5px;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+    font-weight: 700;
+    padding: 12px 12px 4px;
+    margin-top: 4px;
+}
+.nav-group-title:first-child { margin-top: 0; }
+
 .main {
     padding: 22px;
 }

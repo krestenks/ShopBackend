@@ -7,6 +7,7 @@ import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.http.content.*
 import io.ktor.server.application.*
 import io.ktor.server.html.respondHtml
 import io.ktor.server.request.*
@@ -136,6 +137,26 @@ class SetupAppRoutes(
         val releaseNotes: String?,
     )
 
+    private fun sha256(f: File): String {
+        val d = java.security.MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { ins ->
+            val buf = ByteArray(1 shl 16)
+            while (true) { val r = ins.read(buf); if (r <= 0) break; d.update(buf, 0, r) }
+        }
+        return d.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Base URL for the OTA apkUrl. Reuses the host of the currently-published apkUrl (known-good
+     *  tailnet MagicDNS), else APP_UPDATE_BASE_URL, else PUBLIC_BASE_URL. */
+    private fun currentUpdateBase(): String {
+        readVersionInfo().apkUrl?.let { existing ->
+            val idx = existing.indexOf("/api/app/download/")
+            if (idx > 0) return existing.substring(0, idx)
+        }
+        return System.getenv("APP_UPDATE_BASE_URL")?.trim()?.trimEnd('/')?.takeIf { it.isNotBlank() }
+            ?: baseUrl
+    }
+
     private fun readVersionInfo(): VersionInfo {
         val raw = File(apkDir, "version.json").takeIf { it.exists() }?.readText(Charsets.UTF_8) ?: "{}"
         return runCatching {
@@ -199,29 +220,38 @@ class SetupAppRoutes(
         }
     }
 
-    /** Full admin-style sidebar layout for authenticated setup-app pages. */
+    /**
+     * Page layout for /setup-app pages. Platform admins get the SAME unified, grouped admin sidebar
+     * as the rest of the backend (so these pages feel like one app). Non-admin self-service users
+     * (a manager installing on their own handset) get a minimal Install/Logout nav.
+     */
     private suspend fun ApplicationCall.respondSetupPage(
         titleText: String,
+        activePath: String? = null,
         bodyContent: FlowContent.() -> Unit,
     ) {
+        val isAdmin = sessions.get<WebAdmin.AdminSession>() != null
         respondHtml {
             setupHead(titleText)
             body {
                 div("layout") {
-                    div("sidebar") {
-                        div("brand") {
-                            div {
-                                div("brand-title") { +"ShopManager" }
-                                div("brand-sub") { +"Install" }
+                    if (isAdmin) {
+                        adminSidebar(activePath, logoutHref = "/setup-app/logout")
+                    } else {
+                        div("sidebar") {
+                            div("brand") {
+                                div {
+                                    div("brand-title") { +"ShopManager" }
+                                    div("brand-sub") { +"Install" }
+                                }
                             }
-                        }
-                        div("nav") {
-                            a(href = "/") { span { +"🏠" }; span { +"Admin" } }
-                            a(href = "/setup-app/download", classes = "active") { span { +"📲" }; span { +"Install app" } }
-                            a(href = "/setup-app/add-phone") { span { +"➕" }; span { +"Add phone" } }
-                            a(href = "/setup-app/devices") { span { +"📱" }; span { +"Devices" } }
-                            div("spacer") {}
-                            a(href = "/setup-app/logout") { span { +"🚪" }; span { +"Logout" } }
+                            div("nav") {
+                                a(href = "/setup-app/download", classes = if (activePath == "/setup-app/download") "active" else null) {
+                                    span { +"📲" }; span { +"Install app" }
+                                }
+                                div("spacer") {}
+                                a(href = "/setup-app/logout") { span { +"🚪" }; span { +"Logout" } }
+                            }
                         }
                     }
                     div("main") {
@@ -379,7 +409,7 @@ class SetupAppRoutes(
                     if (tok?.isValid == true) tokenParam to tok else null
                 } else null
 
-                call.respondSetupPage("Install ShopManager App") {
+                call.respondSetupPage("Install ShopManager App", "/setup-app/download") {
                     // Version info box
                     if (v.versionName != null) {
                         div("version-box") {
@@ -456,7 +486,7 @@ class SetupAppRoutes(
             // ── GET /setup-app/add-phone — one-tap onboarding: install QR + join QR ──
             get("/setup-app/add-phone") {
                 if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) {
-                    call.respondSetupPage("Add a phone") {
+                    call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
                         p { +"Onboarding isn't configured on this edge box." }
                         p("hint") { +"Set CONTROL_PLANE_URL and CONTROL_PLANE_EDGE_TOKEN, then restart the backend." }
                     }
@@ -464,14 +494,14 @@ class SetupAppRoutes(
                 }
                 val label = call.request.queryParameters["label"]?.trim()?.takeIf { it.isNotBlank() } ?: "phone"
                 val ob = runCatching { requestOnboarding(label) }.getOrElse { e ->
-                    call.respondSetupPage("Add a phone") {
+                    call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
                         p { +"Couldn't reach the control plane." }
                         p("hint") { +(e.message ?: "unknown error") }
                         a(href = "/setup-app/add-phone", classes = "btn") { +"Retry" }
                     }
                     return@get
                 }
-                call.respondSetupPage("Add a phone") {
+                call.respondSetupPage("Add a phone", "/setup-app/add-phone") {
                     p("hint") { +"On the new phone, scan these in order:" }
                     h3 { +"1 — Install the app" }
                     div("qr-wrap") {
@@ -502,21 +532,21 @@ class SetupAppRoutes(
             // ── GET /setup-app/devices — this tenant's joined phones + revoke ──
             get("/setup-app/devices") {
                 if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) {
-                    call.respondSetupPage("Devices") {
+                    call.respondSetupPage("Devices", "/setup-app/devices") {
                         p { +"Device management isn't configured on this edge box." }
                         p("hint") { +"Set CONTROL_PLANE_URL and CONTROL_PLANE_EDGE_TOKEN, then restart the backend." }
                     }
                     return@get
                 }
                 val devices = runCatching { listDevices() }.getOrElse { e ->
-                    call.respondSetupPage("Devices") {
+                    call.respondSetupPage("Devices", "/setup-app/devices") {
                         p { +"Couldn't reach the control plane." }
                         p("hint") { +(e.message ?: "unknown error") }
                         a(href = "/setup-app/devices", classes = "btn") { +"Retry" }
                     }
                     return@get
                 }
-                call.respondSetupPage("Devices") {
+                call.respondSetupPage("Devices", "/setup-app/devices") {
                     p("hint") { +"Phones joined to your secure network. \"Log out\" disconnects a phone (it can rejoin); \"Remove\" revokes it (must be re-onboarded)." }
                     if (devices.isEmpty()) {
                         p { +"No phones have joined yet." }
@@ -561,6 +591,122 @@ class SetupAppRoutes(
                 val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
                 runCatching { revokeDevice(id, remove = true) }
                 call.respondRedirect("/setup-app/devices")
+            }
+
+            // ── GET /setup-app/updates — OTA release management (publish version.json) ──
+            get("/setup-app/updates") {
+                val isAdmin = call.sessions.get<WebAdmin.AdminSession>() != null ||
+                        call.sessions.get<SetupAppSession>()?.role == "admin"
+                if (!isAdmin) { call.respondRedirect("/setup-app/download"); return@get }
+                val v = readVersionInfo()
+                val apks = apkDir.listFiles { f -> f.isFile && f.name.endsWith(".apk") }
+                    ?.sortedByDescending { it.lastModified() } ?: emptyList()
+                call.respondSetupPage("App updates", "/setup-app/updates") {
+                    div("version-box") {
+                        if (v.versionName != null) {
+                            p { strong { +"Currently published: " }; +"${v.versionName} (build ${v.versionCode ?: "?"})" }
+                            if (v.apkFilename != null) p { +"File: ${v.apkFilename}" }
+                            if (v.sha256 != null) p { small { +"sha256 ${v.sha256.take(16)}…" } }
+                            if (v.required == true) p { span("badge-required") { +"Required update" } }
+                            if (v.releaseNotes != null) p { em { +v.releaseNotes } }
+                        } else {
+                            p { +"No update is currently published." }
+                        }
+                    }
+                    hr {}
+                    h3 { +"Publish a new version" }
+                    p("hint") { +"Upload a RELEASE-signed APK (same key as installed phones). This writes version.json; phones self-update on next launch or via ‘Check for updates’." }
+                    form(action = "/setup-app/updates/publish", method = FormMethod.post, encType = FormEncType.multipartFormData) {
+                        label { +"APK file" }
+                        fileInput { name = "apk"; attributes["accept"] = ".apk"; attributes["required"] = "true" }
+                        label { +"Version name (e.g. 1.0.43)" }
+                        textInput { name = "versionName"; attributes["required"] = "true" }
+                        label { +"Version code (integer, higher than ${v.versionCode ?: 0})" }
+                        textInput { name = "versionCode"; attributes["inputmode"] = "numeric"; attributes["required"] = "true" }
+                        label { +"Release notes" }
+                        textArea { name = "releaseNotes"; rows = "3" }
+                        label { checkBoxInput { name = "required" }; +" Force this update (required)" }
+                        br()
+                        submitInput(classes = "btn primary") { value = "⬆ Publish update" }
+                    }
+                    hr {}
+                    h3 { +"APKs on the server" }
+                    if (apks.isEmpty()) {
+                        p { +"None uploaded yet." }
+                    } else {
+                        table(classes = "devices") {
+                            tr { th { +"File" }; th { +"Size" } }
+                            apks.forEach { f ->
+                                tr { td { +f.name }; td { +"${f.length() / 1_000_000} MB" } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── POST /setup-app/updates/publish — save APK + write version.json (admin only) ──
+            post("/setup-app/updates/publish") {
+                val isAdmin = call.sessions.get<WebAdmin.AdminSession>() != null ||
+                        call.sessions.get<SetupAppSession>()?.role == "admin"
+                if (!isAdmin) {
+                    call.respond(HttpStatusCode.Forbidden, "Publishing updates is admin-only.")
+                    return@post
+                }
+                var versionCode: Long? = null
+                var versionName = ""
+                var releaseNotes = ""
+                var required = false
+                var tmpFile: File? = null
+
+                call.receiveMultipart().forEachPart { part ->
+                    when (part) {
+                        is PartData.FormItem -> when (part.name) {
+                            "versionCode" -> versionCode = part.value.trim().toLongOrNull()
+                            "versionName" -> versionName = part.value.trim()
+                            "releaseNotes" -> releaseNotes = part.value.trim()
+                            "required" -> required = part.value == "on" || part.value.equals("true", true)
+                        }
+                        is PartData.FileItem -> {
+                            apkDir.mkdirs()
+                            val t = File(apkDir, "upload-${System.nanoTime()}.tmp")
+                            part.streamProvider().use { input -> t.outputStream().use { input.copyTo(it) } }
+                            tmpFile = t
+                        }
+                        else -> {}
+                    }
+                    part.dispose()
+                }
+
+                val tmp = tmpFile
+                if (tmp == null || versionName.isBlank() || versionCode == null) {
+                    tmp?.delete()
+                    call.respondSetupPage("App updates", "/setup-app/updates") {
+                        p { +"❌ Need an APK file, a version name and a numeric version code." }
+                        a(href = "/setup-app/updates", classes = "btn") { +"Back" }
+                    }
+                    return@post
+                }
+
+                val finalName = "shopmanager-$versionName.apk"
+                val finalFile = File(apkDir, finalName)
+                tmp.copyTo(finalFile, overwrite = true)
+                tmp.delete()
+
+                val sha = sha256(finalFile)
+                val apkUrl = "${currentUpdateBase().trimEnd('/')}/api/app/download/$finalName"
+                val manifest = buildJsonObject {
+                    put("versionCode", versionCode)
+                    put("versionName", versionName)
+                    put("apkUrl", apkUrl)
+                    put("sha256", sha)
+                    put("required", required)
+                    put("releaseNotes", releaseNotes)
+                }
+                File(apkDir, "version.json").writeText(
+                    Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), manifest),
+                    Charsets.UTF_8,
+                )
+                call.respondRedirect("/setup-app/updates")
             }
 
             // ── GET /setup-app/install/t/{token} — public install page ─────────

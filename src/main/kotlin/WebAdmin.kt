@@ -52,44 +52,7 @@ class WebAdmin(
         }
         body {
             div("layout") {
-                div("sidebar") {
-                    div("brand") {
-                        div {
-                            div("brand-title") { +"ShopManager" }
-                            div("brand-sub") { +"Admin" }
-                        }
-                    }
-
-                    val nav = listOf(
-                        NavItem("/", "Dashboard", "🏠"),
-                        NavItem("/shops", "Shops", "🏪"),
-                        NavItem("/employees", "Employees", "👥"),
-                        NavItem("/services", "Services", "🧾"),
-                        NavItem("/managers", "Managers", "🧑‍💼"),
-                        NavItem("/availability", "Availability", "🟢"),
-                        NavItem("/appointments", "Appointments", "📅"),
-                        NavItem("/customers", "Customers", "👤"),
-                        NavItem("/reports", "Reports", "💰"),
-                        NavItem("/telephony/setup", "Telephony setup", "📞"),
-                        NavItem("/test-booking-link", "Booking link", "🔗"),
-                        NavItem("/setup-app", "Install app", "📲"),
-                        NavItem("/admin/owners", "Owners", "🏢"),
-                    )
-
-                    div("nav") {
-                        for (item in nav) {
-                            a(href = item.href, classes = if (activePath == item.href) "active" else null) {
-                                span { +item.icon }
-                                span { +item.label }
-                            }
-                        }
-                        div("spacer") {}
-                        a(href = "/logout") {
-                            span { +"🚪" }
-                            span { +"Logout" }
-                        }
-                    }
-                }
+                adminSidebar(activePath)
 
                 div("main") {
                     // ── Impersonation banner (shown on every admin page when active) ──
