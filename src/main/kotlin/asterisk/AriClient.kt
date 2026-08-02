@@ -39,12 +39,19 @@ class AriClient(private val config: AsteriskConfig) {
 
     /**
      * Creates or updates a MANAGER's single SIP identity (mgr{id}). A pool of managers
-     * each register their own endpoint; the duty-aware routing forks the inbound call to
-     * every on-duty covering manager's endpoint. Higher max_contacts so one manager can
-     * be logged in on several devices.
+     * each register their own endpoint; the duty-aware routing (and manager-to-manager
+     * intercom) forks the call to every covering manager's endpoint.
+     *
+     * max_contacts=1 (+ remove_existing): one manager = one active phone, so a fresh
+     * REGISTER REPLACES the previous contact. Without this, a re-onboarded phone (new
+     * tailnet IP) or an app restart (new ephemeral port) leaves the old contact behind;
+     * those ghosts qualify as Unavailable and Dial() forks to them, timing out the call
+     * on NO ANSWER even when the live contact would answer. (Asterisk 18.10 predates the
+     * AOR remove_unavailable option, so capping contacts is the portable fix; genuine
+     * multi-device would need push-wake, which is deferred.)
      */
     suspend fun upsertManagerEndpoint(managerId: Int, sipPassword: String) =
-        upsertSipAccount(config.managerEndpointId(managerId), sipPassword, config.managerContext(managerId), maxContacts = 5)
+        upsertSipAccount(config.managerEndpointId(managerId), sipPassword, config.managerContext(managerId), maxContacts = 1)
 
     suspend fun deleteManagerEndpoint(managerId: Int) {
         val endpointId = config.managerEndpointId(managerId)
