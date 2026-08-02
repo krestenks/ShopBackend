@@ -255,6 +255,15 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                     appendLine("exten => _+X.,1,Goto(${config.outboundContext(soloGsm)},${d}{EXTEN},1)")
                     appendLine("exten => _0X.,1,Goto(${config.outboundContext(soloGsm)},${d}{EXTEN},1)")
                 }
+                // Manager-to-manager intercom: ring a specific colleague's pooled identity.
+                // The mgr{id} exten collides with none of the patterns above (shop*/+*/0*)
+                // nor the intercom includes (shopphone*/manager); PJSIP/mgr{id} already
+                // exists via ensureAllManagerEndpoints().
+                for (peerId in entry.peerManagerIds) {
+                    val peerEp = config.managerEndpointId(peerId)
+                    appendLine("exten => $peerEp,1,Dial(PJSIP/$peerEp,45)")
+                    appendLine(" same => n,Hangup()")
+                }
                 for (shopId in entry.coveredShopIds) {
                     appendLine("include => ${internalIncludeName(shopId)}")
                 }
@@ -274,10 +283,12 @@ data class InternalShopEntry(val shopId: Int, val groupShopIds: List<Int>)
 /**
  * One manager's dial context. [coveredShopIds] = every shop the manager covers (for
  * intercom includes); [gsmShopIds] = the subset of those that currently have a SIM (a
- * single one enables bare-number dialing).
+ * single one enables bare-number dialing); [peerManagerIds] = other managers who share
+ * at least one covered shop (manager-to-manager intercom targets).
  */
 data class ManagerDialEntry(
     val managerId: Int,
     val coveredShopIds: List<Int>,
     val gsmShopIds: List<Int>,
+    val peerManagerIds: List<Int> = emptyList(),
 )

@@ -151,10 +151,16 @@ class AsteriskProvisioner(
             .toSet()
         return db.getAllManagers().map { m ->
             val covered = db.getShopsForManager(m.id).map { it.id }
+            // Peers = co-managers of any covered shop (primary ∪ pool), excluding self.
+            val peers = covered
+                .flatMap { db.getManagerIdsForShop(it) }
+                .filter { it != m.id }
+                .distinct()
             ManagerDialEntry(
                 managerId = m.id,
                 coveredShopIds = covered,
                 gsmShopIds = covered.filter { it in gsmShopIds },
+                peerManagerIds = peers,
             )
         }
     }

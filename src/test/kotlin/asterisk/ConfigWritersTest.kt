@@ -120,7 +120,10 @@ class ConfigWritersTest {
         DialplanWriter(config, AmiClient(config)).regenerate(
             shops = listOf(shop),  // shop 7 has a SIM
             internal = listOf(InternalShopEntry(7, listOf(7, 9)), InternalShopEntry(9, listOf(7, 9))),
-            managers = listOf(ManagerDialEntry(managerId = 3, coveredShopIds = listOf(7, 9), gsmShopIds = listOf(7))),
+            managers = listOf(ManagerDialEntry(
+                managerId = 3, coveredShopIds = listOf(7, 9), gsmShopIds = listOf(7),
+                peerManagerIds = listOf(5),
+            )),
             reload = false,
         )
         val text = java.nio.file.Paths.get(dir, "extensions_shops.conf").readText()
@@ -132,11 +135,39 @@ class ConfigWritersTest {
         assertTrue(ctx.contains("Goto(from-sip-shop$" + "{SHOPSEL},$" + "{NUM},1)"))
         // Single-SIM convenience → bare number to the only GSM shop (7).
         assertTrue(ctx.contains("exten => _+X.,1,Goto(from-sip-shop7,"))
+        // Manager-to-manager intercom: the peer colleague is dialable, self is not.
+        assertTrue(ctx.contains("exten => mgr5,1,Dial(PJSIP/mgr5,45)"))
+        assertFalse(ctx.contains("exten => mgr3,1,"))
         // Intercom includes for every covered shop.
         assertTrue(ctx.contains("include => internal-shop7"))
         assertTrue(ctx.contains("include => internal-shop9"))
         // No unresolved Kotlin templates.
         assertFalse(text.contains("${'$'}d{"))
+    }
+
+    @Test
+    fun `manager context only lists shared-shop peers as intercom targets`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(
+            shops = listOf(shop),
+            internal = listOf(InternalShopEntry(7, listOf(7))),
+            managers = listOf(
+                // mgr3 shares a shop with mgr5 only; mgr8 is unrelated.
+                ManagerDialEntry(managerId = 3, coveredShopIds = listOf(7), gsmShopIds = listOf(7), peerManagerIds = listOf(5)),
+                ManagerDialEntry(managerId = 5, coveredShopIds = listOf(7), gsmShopIds = listOf(7), peerManagerIds = listOf(3)),
+                ManagerDialEntry(managerId = 8, coveredShopIds = emptyList(), gsmShopIds = emptyList(), peerManagerIds = emptyList()),
+            ),
+            reload = false,
+        )
+        val text = java.nio.file.Paths.get(dir, "extensions_shops.conf").readText()
+
+        val ctx3 = text.substringAfter("[from-mgr3]").substringBefore("\n[")
+        assertTrue(ctx3.contains("exten => mgr5,1,Dial(PJSIP/mgr5,45)"))
+        assertFalse(ctx3.contains("mgr8"))   // unrelated manager is not callable
+
+        val ctx8 = text.substringAfter("[from-mgr8]").substringBefore("\n[")
+        assertFalse(ctx8.contains("exten => mgr"))   // no peers → no manager-to-manager extensions
     }
 
     @Test

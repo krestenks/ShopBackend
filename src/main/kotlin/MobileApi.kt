@@ -476,8 +476,15 @@ class MobileApi(
                         }
                     } else {
                         val managerId = loginInfo.managerId ?: return@get call.respond(HttpStatusCode.Forbidden)
-                        db.getShopsForManager(managerId)
-                            .forEach { contacts += SipContact(name = it.name, exten = "shopphone${it.id}", type = "shop") }
+                        val covered = db.getShopsForManager(managerId)
+                        covered.forEach { contacts += SipContact(name = it.name, exten = "shopphone${it.id}", type = "shop") }
+                        // Colleague managers: co-managers of any covered shop (primary ∪ pool),
+                        // callable via the mgr{id} intercom exten in the caller's from-mgr context.
+                        covered.flatMap { db.getManagerIdsForShop(it.id) }
+                            .filter { it != managerId }
+                            .distinct()
+                            .mapNotNull { pid -> db.getManagerById(pid)?.let { pid to it.name } }
+                            .forEach { (pid, name) -> contacts += SipContact(name = name, exten = "mgr$pid", type = "manager") }
                     }
                     call.respond(SipContactsResponse(contacts))
                 }
