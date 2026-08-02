@@ -33,15 +33,24 @@ class ControlPlaneRoutes(
     private val tailnet: TailnetService,
     private val token: String?,
     private val edgeApiTemplate: String = "https://edge-{ownerId}.ts.warpfactor.dk",
+    /** Per-tenant edge tokens: token -> ownerId. An edge box authenticating with its token can only
+     *  ever mint invites/downloads for its own tenant (the ownerId is forced from this map). */
+    private val edgeTokens: Map<String, Int> = emptyMap(),
+    /** Public base of the download listener, e.g. `http://headscale.warpfactor.dk:8091`. */
+    private val downloadPublicBase: String = "",
 ) {
     @Serializable data class CreateTenantReq(val ownerId: Int)
-    @Serializable data class CreateInviteReq(val ownerId: Int, val deviceLabel: String, val edgeApiUrl: String? = null)
+    @Serializable data class CreateInviteReq(val ownerId: Int = 0, val deviceLabel: String, val edgeApiUrl: String? = null)
     @Serializable data class TenantDto(val ownerId: Int, val userId: String, val userName: String)
     @Serializable data class InviteDto(val ownerId: Int, val deviceLabel: String, val deepLink: String, val expiration: String?, val preAuthKey: String)
     @Serializable data class NodeDto(val id: String, val name: String, val user: String, val tags: List<String>, val addresses: List<String>)
+    @Serializable data class DownloadDto(val token: String, val url: String, val expiresInMinutes: Int)
     @Serializable data class Tenants(val tenants: List<TenantDto>)
     @Serializable data class Nodes(val nodes: List<NodeDto>)
     @Serializable data class ErrorDto(val error: String)
+
+    /** Set on the call when authenticated with a per-tenant edge token → forces that ownerId. */
+    private val edgeOwnerKey = io.ktor.util.AttributeKey<Int>("cp.edgeOwner")
 
     private fun edgeApiFor(ownerId: Int) = edgeApiTemplate.replace("{ownerId}", ownerId.toString())
 
@@ -68,12 +77,16 @@ class ControlPlaneRoutes(
     }
 
     fun install(r: Route) = r.route("") {
-        // ── auth guard ──
+        // ── auth guard: admin token (full access) OR a per-tenant edge token (scoped) ──
         intercept(ApplicationCallPipeline.Plugins) {
-            val t = token ?: return@intercept
+            // Open only when NO credential is configured at all (dev/localhost).
+            if (token == null && edgeTokens.isEmpty()) return@intercept
             val bearer = call.request.headers[HttpHeaders.Authorization]?.removePrefix("Bearer ")?.trim()
-            val q = call.request.queryParameters["token"]
-            if (bearer != t && q != t) {
+            val presented = bearer ?: call.request.queryParameters["token"]
+            val isAdmin = token != null && presented == token
+            val edgeOwner = presented?.let { edgeTokens[it] }
+            if (edgeOwner != null) call.attributes.put(edgeOwnerKey, edgeOwner)
+            if (!isAdmin && edgeOwner == null) {
                 call.respond(HttpStatusCode.Unauthorized, "control plane: missing/invalid token")
                 finish()
             }
@@ -99,12 +112,27 @@ class ControlPlaneRoutes(
 
         post("/api/invites") {
             val req = call.receive<CreateInviteReq>()
+            // An edge token forces its own ownerId; the admin token uses the body's.
+            val ownerId = call.attributes.getOrNull(edgeOwnerKey) ?: req.ownerId
+            if (ownerId <= 0) {
+                call.respond(HttpStatusCode.BadRequest, ErrorDto("ownerId required")); return@post
+            }
             val inv = tailnet.createDeviceInvite(
-                ownerId = req.ownerId,
+                ownerId = ownerId,
                 deviceLabel = req.deviceLabel,
-                edgeApiUrl = req.edgeApiUrl?.takeIf { it.isNotBlank() } ?: edgeApiFor(req.ownerId),
+                edgeApiUrl = req.edgeApiUrl?.takeIf { it.isNotBlank() } ?: edgeApiFor(ownerId),
             )
             call.respond(InviteDto(inv.ownerId, inv.deviceLabel, inv.deepLink, inv.expiration, inv.preAuthKey))
+        }
+
+        // Mint a single-use public APK download link (served by the download listener).
+        post("/api/download-token") {
+            if (downloadPublicBase.isBlank()) {
+                call.respond(HttpStatusCode.ServiceUnavailable, ErrorDto("download hosting not configured")); return@post
+            }
+            val ttlMs = 60 * 60 * 1000L
+            val t = DownloadStore.create(ttlMs)
+            call.respond(DownloadDto(t, "${downloadPublicBase.trimEnd('/')}/dl/$t", (ttlMs / 60_000L).toInt()))
         }
     }
 

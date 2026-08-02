@@ -1,6 +1,11 @@
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import io.ktor.client.*
+import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.html.respondHtml
@@ -13,9 +18,15 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.URLEncoder
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -31,6 +42,10 @@ class SetupAppRoutes(
     private val db: DataBase,
     private val apkDir: File = File("data/apk"),
     private val baseUrl: String = System.getenv("PUBLIC_BASE_URL")?.trimEnd('/') ?: "",
+    /** Control-plane admin API base (reachable from this edge box), e.g. http://192.168.0.2:8090. */
+    private val controlPlaneUrl: String = System.getenv("CONTROL_PLANE_URL")?.trimEnd('/') ?: "",
+    /** This edge box's per-tenant control-plane token (scopes invites to this tenant). */
+    private val edgeToken: String = System.getenv("CONTROL_PLANE_EDGE_TOKEN") ?: "",
 ) {
     @Serializable
     data class SetupAppSession(
@@ -38,6 +53,35 @@ class SetupAppRoutes(
         val userId: Int,
         val username: String,
     )
+
+    // ── Control-plane client (for the one-tap add-phone flow) ─────────────────
+    private val cpClient = HttpClient(CIO) {
+        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 8_000 }
+    }
+
+    private data class Onboarding(val deepLink: String, val downloadUrl: String, val expiration: String?)
+
+    /** Asks the control plane (scoped to this tenant by [edgeToken]) for a join invite + a one-time
+     *  APK download link. */
+    private suspend fun requestOnboarding(label: String): Onboarding {
+        val invBody = cpClient.post("$controlPlaneUrl/api/invites") {
+            header(HttpHeaders.Authorization, "Bearer $edgeToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("deviceLabel", label) }.toString())
+        }.bodyAsText()
+        val inv = Json.parseToJsonElement(invBody).jsonObject
+        val deepLink = inv["deepLink"]?.jsonPrimitive?.contentOrNull
+            ?: error("control plane invite failed: ${invBody.take(200)}")
+        val dlBody = cpClient.post("$controlPlaneUrl/api/download-token") {
+            header(HttpHeaders.Authorization, "Bearer $edgeToken")
+        }.bodyAsText()
+        val dl = Json.parseToJsonElement(dlBody).jsonObject
+        val downloadUrl = dl["url"]?.jsonPrimitive?.contentOrNull
+            ?: error("control plane download-token failed: ${dlBody.take(200)}")
+        return Onboarding(deepLink, downloadUrl, inv["expiration"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    private fun String.enc() = URLEncoder.encode(this, "UTF-8")
 
     private val fmt = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.of("Europe/Copenhagen"))
 
@@ -127,6 +171,7 @@ class SetupAppRoutes(
                         div("nav") {
                             a(href = "/") { span { +"🏠" }; span { +"Admin" } }
                             a(href = "/setup-app/download", classes = "active") { span { +"📲" }; span { +"Install app" } }
+                            a(href = "/setup-app/add-phone") { span { +"➕" }; span { +"Add phone" } }
                             div("spacer") {}
                             a(href = "/setup-app/logout") { span { +"🚪" }; span { +"Logout" } }
                         }
@@ -358,6 +403,52 @@ class SetupAppRoutes(
                     ttlMillis    = 24 * 60 * 60 * 1000L,
                 )
                 call.respondRedirect("/setup-app/download?token=$token")
+            }
+
+            // ── GET /setup-app/add-phone — one-tap onboarding: install QR + join QR ──
+            get("/setup-app/add-phone") {
+                if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) {
+                    call.respondSetupPage("Add a phone") {
+                        p { +"Onboarding isn't configured on this edge box." }
+                        p("hint") { +"Set CONTROL_PLANE_URL and CONTROL_PLANE_EDGE_TOKEN, then restart the backend." }
+                    }
+                    return@get
+                }
+                val label = call.request.queryParameters["label"]?.trim()?.takeIf { it.isNotBlank() } ?: "phone"
+                val ob = runCatching { requestOnboarding(label) }.getOrElse { e ->
+                    call.respondSetupPage("Add a phone") {
+                        p { +"Couldn't reach the control plane." }
+                        p("hint") { +(e.message ?: "unknown error") }
+                        a(href = "/setup-app/add-phone", classes = "btn") { +"Retry" }
+                    }
+                    return@get
+                }
+                call.respondSetupPage("Add a phone") {
+                    p("hint") { +"On the new phone, scan these in order:" }
+                    h3 { +"1 — Install the app" }
+                    div("qr-wrap") {
+                        img(src = "/setup-app/add-phone/qr.png?data=${ob.downloadUrl.enc()}", alt = "Install QR")
+                        p { small { +ob.downloadUrl } }
+                        p("qr-expiry") { +"Single-use install link" }
+                    }
+                    hr {}
+                    h3 { +"2 — Join (after installing & opening the app)" }
+                    div("qr-wrap") {
+                        img(src = "/setup-app/add-phone/qr.png?data=${ob.deepLink.enc()}", alt = "Join QR")
+                        ob.expiration?.let { p("qr-expiry") { +"Join code expires $it" } }
+                    }
+                    form(action = "/setup-app/add-phone", method = FormMethod.get) {
+                        submitInput(classes = "btn primary") { value = "⟳ Generate new codes" }
+                    }
+                }
+            }
+
+            // ── GET /setup-app/add-phone/qr.png?data=… — QR for an arbitrary string ──
+            get("/setup-app/add-phone/qr.png") {
+                val data = call.request.queryParameters["data"]
+                    ?: return@get call.respond(HttpStatusCode.BadRequest)
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.respondBytes(generateQrPng(data, size = 320), ContentType.Image.PNG)
             }
 
             // ── GET /setup-app/install/t/{token} — public install page ─────────
