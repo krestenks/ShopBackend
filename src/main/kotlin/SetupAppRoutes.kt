@@ -601,6 +601,10 @@ class SetupAppRoutes(
                                         }
                                     }
                                     td {
+                                        form(action = "/setup-app/devices/${d.id}/reonboard", method = FormMethod.post) {
+                                            hiddenInput { name = "label"; value = d.label ?: d.name }
+                                            submitInput(classes = "btn") { value = "Re-onboard" }
+                                        }
                                         form(action = "/setup-app/devices/${d.id}/logout", method = FormMethod.post) {
                                             submitInput(classes = "btn") { value = "Log out" }
                                         }
@@ -617,6 +621,35 @@ class SetupAppRoutes(
                     form(action = "/setup-app/devices", method = FormMethod.get) {
                         submitInput(classes = "btn") { value = "⟳ Refresh" }
                     }
+                }
+            }
+
+            // ── POST /setup-app/devices/{id}/reonboard — fresh join QR to reconnect a phone ──
+            post("/setup-app/devices/{id}/reonboard") {
+                if (controlPlaneUrl.isBlank() || edgeToken.isBlank()) {
+                    call.respondSetupPage("Re-onboard", "/setup-app/devices") {
+                        p { +"Onboarding isn't configured on this edge box." }
+                        p("hint") { +"Set CONTROL_PLANE_URL and CONTROL_PLANE_EDGE_TOKEN, then restart the backend." }
+                    }
+                    return@post
+                }
+                val label = call.receiveParameters()["label"]?.trim()?.takeIf { it.isNotBlank() } ?: "phone"
+                val ob = runCatching { requestOnboarding(label) }.getOrElse { e ->
+                    call.respondSetupPage("Re-onboard", "/setup-app/devices") {
+                        p { +"Couldn't reach the control plane." }
+                        p("hint") { +(e.message ?: "unknown error") }
+                        a(href = "/setup-app/devices", classes = "btn") { +"← Back to Phones" }
+                    }
+                    return@post
+                }
+                call.respondSetupPage("Re-onboard — $label", "/setup-app/devices") {
+                    p("hint") { +"On $label, open the ShopManager app and scan this to reconnect it to the secure network. It keeps the name \"$label\"." }
+                    div("qr-wrap") {
+                        img(src = "/setup-app/add-phone/qr.png?data=${ob.deepLink.enc()}", alt = "Join QR")
+                        ob.expiration?.let { p("qr-expiry") { +"Join code expires $it" } }
+                    }
+                    p("hint") { +"If the app was removed from the phone, use \"Add phone\" instead (install + join)." }
+                    a(href = "/setup-app/devices", classes = "btn") { +"← Back to Phones" }
                 }
             }
 
