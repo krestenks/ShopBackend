@@ -30,4 +30,13 @@ object LebaraTopup {
         if (!v.ok) return SmsSendResult(false, 400, v.error ?: "Invalid codes", errorMessage = v.error)
         return telephony.sendSms(shopId, "", SHORTCODE, messageBody(v.code1, v.code2))
     }
+
+    /** Requests the prepaid balance: texts "balance" to 5010 from shop [shopId]'s SIM. The reply
+     *  arrives asynchronously as an inbound SMS from 5010 — see [isCarrierReply]. */
+    suspend fun requestBalance(telephony: TelephonyService, shopId: Int): SmsSendResult =
+        telephony.sendSms(shopId, "", SHORTCODE, "balance")
+
+    /** True when an inbound SMS came from the Lebara short code (5010) — i.e. a balance/top-up reply. */
+    fun isCarrierReply(from: String?): Boolean =
+        from?.filter { it.isDigit() } == SHORTCODE
 }

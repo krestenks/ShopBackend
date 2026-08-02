@@ -220,6 +220,10 @@ data class ShopTelephonyConfig(
     val sipPhonePassword: String? = null,
     /** Epoch ms of last successful Asterisk provisioning; null = never. */
     val provisionedAt: Long? = null,
+    /** Latest carrier balance reply (raw SMS text from the short code), or null. */
+    val balance: String? = null,
+    /** Epoch ms when [balance] was received. */
+    val balanceAt: Long? = null,
 )
 
 // ─── Voice call log ──────────────────────────────────────────────────────────
@@ -806,6 +810,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             // Group chat re-keyed per SHOP (pool-aware): the shop + all its pool managers share a room.
             // Legacy manager_id column is kept (NOT NULL, written 0) but no longer the room key.
             "ALTER TABLE group_chat_message ADD COLUMN shop_id INTEGER",
+            // Latest carrier balance reply (raw SMS text from the short code) + when it arrived.
+            "ALTER TABLE shop_telephony_config ADD COLUMN balance TEXT",
+            "ALTER TABLE shop_telephony_config ADD COLUMN balance_at INTEGER",
             // Appointment workflow status tracking
             "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'Waiting'",
             "ALTER TABLE appointments ADD COLUMN ongoing_started_at INTEGER",
@@ -1077,10 +1084,24 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         sipPassword = rs.getString("sip_password"),
         sipPhonePassword = rs.getString("sip_phone_password"),
         provisionedAt = rs.getLong("provisioned_at").takeIf { !rs.wasNull() },
+        balance = rs.getString("balance"),
+        balanceAt = rs.getLong("balance_at").takeIf { !rs.wasNull() },
     )
 
     private val telephonySelect =
-        "SELECT shop_id, imsi, phone_number, carrier, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at FROM shop_telephony_config"
+        "SELECT shop_id, imsi, phone_number, carrier, modem_data_device, modem_alsa_device, sip_password, sip_phone_password, provisioned_at, balance, balance_at FROM shop_telephony_config"
+
+    /** Stores the latest carrier balance reply (raw SMS text from the short code) for a shop. */
+    fun setShopBalance(shopId: Int, text: String, at: Long) {
+        connection.prepareStatement(
+            "UPDATE shop_telephony_config SET balance = ?, balance_at = ? WHERE shop_id = ?"
+        ).use { stmt ->
+            stmt.setString(1, text)
+            stmt.setLong(2, at)
+            stmt.setInt(3, shopId)
+            stmt.executeUpdate()
+        }
+    }
 
     fun getShopTelephonyConfig(shopId: Int): ShopTelephonyConfig {
         connection.prepareStatement("$telephonySelect WHERE shop_id = ?").use { stmt ->

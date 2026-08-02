@@ -153,6 +153,9 @@ data class SipCredentialsResponse(
 data class TopupRequest(val shopId: Int, val code1: String, val code2: String)
 @Serializable
 data class TopupResponse(val success: Boolean, val message: String)
+/** Latest carrier balance (raw reply text + when it arrived), for the app. */
+@Serializable
+data class BalanceResponse(val balance: String? = null, val balanceAt: Long? = null)
 
 /** One callable intercom colleague (internal SIP extension). */
 @Serializable
@@ -418,6 +421,34 @@ class MobileApi(
                     val result = telephony.LebaraTopup.send(telephonyService, req.shopId, req.code1, req.code2)
                     if (result.success) call.respond(TopupResponse(true, "Top-up sent to 5010"))
                     else call.respond(HttpStatusCode.fromValue(result.status), TopupResponse(false, result.errorMessage ?: result.body))
+                }
+
+                /** GET /api/mobile/telephony/balance?shopId=N — latest stored carrier balance. */
+                get("/api/mobile/telephony/balance") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
+                    val tele = db.getShopTelephonyConfig(shopId)
+                    call.respond(BalanceResponse(tele.balance, tele.balanceAt))
+                }
+
+                /** POST /api/mobile/telephony/balance/refresh?shopId=N — text "balance" to 5010; reply arrives async. */
+                post("/api/mobile/telephony/balance/refresh") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val shopId = call.request.queryParameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, TopupResponse(false, "Missing shopId"))
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@post call.respond(HttpStatusCode.Forbidden, TopupResponse(false, "Not authorized for this shop"))
+                    }
+                    if (db.getShopTelephonyConfig(shopId).carrier != telephony.LebaraTopup.CARRIER) {
+                        return@post call.respond(HttpStatusCode.BadRequest, TopupResponse(false, "This SIM is not a Lebara line"))
+                    }
+                    val r = telephony.LebaraTopup.requestBalance(telephonyService, shopId)
+                    if (r.success) call.respond(TopupResponse(true, "Balance requested — reply arrives shortly"))
+                    else call.respond(HttpStatusCode.fromValue(r.status), TopupResponse(false, r.errorMessage ?: r.body))
                 }
 
                 /**

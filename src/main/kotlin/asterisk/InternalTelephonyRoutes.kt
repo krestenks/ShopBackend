@@ -62,6 +62,14 @@ fun Routing.internalTelephonyRoutes(
         val from = params["from"]?.trim().orEmpty()
         val body = params["body"] ?: ""
 
+        // Carrier replies (from the Lebara short code 5010 — balance / top-up confirmations) are
+        // stored as the shop's balance, NOT shown as a customer message.
+        if (telephony.LebaraTopup.isCarrierReply(from)) {
+            db.setShopBalance(shopId, body.trim(), System.currentTimeMillis())
+            call.respondText("carrier")
+            return@post
+        }
+
         val toPhone = db.getShopTelephonyConfig(shopId).phoneNumber ?: ""
         val result = persistInboundSms(
             db = db,

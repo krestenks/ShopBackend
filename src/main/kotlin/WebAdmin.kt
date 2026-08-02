@@ -1230,6 +1230,17 @@ class WebAdmin(
                     call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode("✅ Number & carrier saved.", Charsets.UTF_8)}")
                 }
 
+                // Lebara balance: text "balance" to 5010; the reply arrives async as an inbound SMS.
+                post("/shops/telephony/balance") {
+                    val params = call.receiveParameters()
+                    val sid = params["id"]?.toIntOrNull()
+                        ?: return@post call.respondRedirect("/telephony/setup")
+                    val r = telephony.LebaraTopup.requestBalance(telephonyService, sid)
+                    val msg = if (r.success) "✅ Balance requested — Lebara replies by SMS in a few seconds. Reload to see it."
+                        else "⚠️ Balance request failed: ${r.errorMessage ?: r.body}"
+                    call.respondRedirect("/telephony/shop?id=$sid&tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
                 // Lebara prepaid top-up: send "Topup <8-digit> <6-digit>" to 5010 from the shop's SIM.
                 post("/shops/telephony/topup") {
                     val params = call.receiveParameters()
@@ -1404,6 +1415,27 @@ class WebAdmin(
                                     +" "
                                     submitInput(classes = "btn primary") { value = "Send top-up" }
                                 }
+                            }
+                            if (tele.carrier == "lebara" && !tele.imsi.isNullOrBlank()) {
+                                hr {}
+                                h3 { +"💰 Balance" }
+                                if (!tele.balance.isNullOrBlank()) {
+                                    p { b { +tele.balance!! } }
+                                    tele.balanceAt?.let {
+                                        p("hint") {
+                                            +("as of " + java.time.Instant.ofEpochMilli(it)
+                                                .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                                                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
+                                        }
+                                    }
+                                } else {
+                                    p("hint") { +"No balance yet — request one." }
+                                }
+                                form(action = "/shops/telephony/balance", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = sid.toString() }
+                                    submitInput(classes = "btn") { value = "↻ Refresh balance" }
+                                }
+                                p("hint") { +"Sends \"balance\" to 5010; Lebara replies by SMS within a few seconds — reload this page to see it." }
                             }
                             p {
                                 +"SIP account for the manager app: "
