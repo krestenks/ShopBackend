@@ -421,10 +421,11 @@ class WebAdmin(
                                                         // Firmware update — only for UNASSIGNED modems (never flash a live shop line).
                                                         if (m.assignedShopId == null) {
                                                             form(action = "/telephony/modem/firmware-update", method = FormMethod.post) {
+                                                                // All attributes MUST be set before any child element (kotlinx.html streams).
                                                                 style = "display:inline"
-                                                                hiddenInput { name = "usbPort"; value = m.usbPort }
                                                                 attributes["onsubmit"] =
                                                                     "return confirm('Flash firmware on modem ${m.usbPort}?\\n\\nThis takes ~5 minutes. Do NOT unplug or power off the modem or the server during the update — interrupting it can BRICK the modem.')"
+                                                                hiddenInput { name = "usbPort"; value = m.usbPort }
                                                                 submitInput(classes = "btn danger") { value = "Update FW" }
                                                             }
                                                         }
