@@ -56,6 +56,15 @@ application {
     mainClass.set("ShopBackend")
 }
 
+// Standalone platform control-plane service (Headscale onboarding). Run with:
+//   HEADSCALE_API_KEY=... ./gradlew runControlPlane
+tasks.register<JavaExec>("runControlPlane") {
+    group = "application"
+    description = "Run the standalone Headscale control-plane service"
+    mainClass.set("controlplane.ControlPlaneAppKt")
+    classpath = sourceSets["main"].runtimeClasspath
+}
+
 tasks.jar { enabled = false } // optional: avoid producing a thin jar
 
 tasks.shadowJar {
