@@ -144,6 +144,8 @@ data class SipCredentialsResponse(
     val port: Int,
     val transport: String,
     val shopPhoneNumber: String? = null,
+    /** SIM carrier (e.g. "lebara") so the app can offer carrier-specific actions like top-up. */
+    val carrier: String? = null,
 )
 
 /** Lebara prepaid top-up request (self-service from the app). */
@@ -392,6 +394,7 @@ class MobileApi(
                         port = admin.config.sipPort,
                         transport = "udp",
                         shopPhoneNumber = tele.phoneNumber,
+                        carrier = tele.carrier,
                     ))
                 }
 
