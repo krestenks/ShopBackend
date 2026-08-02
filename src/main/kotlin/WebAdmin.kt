@@ -417,6 +417,16 @@ class WebAdmin(
                                                             textInput { name = "to"; placeholder = "+45… (your phone)" }
                                                             submitInput(classes = "btn") { value = "Test SMS" }
                                                         }
+                                                        // Firmware update — only for UNASSIGNED modems (never flash a live shop line).
+                                                        if (m.assignedShopId == null) {
+                                                            form(action = "/telephony/modem/firmware-update", method = FormMethod.post) {
+                                                                style = "display:inline"
+                                                                hiddenInput { name = "usbPort"; value = m.usbPort }
+                                                                attributes["onsubmit"] =
+                                                                    "return confirm('Flash firmware on modem ${m.usbPort}?\\n\\nThis takes ~5 minutes. Do NOT unplug or power off the modem or the server during the update — interrupting it can BRICK the modem.')"
+                                                                submitInput(classes = "btn danger") { value = "Update FW" }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1336,6 +1346,50 @@ class WebAdmin(
                         }
                     }
                     call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                // ── Modem firmware update (QFirehose), detached — UNASSIGNED modems only ──
+                post("/telephony/modem/firmware-update") {
+                    val usbPort = call.receiveParameters()["usbPort"]?.trim().orEmpty()
+                    val modem = asteriskAdmin.modemScanner.scan().firstOrNull { it.usbPort == usbPort }
+                    val msg = when {
+                        usbPort.isBlank() -> "⚠️ Missing modem port."
+                        modem == null -> "⚠️ Modem $usbPort not found — rescan."
+                        modem.assignedShopId != null ->
+                            "⚠️ Modem $usbPort is assigned to ${modem.assignedShopName ?: "a shop"} — unassign it before flashing."
+                        else -> {
+                            val r = asteriskAdmin.firmwareUpdater.start(usbPort)
+                            if (r.ok) return@post call.respondRedirect(
+                                "/telephony/modem/firmware-status?port=${java.net.URLEncoder.encode(usbPort, Charsets.UTF_8)}"
+                            )
+                            "⚠️ ${r.message}"
+                        }
+                    }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                // Live status + log for a modem firmware flash (auto-refreshes while running).
+                get("/telephony/modem/firmware-status") {
+                    val port = call.request.queryParameters["port"]?.trim().orEmpty()
+                    val st = asteriskAdmin.firmwareUpdater.status(port)
+                    call.respondAdminPage("Firmware update — $port", activePath = "/telephony/setup") {
+                        div("panel") {
+                            if (st.running) {
+                                p { b { +"⏳ Flashing $port… do NOT unplug or power off the modem or the server." } }
+                                script { unsafe { raw("setTimeout(function(){location.reload()},5000);") } }
+                            } else {
+                                p { b { +"Finished ($port): result = ${st.result}" } }
+                                p("hint") { +"\"success\" = the unit exited cleanly. Check the log below for QFirehose's own \"Upgrade module successfully\"." }
+                                a(href = "/telephony/setup", classes = "btn") { +"← Back to telephony" }
+                            }
+                            hr {}
+                            h3 { +"QFirehose log" }
+                            pre {
+                                style = "white-space:pre-wrap;max-height:60vh;overflow:auto;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;font-size:12px"
+                                +st.log
+                            }
+                        }
+                    }
                 }
 
                 // Unassign a shop's SIM.

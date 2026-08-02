@@ -6,4 +6,5 @@ class AsteriskAdmin(
     val amiClient: AmiClient,
     val provisioner: AsteriskProvisioner,
     val modemScanner: ModemScanner,
+    val firmwareUpdater: ModemFirmwareUpdater = ModemFirmwareUpdater(),
 )
