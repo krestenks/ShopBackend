@@ -52,6 +52,7 @@ class ControlPlaneRoutes(
     @Serializable data class Nodes(val nodes: List<NodeDto>)
     @Serializable data class ErrorDto(val error: String)
     @Serializable data class OkDto(val ok: Boolean, val message: String)
+    @Serializable data class LabelReq(val label: String)
 
     /** Set on the call when authenticated with a per-tenant edge token → forces that ownerId. */
     private val edgeOwnerKey = io.ktor.util.AttributeKey<Int>("cp.edgeOwner")
@@ -139,6 +140,18 @@ class ControlPlaneRoutes(
             }
             tailnet.deleteNode(id)
             call.respond(OkDto(true, "deleted"))
+        }
+        // Set/clear a node's friendly name (stored against its pre-auth key id). Blank clears it.
+        post("/api/nodes/{id}/label") {
+            val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest, ErrorDto("missing id"))
+            if (!callMayManageNode(call, id)) {
+                call.respond(HttpStatusCode.Forbidden, ErrorDto("node not in your tenant")); return@post
+            }
+            val label = call.receive<LabelReq>().label.trim()
+            val pakId = tailnet.nodePreAuthKeyId(id)
+                ?: return@post call.respond(HttpStatusCode.Conflict, ErrorDto("node has no pre-auth key to name"))
+            if (label.isBlank()) labelStore.remove(pakId) else labelStore.put(pakId, label)
+            call.respond(OkDto(true, "labeled"))
         }
 
         post("/api/tenants") {

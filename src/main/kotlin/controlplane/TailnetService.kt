@@ -209,6 +209,11 @@ class TailnetService(private val config: TailnetConfig) {
         listNodes().firstOrNull { it["id"]?.jsonPrimitive?.content == id }
             ?.get("tags")?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
 
+    /** The pre-auth key id a node registered with (used to attach a friendly name); null if none. */
+    suspend fun nodePreAuthKeyId(id: String): String? =
+        listNodes().firstOrNull { it["id"]?.jsonPrimitive?.content == id }
+            ?.get("preAuthKey")?.jsonObject?.get("id")?.jsonPrimitive?.content
+
     // ── Policy (ACL) ─────────────────────────────────────────────────────────
 
     suspend fun getPolicy(): String =

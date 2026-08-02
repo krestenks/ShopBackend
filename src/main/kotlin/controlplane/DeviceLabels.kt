@@ -29,6 +29,15 @@ class DeviceLabelStore(private val file: File) {
     fun put(preAuthKeyId: String, label: String) {
         if (label.isBlank()) return
         map[preAuthKeyId] = label
+        persist()
+    }
+
+    /** Clears a name (reverts the phone to showing its tailnet hostname). */
+    fun remove(preAuthKeyId: String) {
+        if (map.remove(preAuthKeyId) != null) persist()
+    }
+
+    private fun persist() {
         runCatching {
             file.parentFile?.mkdirs()
             file.writeText(json.encodeToString(serializer, map.toSortedMap()), Charsets.UTF_8)

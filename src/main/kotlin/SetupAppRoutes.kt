@@ -109,6 +109,16 @@ class SetupAppRoutes(
             .filterNot { Regex("^edge-\\d+$").matches(it.name) }
     }
 
+    /** Sets (or clears, when blank) a phone's friendly name via the scoped control-plane token. */
+    private suspend fun setDeviceLabel(id: String, label: String): Boolean {
+        val resp = cpClient.post("$controlPlaneUrl/api/nodes/$id/label") {
+            header(HttpHeaders.Authorization, "Bearer $edgeToken")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("label", label) }.toString())
+        }
+        return resp.status.isSuccess()
+    }
+
     /** Revokes a node: [remove] deletes it (must re-onboard), otherwise expires (logs out). */
     private suspend fun revokeDevice(id: String, remove: Boolean): Boolean {
         val resp = if (remove)
@@ -572,7 +582,7 @@ class SetupAppRoutes(
                         p { +"No phones have joined yet." }
                     } else {
                         table(classes = "devices") {
-                            tr { th { +"Phone" }; th { +"Address" }; th { +"Status" }; th { +"Actions" } }
+                            tr { th { +"Phone" }; th { +"Address" }; th { +"Status" }; th { +"Rename" }; th { +"Actions" } }
                             devices.sortedBy { (it.label ?: it.name).lowercase() }.forEach { d ->
                                 tr {
                                     td {
@@ -583,6 +593,12 @@ class SetupAppRoutes(
                                     td {
                                         if (d.online) span("dev-online") { +"● online" }
                                         else span("dev-offline") { +"○ offline" }
+                                    }
+                                    td {
+                                        form(action = "/setup-app/devices/${d.id}/label", method = FormMethod.post) {
+                                            textInput { name = "label"; value = d.label ?: ""; attributes["placeholder"] = "name"; attributes["style"] = "width:130px;display:inline-block;margin-right:4px;padding:4px 8px" }
+                                            submitInput(classes = "btn") { value = "Save" }
+                                        }
                                     }
                                     td {
                                         form(action = "/setup-app/devices/${d.id}/logout", method = FormMethod.post) {
@@ -613,6 +629,12 @@ class SetupAppRoutes(
             post("/setup-app/devices/{id}/remove") {
                 val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
                 runCatching { revokeDevice(id, remove = true) }
+                call.respondRedirect("/setup-app/devices")
+            }
+            post("/setup-app/devices/{id}/label") {
+                val id = call.parameters["id"] ?: return@post call.respond(HttpStatusCode.BadRequest)
+                val newLabel = call.receiveParameters()["label"]?.trim() ?: ""
+                runCatching { setDeviceLabel(id, newLabel) }
                 call.respondRedirect("/setup-app/devices")
             }
 
