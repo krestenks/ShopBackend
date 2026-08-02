@@ -96,6 +96,21 @@ class AsteriskProvisioner(
     }
 
     /**
+     * Applies a call-routing change (manager pool membership or a shop's primary-manager
+     * reassignment) to the dialplan — WITHOUT a modem rescan or trunk rewrite. Ensures
+     * every manager has its mgr{id} SIP identity (so a newly-pooled manager is dialable),
+     * then rewrites and reloads the intercom + per-manager contexts from current DB state.
+     * SIM/trunk bindings are untouched. Best-effort: if Asterisk is unreachable the next
+     * full provision reconciles.
+     */
+    suspend fun reprovisionRouting() {
+        ensureAllManagerEndpoints()
+        val gsmShops = db.getAllConfiguredShopTelephonyConfigs().filter { !it.modemDataDevice.isNullOrBlank() }
+        dialplanWriter.regenerate(gsmShops, internalEntries(), managerEntries())
+        println("[Asterisk] Reprovisioned call routing (pool/primary-manager change)")
+    }
+
+    /**
      * Makes sure both SIP accounts (manager app + in-shop device) exist for a shop:
      * generates missing passwords and pushes the PJSIP objects via ARI.
      */

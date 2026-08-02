@@ -1510,8 +1510,13 @@ class WebAdmin(
                 val poolManagerIds = params.getAll("poolManagerIds")?.mapNotNull { it.toIntOrNull() } ?: emptyList()
 
                 if (id != null) {
+                    // Capture routing state before the writes so we only reprovision the
+                    // dialplan when the pool or the primary manager actually changed.
+                    val oldPrimary = db.getShopById(id)?.managerId
+                    val oldPool = db.getShopPoolManagerIds(id).toSet()
                     db.updateShop(id, name, address, directions, managerId)
                     db.setShopPool(id, poolManagerIds)
+                    val routingChanged = oldPrimary != managerId || oldPool != poolManagerIds.toSet()
 
                     // Voice config — operator_phone removed; operator comes from manager phone
                     val voice = ShopVoiceConfig(
@@ -1559,6 +1564,13 @@ class WebAdmin(
                         )
                     }
                     db.upsertShopOpeningHours(rows)
+
+                    // Pool/primary-manager change alters intercom + manager-to-manager
+                    // routing baked into the dialplan — reprovision routing (best-effort,
+                    // no modem rescan). Unrelated edits (name, hours) skip this.
+                    if (routingChanged) {
+                        asteriskAdmin?.let { adm -> runCatching { adm.provisioner.reprovisionRouting() } }
+                    }
                 }
                 call.respondRedirect("/shops")
             }
@@ -3269,11 +3281,14 @@ class WebAdmin(
                 val managerId = params["managerId"]?.toIntOrNull()
                     ?.takeIf { db.isManagerOwnedBy(it, session.ownerId) }
                 if (name.isNotBlank()) {
+                    val oldPrimary = db.getShopById(id)?.managerId
+                    val oldPool = db.getShopPoolManagerIds(id).toSet()
                     db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
                     // Call pool — only managers belonging to this owner may be assigned.
                     val poolManagerIds = (params.getAll("poolManagerIds")?.mapNotNull { it.toIntOrNull() } ?: emptyList())
                         .filter { db.isManagerOwnedBy(it, session.ownerId) }
                     db.setShopPool(id, poolManagerIds)
+                    val routingChanged = oldPrimary != managerId || oldPool != poolManagerIds.toSet()
                     val voice = ShopVoiceConfig(
                         shopId = id,
                         businessName = params["business_name"]?.trim()?.takeIf { it.isNotBlank() },
@@ -3311,6 +3326,12 @@ class WebAdmin(
                         )
                     }
                     db.upsertShopOpeningHours(rows)
+
+                    // Pool/primary-manager change alters intercom + manager-to-manager
+                    // routing baked into the dialplan — reprovision routing (best-effort).
+                    if (routingChanged) {
+                        asteriskAdmin?.let { adm -> runCatching { adm.provisioner.reprovisionRouting() } }
+                    }
                 }
                 call.respondRedirect("/owner/shops")
             }
