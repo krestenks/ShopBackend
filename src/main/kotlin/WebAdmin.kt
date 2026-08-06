@@ -209,7 +209,7 @@ class WebAdmin(
                 val password = params["password"] ?: ""
 
                 // Allow credentials to be overridden via environment variables so the password
-                // can be changed on Upsun/Platform.sh without a code rebuild.
+                // can be changed on the server (backend.env) without a code rebuild.
                 // Fallback: hardcoded admin / 1234 (BCrypt hash).
                 val envUser = System.getenv("ADMIN_USERNAME")?.trim()?.takeIf { it.isNotBlank() }
                 val envPass = System.getenv("ADMIN_PASSWORD")?.trim()?.takeIf { it.isNotBlank() }

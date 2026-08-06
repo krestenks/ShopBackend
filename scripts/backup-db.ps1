@@ -1,7 +1,15 @@
 <#
 .SYNOPSIS
-    Downloads the production SQLite database from Upsun and saves a timestamped
-    backup copy into the local data directory.
+    DEPRECATED (Upsun retired) — downloads the production SQLite database and saves a
+    timestamped backup copy into the local data directory.
+
+.DEPRECATED
+    Upsun is retired. The live DB now lives on the edge box's local disk:
+        phone@192.168.0.192:/home/phone/shopbackend/data/ShopManager.db
+    The Upsun-CLI resolution below no longer works. To back up now, scp directly from the edge:
+        scp phone@192.168.0.192:/home/phone/shopbackend/data/ShopManager.db `
+            data/ShopManager_<timestamp>.db
+    (Repoint the logic below at the edge box before relying on this script again.)
 
 .DESCRIPTION
     Resolves the environment's SSH address via the Upsun CLI (`upsun ssh --pipe`)

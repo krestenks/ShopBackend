@@ -26,8 +26,8 @@ object PublicBaseUrl {
     /**
      * Derive the public base URL for the *current request*.
      *
-     * Useful on platforms behind a reverse proxy (Upsun/Platform.sh, Cloudflare, etc.), where the
-     * external hostname is provided via X-Forwarded-* headers.
+     * Useful when running behind a reverse proxy (e.g. the tailnet/router forward, Cloudflare, nginx),
+     * where the external hostname is provided via X-Forwarded-* headers.
      */
     fun fromCall(call: ApplicationCall): String {
         getFromEnvOrNull()?.let { return it }

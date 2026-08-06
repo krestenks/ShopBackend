@@ -496,10 +496,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         connection = DriverManager.getConnection(dbUrl)
 
         // Wait (up to 5s) for a lock instead of failing immediately with SQLITE_BUSY.
-        // NOTE: WAL mode is deliberately NOT enabled. WAL relies on shared-memory (-shm) mmap
-        // that is unreliable on Upsun's network-backed /app/data mount, which caused inbound
-        // writes to fail after the first. The app uses a single shared connection, so all DB
-        // access already serializes safely without WAL.
+        // NOTE: WAL mode is deliberately NOT enabled. Originally this was because WAL's
+        // shared-memory (-shm) mmap was unreliable on the old Upsun network-backed /app/data
+        // mount (inbound writes failed after the first). Upsun is now retired and the DB lives
+        // on a local disk on the edge box, so that constraint no longer applies — but WAL stays
+        // off because the single shared connection already serializes all DB access safely and
+        // WAL has not been re-tested. The app uses one connection app-wide.
         try {
             connection.createStatement().use { st ->
                 st.execute("PRAGMA busy_timeout=5000;")

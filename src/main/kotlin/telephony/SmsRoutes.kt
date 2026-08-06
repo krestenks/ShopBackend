@@ -19,7 +19,7 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
-// ─── Diagnostic logging (temporary; traces inbound + poll timing in the Upsun log) ──
+// ─── Diagnostic logging (temporary; traces inbound + poll timing in the server log) ──
 private val SMS_LOG_TZ  = java.time.ZoneId.of("Europe/Copenhagen")
 private val SMS_LOG_FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
 /** Human-readable Copenhagen timestamp for correlating with when a message was actually sent. */
@@ -27,7 +27,7 @@ private fun smsTs(epochMs: Long = System.currentTimeMillis()): String =
     java.time.Instant.ofEpochMilli(epochMs).atZone(SMS_LOG_TZ).format(SMS_LOG_FMT)
 /**
  * Writes a diagnostic line and flushes stdout immediately. Without the flush, buffered output
- * lags behind on the Upsun log, making messages show up in the app before their log line appears.
+ * lags behind in the server log, making messages show up in the app before their log line appears.
  */
 private fun smsLog(msg: String) { println(msg); System.out.flush() }
 /**

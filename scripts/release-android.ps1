@@ -1,6 +1,15 @@
 <#
 .SYNOPSIS
-    Build, sign, and deploy a new ShopManager APK release to Upsun.
+    DEPRECATED — do NOT run. Historical Upsun release script (Upsun is retired).
+
+.DEPRECATED
+    Upsun is retired; ShopBackend now runs only on the local Linux boxes (edge + control plane).
+    The current release flow is: build the release-signed APK locally
+    (`./gradlew :app:assembleRelease` in the ShopManager app project), then upload it on the edge
+    WebAdmin "App updates" page (http://192.168.0.192:8080/setup-app/updates). That single upload
+    writes version.json AND pushes the same APK to the control-plane onboarding slot
+    (POST /api/onboarding-apk -> /opt/control-plane/apk), covering both serving locations.
+    This script's scp-to-Upsun steps below no longer point at anything live and will fail.
 
 .DESCRIPTION
     1. Bumps versionCode (+1) and versionName in Android app/build.gradle.kts
