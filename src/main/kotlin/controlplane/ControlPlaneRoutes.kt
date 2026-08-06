@@ -9,6 +9,8 @@ import io.ktor.server.html.respondHtml
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.html.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.booleanOrNull
@@ -194,15 +196,22 @@ class ControlPlaneRoutes(
         post("/api/onboarding-apk") {
             onboardingApk.parentFile?.mkdirs()
             val tmp = java.io.File(onboardingApk.parentFile, onboardingApk.name + ".upload")
-            call.receiveStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
-            if (tmp.length() < 100_000) {
-                tmp.delete()
-                return@post call.respond(HttpStatusCode.BadRequest, ErrorDto("APK too small (${tmp.length()} bytes)"))
+            // Stream + move are blocking filesystem IO: run off the event-loop thread, which
+            // prohibits parking (else Ktor throws UnsupportedOperationException mid-upload).
+            val size = withContext(Dispatchers.IO) {
+                call.receiveStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                tmp.length()
             }
-            java.nio.file.Files.move(
-                tmp.toPath(), onboardingApk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-            )
-            call.respond(OkDto(true, "onboarding APK updated (${onboardingApk.length()} bytes)"))
+            if (size < 100_000) {
+                withContext(Dispatchers.IO) { tmp.delete() }
+                return@post call.respond(HttpStatusCode.BadRequest, ErrorDto("APK too small ($size bytes)"))
+            }
+            withContext(Dispatchers.IO) {
+                java.nio.file.Files.move(
+                    tmp.toPath(), onboardingApk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+            call.respond(OkDto(true, "onboarding APK updated ($size bytes)"))
         }
     }
 
