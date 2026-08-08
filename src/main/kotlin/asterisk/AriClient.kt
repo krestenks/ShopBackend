@@ -68,6 +68,10 @@ class AriClient(private val config: AsteriskConfig) {
         putConfig("aor", endpointId, mapOf(
             "max_contacts" to maxContacts.toString(),
             "qualify_frequency" to "30",
+            // Manager phones (esp. Samsung) intermittently stall answering OPTIONS for ~1s+
+            // even on a healthy tailnet, so the default 3s timeout flaps them to Unavailable
+            // and inbound calls hit "line busy". 8s tolerates those app-side stalls.
+            "qualify_timeout" to "8",
             "remove_existing" to "yes",
         ))
         putConfig("auth", "$endpointId-auth", mapOf(
