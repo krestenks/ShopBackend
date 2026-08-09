@@ -150,6 +150,10 @@ data class SipCredentialsResponse(
     val carrier: String? = null,
 )
 
+/** Server-side SIP reachability of the caller's own endpoint (Asterisk's qualify verdict). */
+@Serializable
+data class SipHealthResponse(val reachable: Boolean, val aor: String)
+
 /** Lebara prepaid top-up request (self-service from the app). */
 @Serializable
 data class TopupRequest(val shopId: Int, val code1: String, val code2: String)
@@ -401,6 +405,30 @@ class MobileApi(
                         shopPhoneNumber = tele.phoneNumber,
                         carrier = tele.carrier,
                     ))
+                }
+
+                /**
+                 * Server-side SIP reachability of the caller's own endpoint — the app polls this on
+                 * a slow loop and re-registers when it flips to unreachable. Unlike the app's own
+                 * registration state, this is Asterisk's qualify verdict (the authoritative
+                 * "Unavailable"), delivered over HTTP so it's observable even when SIP itself is
+                 * wedged. Manager → mgr{id} (the pooled inbound identity); shop → shop{id}-phone.
+                 *
+                 * GET /api/mobile/telephony/sip-health
+                 */
+                get("/api/mobile/telephony/sip-health") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val admin = asteriskAdmin
+                        ?: return@get call.respond(HttpStatusCode.NotFound, "Self-hosted telephony not enabled")
+                    val aor = when {
+                        loginInfo.role == "manager" && loginInfo.managerId != null ->
+                            admin.config.managerEndpointId(loginInfo.managerId)
+                        loginInfo.role == "shop" && loginInfo.shopId != null ->
+                            admin.config.phoneEndpointId(loginInfo.shopId)
+                        else -> return@get call.respond(HttpStatusCode.BadRequest, "No SIP identity for this account")
+                    }
+                    val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
+                    call.respond(SipHealthResponse(reachable = reachable, aor = aor))
                 }
 
                 /**

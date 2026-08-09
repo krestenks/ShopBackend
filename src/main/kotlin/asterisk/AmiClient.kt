@@ -118,6 +118,31 @@ class AmiClient(private val config: AsteriskConfig) {
     }
 
     /**
+     * AOR names that currently have at least one REACHABLE (Avail) contact, from
+     * `pjsip show contacts`. This is Asterisk's authoritative qualify verdict — used by the
+     * mobile sip-health endpoint so a phone can learn it has gone Unavailable and re-register.
+     * Empty when AMI is down (caller treats that as inconclusive, not "unreachable").
+     *
+     * Line shape: `  Contact:  mgr2/sip:mgr2@ip:port   <hash>  Avail   <rtt>`
+     */
+    fun pjsipReachableAors(): Set<String> {
+        if (!connected) return emptySet()
+        return try {
+            command("pjsip show contacts").mapNotNull { line ->
+                val t = line.trim()
+                if (!t.startsWith("Contact:")) return@mapNotNull null
+                val cols = t.removePrefix("Contact:").trim().split(Regex("\\s+"))
+                // cols: [aor/contactUri, hash, status, rtt]
+                val aor = cols.getOrNull(0)?.substringBefore('/')?.takeIf { it.isNotBlank() }
+                if (aor != null && cols.getOrNull(2) == "Avail") aor else null
+            }.toSet()
+        } catch (e: Exception) {
+            println("[AMI] pjsip show contacts failed: ${e.message}")
+            emptySet()
+        }
+    }
+
+    /**
      * Labeled fields from `quectel show device state <trunk>` (IMEI, IMSI, State,
      * RSSI, "Provider Name", "GSM Registration Status", ...). Empty on failure.
      * NOTE: chan_quectel caches IMSI/ICCID — after a hot SIM swap this can be stale
