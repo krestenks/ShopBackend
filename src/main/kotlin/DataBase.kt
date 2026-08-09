@@ -522,6 +522,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun createTables() {
         val sqlStatements = listOf(
             """
+            CREATE TABLE IF NOT EXISTS app_setting (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS owners (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 name       TEXT NOT NULL,
@@ -3190,6 +3196,32 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      */
     fun getOnDutyManagerIdsForShop(shopId: Int): List<Int> =
         getManagerIdsForShop(shopId).filter { isManagerOnDuty(it) }
+
+    // ── Generic app settings (small global config, editable from the web admin) ──────
+    fun getSetting(key: String): String? {
+        connection.prepareStatement("SELECT value FROM app_setting WHERE key = ?").use { st ->
+            st.setString(1, key)
+            val rs = st.executeQuery()
+            return if (rs.next()) rs.getString("value") else null
+        }
+    }
+
+    fun setSetting(key: String, value: String?) {
+        if (value == null) {
+            connection.prepareStatement("DELETE FROM app_setting WHERE key = ?").use { st ->
+                st.setString(1, key); st.executeUpdate()
+            }
+            return
+        }
+        connection.prepareStatement("INSERT OR REPLACE INTO app_setting(key, value) VALUES(?, ?)").use { st ->
+            st.setString(1, key); st.setString(2, value); st.executeUpdate()
+        }
+    }
+
+    /** Admin phone that always receives SIP-reachability alerts (set in the web admin; null = none). */
+    fun getSipAlertAdminPhone(): String? = getSetting("sip_alert_admin_phone")?.trim()?.takeIf { it.isNotBlank() }
+    fun setSipAlertAdminPhone(phone: String?) =
+        setSetting("sip_alert_admin_phone", phone?.trim()?.takeIf { it.isNotBlank() })
 
     /** The per-manager SIP password (mgr{id} endpoint), or null if not provisioned yet. */
     fun getManagerSipPassword(managerId: Int): String? {

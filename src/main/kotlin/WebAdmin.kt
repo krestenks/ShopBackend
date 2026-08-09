@@ -368,6 +368,23 @@ class WebAdmin(
                 ) {
                     if (!tmsg.isNullOrBlank()) div("panel") { p { b { +tmsg } } }
 
+                    // ── Reachability alerts ──────────────────────────────────
+                    div("panel") {
+                        h3 { +"Reachability alerts" }
+                        p("hint") {
+                            +"When a shop has an on-duty manager but no reachable phone line, the "
+                            +"system texts that shop's managers (from the shop's SIM). This admin "
+                            +"number always gets the alert too. National (51951735) or +45… format; "
+                            +"leave blank to disable the admin copy."
+                        }
+                        form(action = "/telephony/alert-phone", method = FormMethod.post) {
+                            label { +"Admin alert phone" }
+                            textInput { name = "phone"; value = db.getSipAlertAdminPhone() ?: ""; placeholder = "e.g. 51951735" }
+                            br()
+                            submitInput(classes = "btn primary") { value = "Save admin alert number" }
+                        }
+                    }
+
                     // ── Detected modems / SIMs ───────────────────────────────
                     div("panel") {
                         h3 { +"Modems / SIMs" }
@@ -1309,6 +1326,14 @@ class WebAdmin(
                             "⚠️ Assign failed: ${e.message}"
                         }
                     }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                post("/telephony/alert-phone") {
+                    val phone = call.receiveParameters()["phone"]?.trim().orEmpty()
+                    db.setSipAlertAdminPhone(phone.ifBlank { null })
+                    val msg = if (phone.isBlank()) "✅ Admin alert number cleared."
+                              else "✅ Admin alert number saved: $phone"
                     call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }
 

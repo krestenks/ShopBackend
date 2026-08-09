@@ -42,7 +42,7 @@ class SipReachabilityMonitor(
         }
         Thread({
             while (!amiClient.connected) Thread.sleep(5_000)
-            println("[SipMonitor] started (interval=${CHECK_INTERVAL_MS / 1000}s)")
+            println("[SipMonitor] started (interval=${CHECK_INTERVAL_MS / 1000}s; admin alert phone set in web admin)")
             while (true) {
                 try {
                     runCheck()
@@ -90,22 +90,27 @@ class SipReachabilityMonitor(
     }
 
     private fun alert(shop: Shop) {
-        val recipients = db.getManagerIdsForShop(shop.id)
+        // (label → phone) for logging. Managers with a number on file, plus the admin (always).
+        val managerRecipients = db.getManagerIdsForShop(shop.id)
             .mapNotNull { db.getManagerById(it) }
             .filter { !it.phone.isNullOrBlank() }
-            .distinctBy { it.phone!!.trim() }
+            .map { it.name to it.phone!!.trim() }
+        // Admin number is configured in the web admin (DB), read fresh so changes need no restart.
+        val adminPhone = db.getSipAlertAdminPhone()
+        val recipients = (managerRecipients + listOfNotNull(adminPhone?.let { "admin" to it }))
+            .distinctBy { it.second }   // dedupe if the admin is also a manager on this shop
         if (recipients.isEmpty()) {
-            println("[SipMonitor] ${shop.name} unconnected, but no associated manager has a phone number on file")
+            println("[SipMonitor] ${shop.name} unconnected, but no recipients (no manager phone on file, no admin phone set)")
             return
         }
         // Plain ASCII only — GSM-7 keeps it to one SMS segment and avoids modem UCS-2 quirks.
         val msg = "ALERT: shop '${shop.name}' has no connected phone line right now - an on-duty " +
             "manager is not reachable. Please open the ShopManager app on your phone to reconnect."
         val trunk = config.trunkName(shop.id)
-        println("[SipMonitor] ${shop.name} UNCONNECTED — texting ${recipients.size} manager(s) from $trunk")
-        for (m in recipients) {
-            val res = amiClient.sendSms(trunk, m.phone!!.trim(), msg)
-            println("[SipMonitor]   → ${m.name} <${m.phone}>: ${if (res.success) "sent" else "FAILED (${res.detail})"}")
+        println("[SipMonitor] ${shop.name} UNCONNECTED — texting ${recipients.size} recipient(s) from $trunk")
+        for ((name, phone) in recipients) {
+            val res = amiClient.sendSms(trunk, phone, msg)
+            println("[SipMonitor]   → $name <$phone>: ${if (res.success) "sent" else "FAILED (${res.detail})"}")
         }
     }
 }
