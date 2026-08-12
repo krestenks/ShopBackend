@@ -1,5 +1,6 @@
 import asterisk.AmiClient
 import asterisk.AsteriskConfig
+import asterisk.SmsQueue
 
 /**
  * Watches whether each shop can actually receive calls and — because the system has no
@@ -24,6 +25,7 @@ class SipReachabilityMonitor(
     private val db: DataBase,
     private val config: AsteriskConfig,
     private val amiClient: AmiClient,
+    private val smsQueue: SmsQueue,
     private val enabled: Boolean = System.getenv("SIP_MONITOR_ENABLED")?.lowercase() != "false",
 ) {
     private companion object {
@@ -107,10 +109,10 @@ class SipReachabilityMonitor(
         val msg = "ALERT: shop '${shop.name}' has no connected phone line right now - an on-duty " +
             "manager is not reachable. Please open the ShopManager app on your phone to reconnect."
         val trunk = config.trunkName(shop.id)
-        println("[SipMonitor] ${shop.name} UNCONNECTED — texting ${recipients.size} recipient(s) from $trunk")
+        println("[SipMonitor] ${shop.name} UNCONNECTED — queueing ${recipients.size} alert SMS from $trunk")
         for ((name, phone) in recipients) {
-            val res = amiClient.sendSms(trunk, phone, msg)
-            println("[SipMonitor]   → $name <$phone>: ${if (res.success) "sent" else "FAILED (${res.detail})"}")
+            smsQueue.enqueue(trunk, phone, msg)   // non-blocking; SmsQueue logs the actual send result
+            println("[SipMonitor]   queued → $name <$phone>")
         }
     }
 }

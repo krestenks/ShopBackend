@@ -36,6 +36,13 @@ class QuectelSendSmsAction(
  */
 class AmiClient(private val config: AsteriskConfig) {
 
+    companion object {
+        /** chan_quectel `show devices` states that mean a voice call is in progress on the modem. */
+        val CALL_STATES = setOf(
+            "dialing", "incoming", "active", "alerting", "held", "waiting", "ringing", "calling",
+        )
+    }
+
     private val connection: ManagerConnection =
         ManagerConnectionFactory(config.amiHost, config.amiPort, config.amiUsername, config.amiSecret)
             .createManagerConnection()
@@ -170,6 +177,7 @@ class AmiClient(private val config: AsteriskConfig) {
      * action is missing in the installed driver build.
      */
     fun sendSms(trunkName: String, toNumberE164: String, message: String): AmiSmsResult {
+        // Raw send. Serialization + call-gating live in [SmsQueue], which all senders go through.
         // AMI headers are line-based — a raw newline would corrupt the protocol frame.
         val safeMessage = message.replace("\r", "").replace("\n", "\\n")
         try {
@@ -193,6 +201,10 @@ class AmiClient(private val config: AsteriskConfig) {
             AmiSmsResult(false, "AMI unavailable: ${e.message}")
         }
     }
+
+    /** True while this modem has any active voice call (per `quectel show devices`). */
+    fun trunkInCall(trunk: String): Boolean =
+        quectelDeviceStates()[trunk]?.trim()?.lowercase()?.let { it in CALL_STATES } ?: false
 
     /**
      * Originates a call from a shop's GSM trunk to [destination], connecting it to

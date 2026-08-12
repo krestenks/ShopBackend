@@ -24,8 +24,12 @@ interface TelephonyService {
     /**
      * Sends an SMS to [toNumberE164] out of shop [shopId]'s GSM trunk.
      * [fromNumberE164] is display/persistence metadata — the SIM is the real sender.
+     * [gateOnCall] (default true) briefly defers the send while the modem has a live call, to
+     * avoid AT-port contention. Pass false only for SMS that are sent *during* a call (booking-link).
      */
-    suspend fun sendSms(shopId: Int, fromNumberE164: String, toNumberE164: String, body: String): SmsSendResult
+    suspend fun sendSms(
+        shopId: Int, fromNumberE164: String, toNumberE164: String, body: String, gateOnCall: Boolean = true,
+    ): SmsSendResult
 }
 
 /**

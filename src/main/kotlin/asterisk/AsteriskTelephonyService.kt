@@ -14,11 +14,12 @@ class AsteriskTelephonyService(
     private val amiClient: AmiClient,
     private val config: AsteriskConfig,
     private val db: DataBase,
+    private val smsQueue: SmsQueue,
 ) : TelephonyService {
 
     override val providerName = "asterisk"
 
-    override suspend fun sendSms(shopId: Int, fromNumberE164: String, toNumberE164: String, body: String): SmsSendResult {
+    override suspend fun sendSms(shopId: Int, fromNumberE164: String, toNumberE164: String, body: String, gateOnCall: Boolean): SmsSendResult {
         if (toNumberE164.isBlank()) return SmsSendResult(false, 400, "Missing To number")
         if (!amiClient.connected) {
             return SmsSendResult(false, 503, "Asterisk AMI not connected", errorMessage = "Asterisk AMI not connected")
@@ -31,7 +32,9 @@ class AsteriskTelephonyService(
             )
         }
         val trunk = config.trunkName(shopId)
-        val result = amiClient.sendSms(trunk, toNumberE164, body)
+        // Through the queue: serialized per modem + held until the line is idle. gateOnCall=false
+        // (booking-link, sent during the call) maps to immediate so it doesn't wait/deadlock.
+        val result = smsQueue.enqueue(trunk, toNumberE164, body, immediate = !gateOnCall).await()
         return SmsSendResult(
             success = result.success,
             status = if (result.success) 200 else 500,

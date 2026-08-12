@@ -93,6 +93,9 @@ object ShopBackend {
         // ── Telephony: self-hosted Asterisk/Quectel GSM stack ────────────────
         val asteriskConfig = AsteriskConfig.fromEnv()
         val amiClient = AmiClient(asteriskConfig).also { it.start() }
+        // All outbound SMS route through here: serialized per modem + held until the line is idle,
+        // to avoid AT-port contention that can wedge a modem in "Dialing" (see SmsQueue).
+        val smsQueue = asterisk.SmsQueue(amiClient)
         AsteriskEventHandler(amiClient, db).start()
         val ariClient = AriClient(asteriskConfig)
         val modemScanner = ModemScanner(db, asteriskConfig, amiClient)
@@ -111,7 +114,7 @@ object ShopBackend {
             provisioner = provisioner,
             modemScanner = modemScanner,
         )
-        val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db)
+        val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db, smsQueue)
         println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")
 
         // Startup pass: once AMI is up, re-resolve each assigned SIM's current device
@@ -131,7 +134,11 @@ object ShopBackend {
         // Reachability alerting: text managers on their normal phone numbers when a shop has an
         // on-duty manager but none are SIP-reachable (silent "line busy"). No push-wake, so the
         // SMS is the out-of-band nudge to reopen the app. See [SipReachabilityMonitor].
-        SipReachabilityMonitor(db, asteriskConfig, amiClient).start()
+        SipReachabilityMonitor(db, asteriskConfig, amiClient, smsQueue).start()
+
+        // Auto-recover a GSM modem wedged in a call state (chan_quectel lost a hangup → stuck
+        // "Dialing" → all calls fail until restarted). See [ModemStuckWatchdog].
+        ModemStuckWatchdog(amiClient).start()
 
         // Instantiate route handlers
         val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)

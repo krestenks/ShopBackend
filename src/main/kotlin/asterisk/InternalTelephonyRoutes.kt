@@ -220,7 +220,9 @@ fun Routing.internalTelephonyRoutes(
         val body = "Booking link: $base/api/book?token=$token"
 
         val fromNumber = resolveShopSenderNumber(db, shopId)
-        val result = telephonyService.sendSms(shopId, fromNumber, from, body)
+        // Sent while the caller is still on the line in the IVR — must NOT wait for the line to be
+        // idle (that would deadlock the IVR, which is blocked on this send).
+        val result = telephonyService.sendSms(shopId, fromNumber, from, body, gateOnCall = false)
 
         // Persist the outbound SMS so it shows in the message thread.
         runCatching {
