@@ -34,6 +34,7 @@ val adminNavGroups: List<SidebarGroup> = listOf(
         SidebarItem("/setup-app/download", "Install app", "📲"),
         SidebarItem("/setup-app/updates", "App updates", "⬆️"),
         SidebarItem("/telephony/setup", "Telephony setup", "📞"),
+        SidebarItem("/reliability", "Reliability log", "📋"),
     )),
     SidebarGroup("Platform", listOf(
         SidebarItem("/managers", "Managers", "🧑‍💼"),

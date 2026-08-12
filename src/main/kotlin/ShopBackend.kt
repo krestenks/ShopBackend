@@ -96,6 +96,8 @@ object ShopBackend {
         // All outbound SMS route through here: serialized per modem + held until the line is idle,
         // to avoid AT-port contention that can wedge a modem in "Dialing" (see SmsQueue).
         val smsQueue = asterisk.SmsQueue(amiClient)
+        // Records call-blocking events to the admin log and SMSes the admin (see ReliabilityAlerter).
+        val reliabilityAlerter = asterisk.ReliabilityAlerter(db, asteriskConfig, amiClient, smsQueue)
         AsteriskEventHandler(amiClient, db).start()
         val ariClient = AriClient(asteriskConfig)
         val modemScanner = ModemScanner(db, asteriskConfig, amiClient)
@@ -134,11 +136,11 @@ object ShopBackend {
         // Reachability alerting: text managers on their normal phone numbers when a shop has an
         // on-duty manager but none are SIP-reachable (silent "line busy"). No push-wake, so the
         // SMS is the out-of-band nudge to reopen the app. See [SipReachabilityMonitor].
-        SipReachabilityMonitor(db, asteriskConfig, amiClient, smsQueue).start()
+        SipReachabilityMonitor(db, asteriskConfig, amiClient, smsQueue, reliabilityAlerter).start()
 
         // Auto-recover a GSM modem wedged in a call state (chan_quectel lost a hangup → stuck
-        // "Dialing" → all calls fail until restarted). See [ModemStuckWatchdog].
-        ModemStuckWatchdog(amiClient).start()
+        // "Dialing" → all calls fail until restarted), and flag down modems. See [ModemStuckWatchdog].
+        ModemStuckWatchdog(amiClient, reliabilityAlerter).start()
 
         // Instantiate route handlers
         val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)

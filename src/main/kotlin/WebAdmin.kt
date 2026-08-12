@@ -383,6 +383,7 @@ class WebAdmin(
                             br()
                             submitInput(classes = "btn primary") { value = "Save admin alert number" }
                         }
+                        p { a(href = "/reliability", classes = "btn") { +"📋 View reliability log" } }
                     }
 
                     // ── Detected modems / SIMs ───────────────────────────────
@@ -1312,6 +1313,48 @@ class WebAdmin(
                 }
 
                 // Assign a scanned SIM (by IMSI) to a shop, then auto-provision.
+                get("/reliability") {
+                    val events = db.getReliabilityEvents(200)
+                    val fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d  HH:mm:ss")
+                        .withZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                    call.respondAdminPage(
+                        titleText = "Reliability log",
+                        subtitle = "Auto-detected modem restarts and call-blocking events (newest first)",
+                        activePath = "/reliability",
+                    ) {
+                        div("panel") {
+                            p("hint") {
+                                +"Problems the system detected and (where possible) recovered from. Events flagged "
+                                +"for the admin also SMS the number set under Telephony setup → Reachability alerts."
+                            }
+                            if (events.isEmpty()) {
+                                p { +"No events recorded yet." }
+                            } else {
+                                table {
+                                    thead { tr { th { +"Time" }; th { +"Severity" }; th { +"Category" }; th { +"Shop" }; th { +"Detail" } } }
+                                    tbody {
+                                        for (e in events) {
+                                            tr {
+                                                td { +fmt.format(java.time.Instant.ofEpochMilli(e.createdAt)) }
+                                                td {
+                                                    +when (e.severity) {
+                                                        "error" -> "🔴 error"
+                                                        "warn" -> "🟠 warn"
+                                                        else -> "🟢 info"
+                                                    }
+                                                }
+                                                td { code { +e.category } }
+                                                td { +(e.shopId?.let { db.getShopById(it)?.name ?: "shop $it" } ?: "-") }
+                                                td { +e.message }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 post("/telephony/assign") {
                     val params = call.receiveParameters()
                     val imsi = params["imsi"]?.trim().orEmpty()

@@ -1,5 +1,6 @@
 import asterisk.AmiClient
 import asterisk.AsteriskConfig
+import asterisk.ReliabilityAlerter
 import asterisk.SmsQueue
 
 /**
@@ -26,6 +27,7 @@ class SipReachabilityMonitor(
     private val config: AsteriskConfig,
     private val amiClient: AmiClient,
     private val smsQueue: SmsQueue,
+    private val alerter: ReliabilityAlerter,
     private val enabled: Boolean = System.getenv("SIP_MONITOR_ENABLED")?.lowercase() != "false",
 ) {
     private companion object {
@@ -93,26 +95,30 @@ class SipReachabilityMonitor(
 
     private fun alert(shop: Shop) {
         // (label → phone) for logging. Managers with a number on file, plus the admin (always).
-        val managerRecipients = db.getManagerIdsForShop(shop.id)
+        val managers = db.getManagerIdsForShop(shop.id)
             .mapNotNull { db.getManagerById(it) }
             .filter { !it.phone.isNullOrBlank() }
             .map { it.name to it.phone!!.trim() }
-        // Admin number is configured in the web admin (DB), read fresh so changes need no restart.
-        val adminPhone = db.getSipAlertAdminPhone()
-        val recipients = (managerRecipients + listOfNotNull(adminPhone?.let { "admin" to it }))
-            .distinctBy { it.second }   // dedupe if the admin is also a manager on this shop
-        if (recipients.isEmpty()) {
-            println("[SipMonitor] ${shop.name} unconnected, but no recipients (no manager phone on file, no admin phone set)")
-            return
-        }
+            .distinctBy { it.second }
         // Plain ASCII only — GSM-7 keeps it to one SMS segment and avoids modem UCS-2 quirks.
         val msg = "ALERT: shop '${shop.name}' has no connected phone line right now - an on-duty " +
             "manager is not reachable. Please open the ShopManager app on your phone to reconnect."
         val trunk = config.trunkName(shop.id)
-        println("[SipMonitor] ${shop.name} UNCONNECTED — queueing ${recipients.size} alert SMS from $trunk")
-        for ((name, phone) in recipients) {
-            smsQueue.enqueue(trunk, phone, msg)   // non-blocking; SmsQueue logs the actual send result
-            println("[SipMonitor]   queued → $name <$phone>")
+        if (managers.isNotEmpty()) {
+            println("[SipMonitor] ${shop.name} UNCONNECTED — queueing ${managers.size} manager alert SMS from $trunk")
+            for ((name, phone) in managers) {
+                smsQueue.enqueue(trunk, phone, msg)   // non-blocking; SmsQueue logs the actual send result
+                println("[SipMonitor]   queued → $name <$phone>")
+            }
+        } else {
+            println("[SipMonitor] ${shop.name} UNCONNECTED — no associated manager has a phone number on file")
         }
+        // Record it + notify the admin (centralized: logged to the admin event log, admin SMS from a
+        // healthy SIM, rate-limited).
+        alerter.record(
+            "warn", "shop_unconnected", shop.id,
+            "Shop '${shop.name}' has no reachable phone line (on-duty manager unreachable)",
+            alertAdmin = true,
+        )
     }
 }

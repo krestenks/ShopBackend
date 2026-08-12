@@ -51,6 +51,11 @@ data class SimpleEmployee(val id: Int, val name: String)
 data class SimpleService(val id: Int, val name: String, val duration: Int)
 @Serializable
 data class Manager(val id: Int = 0, val name: String, val username: String, val passwordHash: String, val phone: String?)
+/** A reliability/telephony event surfaced in the admin log (modem restarts, call-blocking, …). */
+data class ReliabilityEvent(
+    val id: Int, val createdAt: Long, val severity: String, val category: String,
+    val shopId: Int?, val message: String,
+)
 @Serializable
 data class Employee(val id: Int = 0, val name: String, val phone: String?)
 @Serializable
@@ -525,6 +530,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             CREATE TABLE IF NOT EXISTS app_setting (
                 key   TEXT PRIMARY KEY,
                 value TEXT
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS reliability_event (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                severity   TEXT NOT NULL,   -- info | warn | error
+                category   TEXT NOT NULL,   -- modem_restart | modem_down | shop_unconnected | ...
+                shop_id    INTEGER,
+                message    TEXT NOT NULL
             );
             """,
             """
@@ -3222,6 +3237,42 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getSipAlertAdminPhone(): String? = getSetting("sip_alert_admin_phone")?.trim()?.takeIf { it.isNotBlank() }
     fun setSipAlertAdminPhone(phone: String?) =
         setSetting("sip_alert_admin_phone", phone?.trim()?.takeIf { it.isNotBlank() })
+
+    // ── Reliability event log (modem restarts, call-blocking detections, …) ──────────
+    fun recordReliabilityEvent(severity: String, category: String, shopId: Int?, message: String) {
+        connection.prepareStatement(
+            "INSERT INTO reliability_event(created_at, severity, category, shop_id, message) VALUES(?,?,?,?,?)"
+        ).use { st ->
+            st.setLong(1, System.currentTimeMillis())
+            st.setString(2, severity)
+            st.setString(3, category)
+            if (shopId != null) st.setInt(4, shopId) else st.setNull(4, java.sql.Types.INTEGER)
+            st.setString(5, message)
+            st.executeUpdate()
+        }
+        // Keep the table small: drop anything beyond the most recent 1000 rows.
+        connection.prepareStatement(
+            "DELETE FROM reliability_event WHERE id NOT IN (SELECT id FROM reliability_event ORDER BY id DESC LIMIT 1000)"
+        ).use { it.executeUpdate() }
+    }
+
+    fun getReliabilityEvents(limit: Int = 200): List<ReliabilityEvent> {
+        val out = ArrayList<ReliabilityEvent>()
+        connection.prepareStatement(
+            "SELECT id, created_at, severity, category, shop_id, message FROM reliability_event ORDER BY id DESC LIMIT ?"
+        ).use { st ->
+            st.setInt(1, limit)
+            val rs = st.executeQuery()
+            while (rs.next()) {
+                val sid = rs.getInt("shop_id").let { if (rs.wasNull()) null else it }
+                out.add(ReliabilityEvent(
+                    rs.getInt("id"), rs.getLong("created_at"), rs.getString("severity"),
+                    rs.getString("category"), sid, rs.getString("message"),
+                ))
+            }
+        }
+        return out
+    }
 
     /** The per-manager SIP password (mgr{id} endpoint), or null if not provisioned yet. */
     fun getManagerSipPassword(managerId: Int): String? {
