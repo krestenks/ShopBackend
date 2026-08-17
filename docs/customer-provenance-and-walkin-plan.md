@@ -161,8 +161,14 @@ open `CustomerDetailActivity` for the new id so the manager can book straight aw
 3. Feature 1 Level B — only after confirming the colour must mean "this manager", and whether
    it covers fields beyond the name.
 
-## Open questions for Kresten
+## Decisions (Kresten, 2026-08-17)
 
-1. Does the colour mean "a human typed it" (Level A) or "*this manager* typed it" (Level B)?
-2. Name only, or status/payment/language too?
-3. Must walk-ins be creatable with **no** phone number at all?
+1. Colour means **"a human typed it"** → **Level A**. No schema change, no provenance columns.
+   **Level B is dropped** unless the requirement changes.
+2. **Name only.** Do not colour status / payment / language — which is exactly why Level A is
+   sufficient, since only the name has the `'NoName'` sentinel to infer from.
+3. **Phone required** for walk-ins → option **(a)**. No synthetic-key work, nothing downstream
+   changes.
+
+This settles the whole plan: build Feature 2 (a), then Feature 1 Level A. Nothing here needs a
+migration, so the two features can land in either order and ship independently.
