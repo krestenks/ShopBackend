@@ -47,6 +47,15 @@ class SetupAppRoutes(
     private val controlPlaneUrl: String = System.getenv("CONTROL_PLANE_URL")?.trimEnd('/') ?: "",
     /** This edge box's per-tenant control-plane token (scopes invites to this tenant). */
     private val edgeToken: String = System.getenv("CONTROL_PLANE_EDGE_TOKEN") ?: "",
+    /**
+     * App-facing base URL the phone uses to reach THIS edge after joining the tailnet — set to the
+     * edge's tailnet IP (e.g. http://100.64.0.4:8080). Used for the onboarding `api=` and the OTA
+     * apkUrl so the app never depends on resolving a `*.ts.warpfactor.dk` hostname (MagicDNS is
+     * flaky, and the public wildcard for that domain is a dead IP → 10s timeouts / blank screen).
+     * Distinct from [baseUrl]/PUBLIC_BASE_URL, which must stay public for customer booking links.
+     * Unset → previous behaviour (control-plane hostname template + PUBLIC_BASE_URL).
+     */
+    private val appBaseUrl: String? = System.getenv("APP_BASE_URL")?.trim()?.trimEnd('/')?.takeIf { it.isNotBlank() },
 ) {
     @Serializable
     data class SetupAppSession(
@@ -68,7 +77,11 @@ class SetupAppRoutes(
         val invBody = cpClient.post("$controlPlaneUrl/api/invites") {
             header(HttpHeaders.Authorization, "Bearer $edgeToken")
             contentType(ContentType.Application.Json)
-            setBody(buildJsonObject { put("deviceLabel", label) }.toString())
+            setBody(buildJsonObject {
+                put("deviceLabel", label)
+                // Point the app at this edge's tailnet IP (not the flaky public hostname) when set.
+                appBaseUrl?.let { put("edgeApiUrl", it) }
+            }.toString())
         }.bodyAsText()
         val inv = Json.parseToJsonElement(invBody).jsonObject
         val deepLink = inv["deepLink"]?.jsonPrimitive?.contentOrNull
@@ -170,9 +183,11 @@ class SetupAppRoutes(
         return d.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** Base URL for the OTA apkUrl. Reuses the host of the currently-published apkUrl (known-good
-     *  tailnet MagicDNS), else APP_UPDATE_BASE_URL, else PUBLIC_BASE_URL. */
+    /** Base URL for the OTA apkUrl. Prefers the app-facing tailnet IP ([appBaseUrl]) so OTA never
+     *  depends on the public hostname; else reuses the host of the currently-published apkUrl, else
+     *  APP_UPDATE_BASE_URL, else PUBLIC_BASE_URL. */
     private fun currentUpdateBase(): String {
+        appBaseUrl?.let { return it }
         readVersionInfo().apkUrl?.let { existing ->
             val idx = existing.indexOf("/api/app/download/")
             if (idx > 0) return existing.substring(0, idx)
