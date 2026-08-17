@@ -1960,6 +1960,43 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return getCustomerIdByPhone(phone) ?: insertNewCustomer(phone)
     }
 
+    /**
+     * Creates a customer the manager entered deliberately (a walk-in), as opposed to the stub
+     * [insertNewCustomer] makes for an unknown caller.
+     *
+     * Differs from the stub in three ways that matter: a real name instead of 'NoName', a status
+     * that is NOT 'New' (that value marks an auto-created stub and gates SMS booking), and
+     * [ownerId] actually set — the stub path leaves it NULL despite the column and
+     * idx_customers_owner existing.
+     *
+     * Returns the new customer id. Callers must check [getCustomerIdByPhone] first if they want
+     * upsert behaviour; this always inserts.
+     */
+    fun createCustomer(
+        phone: String,
+        name: String,
+        status: String = "Regular",
+        payment: Int = 0,
+        language: Int = 0,
+        ownerId: Int? = null,
+    ): Int {
+        connection.prepareStatement(
+            "INSERT INTO customers (phone, name, status, payment, language, owner_id) VALUES (?, ?, ?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setString(1, phone.trim())
+            stmt.setString(2, name.trim())
+            stmt.setString(3, status.trim().ifBlank { "Regular" })
+            stmt.setInt(4, payment)
+            stmt.setInt(5, language)
+            if (ownerId != null && ownerId > 0) stmt.setInt(6, ownerId) else stmt.setNull(6, java.sql.Types.INTEGER)
+            stmt.executeUpdate()
+        }
+        connection.createStatement().use { idStmt ->
+            val rs = idStmt.executeQuery("SELECT last_insert_rowid()")
+            return if (rs.next()) rs.getInt(1) else error("Failed to retrieve new customer id")
+        }
+    }
+
     fun updateCustomerName(customerId: Int, name: String) {
         connection.prepareStatement("UPDATE customers SET name = ? WHERE id = ?").use { stmt ->
             stmt.setString(1, name.trim())

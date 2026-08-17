@@ -116,6 +116,40 @@ data class UpdateCustomerRequest(
 @Serializable
 data class CustomerDetailResponse(val customer: Customer, val appointments: List<AppointmentWithServices>)
 
+/** Walk-in customer entered by the manager. Phone and name are required; the rest default. */
+@Serializable
+data class CreateCustomerRequest(
+    val phone: String,
+    val name: String,
+    val status: String? = null,
+    val payment: Int? = null,
+    val language: Int? = null,
+)
+
+@Serializable
+data class CreateCustomerResponse(
+    val customer: Customer,
+    /** True when the phone already belonged to a customer and we filled that one in instead. */
+    val alreadyExisted: Boolean,
+)
+
+/**
+ * Light normalisation for a hand-typed phone number.
+ *
+ * Must line up with how inbound caller IDs arrive from Asterisk (E.164, e.g. `+4550233444`), or
+ * a walk-in will not match their own later call — [DataBase.getCustomerIdByPhone] compares the
+ * stored string exactly. Strips spaces and punctuation and converts a `00` prefix to `+`;
+ * deliberately does NOT invent a country code, since guessing one would silently create
+ * unmatchable records.
+ */
+fun normalizeCustomerPhone(raw: String): String {
+    val cleaned = raw.trim().filter { it.isDigit() || it == '+' }
+    return when {
+        cleaned.startsWith("00") -> "+" + cleaned.removePrefix("00")
+        else -> cleaned
+    }
+}
+
 @Serializable
 data class LoginRequest(val username: String, val password: String)
 @Serializable
@@ -612,6 +646,74 @@ class MobileApi(
 
                     db.updateCustomerEditable(customerId, body.name, body.status, body.payment, body.language)
                     call.respond(HttpStatusCode.NoContent)
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // Walk-in customer: created by the manager, not by an inbound call
+                // ─────────────────────────────────────────────────────────────
+
+                /**
+                 * Creates (or adopts) a customer the manager entered by hand.
+                 *
+                 * Upserts rather than 409-ing on a known phone: a manager typing in a walk-in who
+                 * happens to have called before should get that customer, not a duplicate-key
+                 * error mid-conversation. [CreateCustomerResponse.alreadyExisted] tells the app
+                 * which happened so it can say so.
+                 */
+                post("/api/mobile/manager/shops/{shopId}/customers") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@post
+                    }
+
+                    val body = runCatching { call.receive<CreateCustomerRequest>() }.getOrNull()
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+
+                    val phone = normalizeCustomerPhone(body.phone)
+                    if (phone.isBlank()) {
+                        call.respond(HttpStatusCode.BadRequest, "A phone number is required")
+                        return@post
+                    }
+                    val name = body.name.trim()
+                    if (name.isBlank()) {
+                        call.respond(HttpStatusCode.BadRequest, "A name is required")
+                        return@post
+                    }
+
+                    val existingId = db.getCustomerIdByPhone(phone)
+                    if (existingId != null) {
+                        // Known number: fill in what the manager typed rather than creating a twin.
+                        val existing = db.getCustomerById(existingId)
+                        db.updateCustomerEditable(
+                            existingId,
+                            name,
+                            body.status?.trim()?.ifBlank { null } ?: existing?.status?.takeIf { it != "New" } ?: "Regular",
+                            body.payment ?: existing?.payment ?: 0,
+                            body.language ?: existing?.language ?: 0,
+                        )
+                        println("[MobileApi/customers] adopted existing customer id=$existingId phone=$phone")
+                        val merged = db.getCustomerById(existingId)!!
+                        call.respond(CreateCustomerResponse(customer = merged, alreadyExisted = true))
+                        return@post
+                    }
+
+                    val ownerId = loginInfo.ownerId.takeIf { it > 0 }
+                        ?: loginInfo.managerId?.let { db.getOwnerIdForManager(it) }
+                    val newId = db.createCustomer(
+                        phone = phone,
+                        name = name,
+                        // NOT "New": that value marks an auto-created stub and gates SMS booking.
+                        status = body.status?.trim()?.ifBlank { null } ?: "Regular",
+                        payment = body.payment ?: 0,
+                        language = body.language ?: 0,
+                        ownerId = ownerId,
+                    )
+                    println("[MobileApi/customers] created walk-in customer id=$newId phone=$phone owner=$ownerId")
+                    call.respond(CreateCustomerResponse(customer = db.getCustomerById(newId)!!, alreadyExisted = false))
                 }
 
                 // ─────────────────────────────────────────────────────────────
