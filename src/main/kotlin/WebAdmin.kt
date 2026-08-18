@@ -1052,6 +1052,21 @@ class WebAdmin(
                             }
 
                             hr()
+                            h3 { +"Incoming calls" }
+                            hiddenInput { name = "reject_withheld_form"; value = "1" }
+                            label {
+                                checkBoxInput {
+                                    name = "reject_withheld_callers"
+                                    checked = voiceConfig.rejectWithheldCallers
+                                }
+                                +" Reject callers who withhold their number"
+                            }
+                            p("hint") {
+                                +("They are hung up on immediately and never ring the phone. The attempt still "
+                                  + "appears in the call log. Off by default — these are usually real customers.")
+                            }
+                            br()
+
                             h3 { +"Data retention (per shop)" }
                             p("hint") {
                                 +"Communication history (SMS + calls) and customer profiles are automatically deleted after the configured number of days when there is no new activity."
@@ -3403,6 +3418,11 @@ class WebAdmin(
                         smsTranslateLang = if (params.contains("sms_translate_lang"))
                             params["sms_translate_lang"]?.trim()?.takeIf { it.isNotBlank() }
                         else db.getShopVoiceConfig(id).smsTranslateLang,
+                        // See the admin handler: the hidden marker distinguishes "unticked" from
+                        // "this form never rendered the field", which a bare checkbox cannot.
+                        rejectWithheldCallers = if (params.contains("reject_withheld_form"))
+                            params["reject_withheld_callers"] == "on"
+                        else db.getShopVoiceConfig(id).rejectWithheldCallers,
                     )
                     db.upsertShopVoiceConfig(voice)
 
