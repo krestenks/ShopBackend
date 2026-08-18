@@ -195,6 +195,11 @@ data class ShopVoiceConfig(
      * for display alongside the original. Null/blank = no SMS translation for this shop.
      */
     val smsTranslateLang: String? = null,
+    /**
+     * Reject inbound calls whose caller ID the network withheld (see `isWithheldCaller`).
+     * Defaults OFF: this silently drops real customers, so each shop opts in deliberately.
+     */
+    val rejectWithheldCallers: Boolean = false,
 )
 
 /**
@@ -237,6 +242,8 @@ data class ShopTelephonyConfig(
 enum class VoiceCallState {
     INCOMING_CALL,
     REJECTED_BLACKLISTED,
+    /** Caller withheld their number and the shop rejects those. See [VoiceCallOutcome.WITHHELD_REJECTED]. */
+    REJECTED_WITHHELD,
     IDENTIFY_CUSTOMER,
     CHECK_OPENING_HOURS,
     CHECK_TEMP_OPERATOR_CLOSURE,
@@ -254,6 +261,8 @@ enum class VoiceCallState {
 
 enum class VoiceCallOutcome {
     BLACKLIST_REJECTED,
+    /** Dropped because the network gave us no caller ID and the shop opted to reject those. */
+    WITHHELD_REJECTED,
     CLOSED_HOURS,
     TEMP_OPERATOR_CLOSED,
     OPERATOR_BUSY,
@@ -824,6 +833,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shop_voice_config ADD COLUMN sms_price_list_footer TEXT",
             // ISO-639-1 staff language for inbound-SMS auto-translation (null = disabled)
             "ALTER TABLE shop_voice_config ADD COLUMN sms_translate_lang TEXT",
+            // Per-shop opt-in to dropping callers who withhold their number (0 = off)
+            "ALTER TABLE shop_voice_config ADD COLUMN reject_withheld_callers INTEGER NOT NULL DEFAULT 0",
             // IMSI-keyed telephony assignment (shop bound to a SIM, not a USB port)
             "ALTER TABLE shop_telephony_config ADD COLUMN imsi TEXT",
             // SIP credential for the in-shop device (internal intercom calls)
@@ -1031,7 +1042,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             SELECT shop_id, operator_phone, welcome_open_message, welcome_closed_message,
                    temporary_operator_closed, temporary_operator_closed_message, business_name, phone_override,
                    communication_retention_days, customer_retention_days, sms_price_list_footer,
-                   sms_translate_lang
+                   sms_translate_lang, reject_withheld_callers
             FROM shop_voice_config WHERE shop_id = ?
         """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
@@ -1052,6 +1063,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 90 } catch (_: Exception) { 90 },
                     smsPriceListFooter = try { rs.getString("sms_price_list_footer")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
                     smsTranslateLang = try { rs.getString("sms_translate_lang")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
+                    rejectWithheldCallers = try { rs.getInt("reject_withheld_callers") != 0 } catch (_: Exception) { false },
                 )
             } else {
                 ShopVoiceConfig(shopId)
@@ -1064,8 +1076,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             INSERT INTO shop_voice_config (shop_id, operator_phone, welcome_open_message,
                 welcome_closed_message, temporary_operator_closed, temporary_operator_closed_message,
                 business_name, phone_override, communication_retention_days, customer_retention_days,
-                sms_price_list_footer, sms_translate_lang)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sms_price_list_footer, sms_translate_lang, reject_withheld_callers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(shop_id) DO UPDATE SET
                 operator_phone = excluded.operator_phone,
                 welcome_open_message = excluded.welcome_open_message,
@@ -1077,7 +1089,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 communication_retention_days = excluded.communication_retention_days,
                 customer_retention_days = excluded.customer_retention_days,
                 sms_price_list_footer = excluded.sms_price_list_footer,
-                sms_translate_lang = excluded.sms_translate_lang
+                sms_translate_lang = excluded.sms_translate_lang,
+                reject_withheld_callers = excluded.reject_withheld_callers
         """.trimIndent()
 
         connection.prepareStatement(sql).use { stmt ->
@@ -1093,6 +1106,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(10, config.customerRetentionDays)
             stmt.setString(11, config.smsPriceListFooter?.trim()?.takeIf { it.isNotBlank() })
             stmt.setString(12, config.smsTranslateLang?.trim()?.takeIf { it.isNotBlank() })
+            stmt.setInt(13, if (config.rejectWithheldCallers) 1 else 0)
             stmt.executeUpdate()
         }
     }

@@ -1614,6 +1614,12 @@ class WebAdmin(
                         smsTranslateLang = if (params.contains("sms_translate_lang"))
                             params["sms_translate_lang"]?.trim()?.takeIf { it.isNotBlank() }
                         else db.getShopVoiceConfig(id).smsTranslateLang,
+                        // An unchecked checkbox posts nothing, so "absent" is ambiguous: it means
+                        // either "unticked" or "this form never showed the field". Distinguish via
+                        // the hidden marker below, or a form without it would silently clear the flag.
+                        rejectWithheldCallers = if (params.contains("reject_withheld_form"))
+                            params["reject_withheld_callers"] == "on"
+                        else db.getShopVoiceConfig(id).rejectWithheldCallers,
                     )
                     db.upsertShopVoiceConfig(voice)
 
@@ -3230,6 +3236,21 @@ class WebAdmin(
                                         +labelText
                                     }
                                 }
+                            }
+
+                            hr()
+                            h3 { +"Incoming calls" }
+                            hiddenInput { name = "reject_withheld_form"; value = "1" }
+                            label {
+                                checkBoxInput {
+                                    name = "reject_withheld_callers"
+                                    checked = voiceConfig.rejectWithheldCallers
+                                }
+                                +" Reject callers who withhold their number"
+                            }
+                            p("hint") {
+                                +("They are hung up on immediately and never ring the phone. The attempt still "
+                                  + "appears in the call log. Off by default — these are usually real customers.")
                             }
 
                             hr()

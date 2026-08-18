@@ -20,11 +20,26 @@ import telephony.resolveShopSenderNumber
  *   POST /api/internal/telephony/sms/inbound   secret, shopId, from, body
  *   POST /api/internal/telephony/call/inbound  secret, shopId, from, uniqueid
  *       → routing verdict: reject | ring | menu_open | menu_closed | menu_temp
+ *       (the menu_* verdicts are legacy — the DTMF menu is disabled and never reached)
  *   POST /api/internal/telephony/booking-link  secret, shopId, from, uniqueid → ok | fail
  *   POST /api/internal/telephony/call/event    secret, uniqueid, event (operator | menu_timeout)
  *   POST /api/internal/telephony/provision     secret [, shopId] — re-provision Asterisk
  *       (curl-able stopgap until the admin web UI gets a provision button)
  */
+/**
+ * Caller IDs that mean "the network withheld this number".
+ *
+ * Our GSM modems report withheld callers as an EMPTY string — verified against the call log,
+ * where every such row has a blank `from_phone` and no placeholder text. The literals are here
+ * because other carriers and a future chan_quectel may send a placeholder instead, and matching
+ * only "" would silently stop working if that ever changed.
+ */
+private val WITHHELD_CALLER_IDS = setOf("anonymous", "unknown", "restricted", "private", "withheld")
+
+/** True when the network gave us no usable caller ID. */
+internal fun isWithheldCaller(from: String): Boolean =
+    from.isBlank() || from.trim().lowercase() in WITHHELD_CALLER_IDS
+
 fun Routing.internalTelephonyRoutes(
     db: DataBase,
     config: AsteriskConfig,
@@ -97,6 +112,27 @@ fun Routing.internalTelephonyRoutes(
         val toPhone = db.getShopTelephonyConfig(shopId).phoneNumber ?: ""
         val callId = db.createInboundCallLog(shopId, uniqueId, from, toPhone)
         db.updateCallState(callId, VoiceCallState.INCOMING_CALL, "asterisk uniqueid=$uniqueId")
+
+        // Withheld caller: drop before any identification work, since there is nothing to
+        // identify. Placed AFTER the call-log row above on purpose — the manager should still
+        // see that someone tried. Opt-in per shop; default off.
+        if (db.getShopVoiceConfig(shopId).rejectWithheldCallers && isWithheldCaller(from)) {
+            db.updateCallState(callId, VoiceCallState.REJECTED_WITHHELD, "caller withheld their number")
+            db.terminateCall(callId, VoiceCallOutcome.WITHHELD_REJECTED)
+            // Logged, not SMS-alerted: this fires roughly once a day, so an alert would be noise,
+            // but a manager asking "are we missing calls?" needs somewhere to find the answer.
+            runCatching {
+                db.recordReliabilityEvent(
+                    severity = "info",
+                    category = "withheld_rejected",
+                    shopId = shopId,
+                    message = "Rejected a call from a withheld number (uniqueid=$uniqueId)",
+                )
+            }
+            println("[Asterisk/call-inbound] REJECT withheld caller shop=$shopId uniqueid=$uniqueId")
+            call.respondText("reject")
+            return@post
+        }
 
         // Identify the customer; auto-create a "New" row so the app can open a profile.
         // "Known" (whitelisted) = existing row whose status is set and not "New".
