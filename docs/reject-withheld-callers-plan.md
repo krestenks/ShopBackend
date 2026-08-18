@@ -127,6 +127,10 @@ it; at ~1 per day that would be noise.
   nobody to reject). Leave it.
 - **Blacklisting withheld callers.** Meaningless — there is no number to key on. The feature
   above is the substitute.
+- **The dead voice menu / booking-link code.** Tempting to delete while in here, but that is a
+  separate change with its own blast radius (dialplan regeneration, prompt files, the
+  `KNOWN_CUSTOMER_*` states and `SMS_SENT` outcome that historic rows still reference). Leave it
+  alone for this feature.
 
 ## Testing
 
@@ -145,10 +149,29 @@ preference:
 
 Verify on a shop with the toggle OFF too, confirming nothing changes for it.
 
-## Open question
+## Decision (Kresten, 2026-08-17): reject outright
 
-The 11 rows show these calls **do** get answered sometimes (`OPERATOR_BRIDGED` twice). Worth
-deciding whether rejecting outright is right, or whether they should get the closed-menu treatment
-instead (SMS booking link, no operator) — which turns a withheld caller into a booking rather than
-a dropped customer. That is a small variation on the same branch: return `menu_closed` instead of
-`reject`.
+Withheld callers get `reject` -> `Hangup(21)`. No menu, no booking link, no second chance.
+
+The alternative I had floated (give them the closed menu so they could still self-book) is
+**dead on arrival**: the DTMF voice menu and the SMS booking links are switched off and no longer
+used. Confirmed in the data — 229 calls over the last 30 days produced only:
+
+```
+OPERATOR_DECLINED   105
+OPERATOR_BRIDGED     88
+BLACKLIST_REJECTED   29
+CLOSED_HOURS          7
+```
+
+Not one menu state, and not one `SMS_SENT`. The `isKnown` branch in `call/inbound` that returns
+`menu_open` / `menu_closed` / `menu_temp` is never reached in practice, and the dialplan's
+`welcome*`, `menu*` and `smslink` extensions are dead code that Asterisk still carries.
+
+Consequences for this feature:
+
+- There are only three live paths through `call/inbound`: blacklist -> reject, closed -> reject,
+  otherwise ring the on-duty pool. The withheld branch is simply a fourth reject, checked first.
+- Do not spend effort on how withheld callers interact with the menu — nothing does.
+- The implementer should not "fix" the menu branch if it looks unreachable while working here.
+  It is unreachable on purpose.
