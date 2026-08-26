@@ -1,6 +1,7 @@
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.application.*
+import io.ktor.server.response.respond
 import io.ktor.server.sessions.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
@@ -142,6 +143,14 @@ object ShopBackend {
         // "Dialing" → all calls fail until restarted), and flag down modems. See [ModemStuckWatchdog].
         ModemStuckWatchdog(amiClient, reliabilityAlerter).start()
 
+        // Once a day, refresh each Lebara shop's prepaid balance so a low balance surfaces as a
+        // top-up nudge in the manager app (see [LebaraBalanceMonitor] + the balance-alerts endpoint).
+        LebaraBalanceMonitor(db, telephonyService, amiClient).start()
+
+        // Unified health snapshot (per-shop call-readiness) behind /health, plus the dormant
+        // last-resort Asterisk auto-restart. See [SystemHealthMonitor].
+        val systemHealthMonitor = SystemHealthMonitor(db, asteriskConfig, amiClient, reliabilityAlerter).also { it.start() }
+
         // Instantiate route handlers
         val webAdmin = WebAdmin(db, telephonyService, asteriskAdmin)
         val customerApi = CustomerApi(db, telephonyService)
@@ -206,6 +215,16 @@ object ShopBackend {
             JwtConfig.install(this, db)
 
             routing {
+                // Liveness/health snapshot for the external cron backstop + at-a-glance ops.
+                // Unauthenticated on purpose (no sensitive data); 200 when every covered shop is
+                // call-ready, 503 otherwise so `curl -fsS` can gate a restart.
+                get("/health") {
+                    val snap = systemHealthMonitor.snapshot
+                    call.respond(
+                        if (snap.ok) io.ktor.http.HttpStatusCode.OK else io.ktor.http.HttpStatusCode.ServiceUnavailable,
+                        snap,
+                    )
+                }
                 route("/") {
                     webAdmin.setupRoutes(this)
                     financialReportRoutes(db)

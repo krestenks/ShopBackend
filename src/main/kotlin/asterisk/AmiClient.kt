@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import org.asteriskjava.manager.ManagerConnection
 import org.asteriskjava.manager.ManagerConnectionFactory
+import org.asteriskjava.manager.ManagerConnectionState
 import org.asteriskjava.manager.action.AbstractManagerAction
 import org.asteriskjava.manager.action.CommandAction
 import org.asteriskjava.manager.action.ManagerAction
@@ -55,13 +56,21 @@ class AmiClient(private val config: AsteriskConfig) {
     /** Stream of raw AMI events (dropped-oldest on overflow; consumers must keep up). */
     val events: SharedFlow<ManagerEvent> = eventFlow
 
-    @Volatile
-    var connected = false
-        private set
+    /**
+     * True only while the AMI socket is genuinely logged in. Derived from asterisk-java's LIVE
+     * connection state, not a one-shot flag — so it correctly flips back to false on a POST-login
+     * disconnect and back to true once asterisk-java reconnects. The old boolean was set true once
+     * after first login and never reset except in [stop], so a dropped AMI socket read "connected"
+     * forever and made every reachability check (sip-health, the SMS monitor) silently lie —
+     * inverting the whole fleet's notion of "reachable" to "unreachable" on any AMI hiccup. [audit H1]
+     */
+    val connected: Boolean
+        get() = runCatching { connection.state == ManagerConnectionState.CONNECTED }.getOrDefault(false)
 
     /**
      * Registers the event listener and logs in on a background daemon thread,
-     * retrying every [retryDelayMs] until the first login succeeds.
+     * retrying every [retryDelayMs] until the first login succeeds. asterisk-java keeps the socket
+     * alive and reconnects on its own afterwards; [connected] tracks that live state.
      */
     fun start(retryDelayMs: Long = 10_000) {
         connection.addEventListener { event -> eventFlow.tryEmit(event) }
@@ -69,11 +78,9 @@ class AmiClient(private val config: AsteriskConfig) {
             while (true) {
                 try {
                     connection.login()
-                    connected = true
                     println("[AMI] Connected to ${config.amiHost}:${config.amiPort} as ${config.amiUsername}")
                     return@Thread
                 } catch (e: Exception) {
-                    connected = false
                     println("[AMI] Login failed (${e.message}) — retrying in ${retryDelayMs / 1000}s")
                     Thread.sleep(retryDelayMs)
                 }
@@ -83,7 +90,6 @@ class AmiClient(private val config: AsteriskConfig) {
 
     fun stop() {
         runCatching { connection.logoff() }
-        connected = false
     }
 
     fun sendAction(action: ManagerAction, timeoutMs: Long = 10_000): ManagerResponse =

@@ -188,6 +188,21 @@ data class SipCredentialsResponse(
 @Serializable
 data class SipHealthResponse(val reachable: Boolean, val aor: String)
 
+/** One shop whose Lebara SIM balance is below the top-up threshold (drives the in-app nudge). */
+@Serializable
+data class BalanceAlert(
+    val shopId: Int,
+    val shopName: String,
+    val balanceText: String?,   // raw carrier reply, for display
+    val balanceKr: Double?,     // parsed amount, null if unparseable
+    val balanceAt: Long?,       // epoch ms the balance was last measured
+    val thresholdKr: Double,
+)
+
+/** Low-balance shops among the caller's shops. Empty list = nothing to nudge about. */
+@Serializable
+data class BalanceAlertsResponse(val alerts: List<BalanceAlert>)
+
 /** Lebara prepaid top-up request (self-service from the app). */
 @Serializable
 data class TopupRequest(val shopId: Int, val code1: String, val code2: String)
@@ -461,8 +476,45 @@ class MobileApi(
                             admin.config.phoneEndpointId(loginInfo.shopId)
                         else -> return@get call.respond(HttpStatusCode.BadRequest, "No SIP identity for this account")
                     }
+                    // Only answer with a real verdict when AMI is genuinely connected. If it isn't
+                    // (down / mid-reconnect / still starting) the reachable set is empty, which would
+                    // read as a FALSE "unreachable" for every polling phone and drive the app's
+                    // watchdog to re-register/bounce fleet-wide. Return 503 instead — the app treats a
+                    // non-2xx sip-health check as inconclusive and does NOT escalate. [audit H2]
+                    if (!admin.amiClient.connected) {
+                        return@get call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
+                    }
                     val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
                     call.respond(SipHealthResponse(reachable = reachable, aor = aor))
+                }
+
+                /**
+                 * Lebara shops (among the caller's) whose prepaid balance is below the top-up
+                 * threshold. Polled by the app to show a "top up your SIM" nudge; the balance itself
+                 * is refreshed once a day by [LebaraBalanceMonitor]. Managers only (shops can't top up).
+                 *
+                 * GET /api/mobile/telephony/balance-alerts
+                 */
+                get("/api/mobile/telephony/balance-alerts") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    if (loginInfo.role != "manager" || loginInfo.managerId == null) {
+                        return@get call.respond(BalanceAlertsResponse(emptyList()))
+                    }
+                    val alerts = db.getShopsForManager(loginInfo.managerId).mapNotNull { shop ->
+                        val cfg = runCatching { db.getShopTelephonyConfig(shop.id) }.getOrNull()
+                            ?: return@mapNotNull null
+                        if (!cfg.carrier.equals(telephony.LebaraTopup.CARRIER, ignoreCase = true)) return@mapNotNull null
+                        if (!telephony.LebaraBalance.isLow(cfg.balance)) return@mapNotNull null
+                        BalanceAlert(
+                            shopId = shop.id,
+                            shopName = shop.name,
+                            balanceText = cfg.balance,
+                            balanceKr = telephony.LebaraBalance.parseKr(cfg.balance),
+                            balanceAt = cfg.balanceAt,
+                            thresholdKr = telephony.LebaraBalance.THRESHOLD_KR,
+                        )
+                    }
+                    call.respond(BalanceAlertsResponse(alerts))
                 }
 
                 /**
