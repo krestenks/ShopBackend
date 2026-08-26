@@ -10,9 +10,20 @@ package telephony
  * decimals are accepted. Returns null when nothing money-shaped is found (unparseable → never alerts).
  */
 object LebaraBalance {
-    /** Warn the manager to top up below this (kr). Env-overridable via LOW_BALANCE_THRESHOLD_KR. */
+    /**
+     * Warn the manager to top up when the kr cash balance drops below this. Env-overridable via
+     * LOW_BALANCE_THRESHOLD_KR.
+     *
+     * Default 120 kr, NOT 25: the Lebara DK offline packages these SIMs run on (GETALL = 60 GB +
+     * 10 hrs, 99 kr/30 days) auto-renew by deducting from the kr CASH balance. If the balance is
+     * below the ~99 kr package price on renewal day the package fails to renew and outbound SMS +
+     * calls stop silently (incoming calls keep working, so it's easy to miss). 120 kr leaves margin
+     * above the 99 kr renewal cost. Lebara's own low-balance SMS only fires under 25 kr — far too
+     * late to guarantee a renewal. The MB/data figure in the balance reply is NOT a health signal
+     * (data is unused, it never moves).
+     */
     val THRESHOLD_KR: Double =
-        System.getenv("LOW_BALANCE_THRESHOLD_KR")?.trim()?.toDoubleOrNull() ?: 25.0
+        System.getenv("LOW_BALANCE_THRESHOLD_KR")?.trim()?.toDoubleOrNull() ?: 120.0
 
     // Amount immediately followed by a currency word — the most reliable signal.
     private val ANCHORED = Regex("""(\d+(?:[.,]\d{1,2})?)\s*(?:kr|dkk)\b""", RegexOption.IGNORE_CASE)
