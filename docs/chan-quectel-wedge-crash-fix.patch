@@ -1,0 +1,175 @@
+diff --git a/src/at_command.c b/src/at_command.c
+index c20a8b3..8b6f763 100644
+--- a/src/at_command.c
++++ b/src/at_command.c
+@@ -964,6 +964,27 @@ static void at_enqueue_ping_sys_chan(struct pvt* pvt) { at_enqueue_ping(&pvt->sy
+ 
+ int at_enqueue_ping_taskproc(void* tpdata) { return PVT_TASKPROC_TRYLOCK_AND_EXECUTE(tpdata, at_enqueue_ping_sys_chan); }
+ 
++#define CLCC_POLL_INTERVAL_MS 5000 /*!< while a call is up, poll CLCC this often so a strand gets reaped */
++
++/* Idle maintenance run on the monitor thread's idle path. While any call is up, periodically poll
++ * CLCC so at_response_clcc can reap a call the modem dropped without a call-end URC (the wedge);
++ * otherwise keep the link alive with the normal ping. Enqueued via at_queue, so it serialises behind
++ * any in-flight AT+CMGS and can never interleave its prompt/PDU. */
++static void at_enqueue_idle_sys_chan(struct pvt* pvt)
++{
++    if (!PVT_NO_CHANS(pvt)) {
++        const struct timeval now = ast_tvnow();
++        if (ast_tvdiff_ms(now, pvt->last_clcc_poll) >= CLCC_POLL_INTERVAL_MS) {
++            pvt->last_clcc_poll = now;
++            at_enqueue_clcc(&pvt->sys_chan);
++            return;
++        }
++    }
++    at_enqueue_ping(&pvt->sys_chan);
++}
++
++int at_enqueue_idle_taskproc(void* tpdata) { return PVT_TASKPROC_TRYLOCK_AND_EXECUTE(tpdata, at_enqueue_idle_sys_chan); }
++
+ /*!
+  * \brief Enqueue user-specified command
+  * \param cpvt -- cpvt structure
+@@ -1385,7 +1406,16 @@ int at_hangup_immediately(struct cpvt* cpvt, int release_cause)
+     DECLARE_NAKED_AT_CMD(chup, "+CHUP");
+     DECLARE_NAKED_AT_CMDNT(qhup, "+QHUP=%d,%d");
+ 
+-    struct pvt* const pvt = cpvt->pvt;
++    /* Defensive: never dereference a NULL/torn-down call object. The confirmed restart SIGSEGV was
++     * a use-after-free of a freed cpvt reaching here (fixed at source in pvt_disconnect); this guard
++     * catches a genuinely NULL cpvt/pvt and logs loudly rather than crashing. It does NOT catch a
++     * non-NULL dangling pointer, so it is a net, not the fix. */
++    struct pvt* const pvt = cpvt ? cpvt->pvt : NULL;
++
++    if (!pvt) {
++        ast_log(LOG_ERROR, "[chan_quectel] at_hangup_immediately: NULL cpvt/pvt — call-list corruption avoided\n");
++        return -1;
++    }
+ 
+     if (pvt->is_simcom) {  // AT+CHUP
+         static const at_queue_cmd_t cmd = ATQ_CMD_DECLARE_ST(CMD_AT_CHUP, chup);
+diff --git a/src/at_command.h b/src/at_command.h
+index 4e7e194..c13f0a8 100644
+--- a/src/at_command.h
++++ b/src/at_command.h
+@@ -139,6 +139,7 @@ int at_enqueue_initialization_simcom(struct cpvt*);
+ int at_enqueue_initialization_other(struct cpvt*);
+ int at_enqueue_ping(struct cpvt* cpvt);
+ int at_enqueue_ping_taskproc(void*);
++int at_enqueue_idle_taskproc(void*);
+ int at_enqueue_cspn_cops(struct cpvt* cpvt);
+ int at_enqueue_qspn_qnwinfo(struct cpvt* cpvt);
+ int at_enqueue_sms(struct cpvt* cpvt, const char* sca, const char* destination, const char* msg, unsigned validity_min, int report_req);
+diff --git a/src/at_response.c b/src/at_response.c
+index 71c488c..dfe5b62 100644
+--- a/src/at_response.c
++++ b/src/at_response.c
+@@ -1124,6 +1124,8 @@ static const char* next_line(const char* const str)
+     return NULL;
+ }
+ 
++#define CLCC_REAP_MISSES 2u /*!< release a call absent from this many consecutive CLCC sweeps */
++
+ /*!
+  * \brief Handle +CLCC response
+  * \param pvt -- pvt structure
+@@ -1170,6 +1172,32 @@ static int at_response_clcc(struct pvt* const pvt, const struct ast_str* const r
+         handle_clcc(pvt, call_idx, dir, state, mode, mpty ? TRIBOOL_TRUE : TRIBOOL_FALSE, number, type);
+     }
+ 
++    /* Reconcile: release any call the modem no longer lists. A lost call-end URC (^DSCI/ccinfo)
++     * otherwise strands a cpvt in DIALING forever -> device stuck, later calls fail cause 44.
++     * RoEdAl set/reset CALL_FLAG_ALIVE but never read it; this restores the reconciliation.
++     * capture-next: cpvt_change_state(RELEASED) frees+unlinks cpvt, so a plain traverse here would
++     * be use-after-free. Guarded so a just-dialed call not yet reflected in CLCC is not killed:
++     * skip INIT, and require CLCC_REAP_MISSES consecutive misses. */
++    {
++        struct cpvt* rnext;
++        for (cpvt = AST_LIST_FIRST(&pvt->chans); cpvt; cpvt = rnext) {
++            rnext = AST_LIST_NEXT(cpvt, entry);
++            if (CPVT_TEST_FLAG(cpvt, CALL_FLAG_ALIVE)) {
++                cpvt->clcc_miss = 0;
++                continue;
++            }
++            if (cpvt->state == CALL_STATE_INIT) {
++                continue; /* not yet dialed to the modem; would not be in CLCC */
++            }
++            if (++cpvt->clcc_miss < CLCC_REAP_MISSES) {
++                continue; /* grace: spare a call that may reappear on the next sweep */
++            }
++            ast_log(LOG_WARNING, "[%s] CLCC reap: releasing stranded call idx:%d state:%s (missed %u CLCC sweeps)\n", PVT_ID(pvt),
++                    cpvt->call_idx, call_state2str(cpvt->state), cpvt->clcc_miss);
++            cpvt_change_state(cpvt, CALL_STATE_RELEASED, AST_CAUSE_NORMAL_UNSPECIFIED);
++        }
++    }
++
+     return 0;
+ }
+ 
+diff --git a/src/chan_quectel.c b/src/chan_quectel.c
+index 195ec39..b93ddd2 100644
+--- a/src/chan_quectel.c
++++ b/src/chan_quectel.c
+@@ -104,8 +104,13 @@ static int public_state_init(struct public_state* state);
+ void pvt_disconnect(struct pvt* pvt)
+ {
+     if (!PVT_NO_CHANS(pvt)) {
+-        struct cpvt* cpvt;
+-        AST_LIST_TRAVERSE(&(pvt->chans), cpvt, entry) {
++        struct cpvt *cpvt, *next;
++        /* capture-next: cpvt_change_state(RELEASED) below frees+unlinks cpvt (via cpvt_free), so a
++         * plain AST_LIST_TRAVERSE advancing through cpvt->entry.next would read freed memory — a
++         * use-after-free that reaches at_hangup_immediately with a garbage cpvt on the next
++         * iteration (the confirmed SIGSEGV on `quectel restart` of a wedged device). */
++        for (cpvt = AST_LIST_FIRST(&pvt->chans); cpvt; cpvt = next) {
++            next = AST_LIST_NEXT(cpvt, entry);
+             at_hangup_immediately(cpvt, AST_CAUSE_NORMAL_UNSPECIFIED);
+             CPVT_RESET_FLAG(cpvt, CALL_FLAG_NEED_HANGUP);
+             cpvt_change_state(cpvt, CALL_STATE_RELEASED, AST_CAUSE_NORMAL_UNSPECIFIED);
+diff --git a/src/chan_quectel.h b/src/chan_quectel.h
+index 5e249b1..c48a1b6 100644
+--- a/src/chan_quectel.h
++++ b/src/chan_quectel.h
+@@ -98,6 +98,7 @@ typedef struct pvt {
+ 
+     AST_LIST_HEAD_NOLOCK(, cpvt) chans; /*!< list of channels */
+     struct cpvt sys_chan;               /*!< system channel */
++    struct timeval last_clcc_poll;      /*!< last periodic CLCC poll while a call is up (wedge reap trigger) */
+ 
+     unsigned long channel_instance; /*!< number of channels created on this device */
+     pthread_t monitor_thread;       /*!< monitor (at commands reader) thread handle */
+diff --git a/src/cpvt.h b/src/cpvt.h
+index ffcb2df..fca841a 100644
+--- a/src/cpvt.h
++++ b/src/cpvt.h
+@@ -63,6 +63,8 @@ typedef struct cpvt {
+ #define MIN_CALL_IDX 0
+ #define MAX_CALL_IDX 31
+ 
++    unsigned int clcc_miss; /*!< consecutive CLCC sweeps this call was absent (reaped after CLCC_REAP_MISSES) */
++
+     call_state_t state; /*!< see also call_state_t */
+     unsigned int flags; /*!< see also call_flag_t */
+ 
+diff --git a/src/monitor_thread.c b/src/monitor_thread.c
+index 5df7820..57db8e1 100644
+--- a/src/monitor_thread.c
++++ b/src/monitor_thread.c
+@@ -208,7 +208,7 @@ static void monitor_threadproc_pvt(struct pvt* const pvt)
+         if (ast_mutex_trylock(&pvt->lock)) {  // pvt unlocked
+             int t = RESPONSE_READ_TIMEOUT;
+             if (!at_wait(fd, &t)) {
+-                if (ast_taskprocessor_push(tps, at_enqueue_ping_taskproc, pvt)) {
++                if (ast_taskprocessor_push(tps, at_enqueue_idle_taskproc, pvt)) {
+                     ast_debug(5, "[%s] Unable to handle timeout\n", dev);
+                 }
+                 continue;
+@@ -262,7 +262,7 @@ static void monitor_threadproc_pvt(struct pvt* const pvt)
+                         }
+                     }
+ 
+-                    if (ast_taskprocessor_push(tps, at_enqueue_ping_taskproc, pvt)) {
++                    if (ast_taskprocessor_push(tps, at_enqueue_idle_taskproc, pvt)) {
+                         ast_debug(5, "[%s] Unable to handle timeout\n", dev);
+                     }
+                     continue;
