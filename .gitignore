@@ -40,3 +40,6 @@ dist/ShopBackend.jar
 
 # Local DB backups (contain customer PII — never commit)
 data/ShopManager_*.db
+
+# Local backup of the edge box /etc/asterisk config tree (not versioned here)
+ShopBackendBackup/
