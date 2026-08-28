@@ -184,9 +184,31 @@ data class SipCredentialsResponse(
     val carrier: String? = null,
 )
 
-/** Server-side SIP reachability of the caller's own endpoint (Asterisk's qualify verdict). */
+/**
+ * Server-side SIP reachability of the caller's own endpoint (Asterisk's qualify verdict).
+ *
+ * [command] is an OPTIONAL, advisory instruction from [SipCommandDirector], sent only once the
+ * phone has been unreachable long enough that its own recovery ladder has plainly failed. It is
+ * additive, so older app builds simply ignore it. The client rate-limits and may decline.
+ */
 @Serializable
-data class SipHealthResponse(val reachable: Boolean, val aor: String)
+data class SipHealthResponse(
+    val reachable: Boolean,
+    val aor: String,
+    val command: String? = null,
+    /** How long we have seen this endpoint unreachable, in seconds; null when it is fine. */
+    val unreachableForS: Long? = null,
+)
+
+/** A phone's own view of its SIP health, POSTed alongside the sip-health poll. */
+@Serializable
+data class SipStatusReportResponse(
+    val ok: Boolean,
+    /** Asterisk's qualify verdict, so a phone can report and get the truth in one round trip. */
+    val reachable: Boolean,
+    val command: String? = null,
+    val unreachableForS: Long? = null,
+)
 
 /** One shop whose Lebara SIM balance is below the top-up threshold (drives the in-app nudge). */
 @Serializable
@@ -485,7 +507,58 @@ class MobileApi(
                         return@get call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
                     }
                     val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
-                    call.respond(SipHealthResponse(reachable = reachable, aor = aor))
+                    // The backend sees the truth minutes before the phone can. Once the phone's own
+                    // ladder has demonstrably failed, hand it a command instead of waiting.
+                    val command = SipCommandDirector.onVerdict(aor, reachable)
+                    call.respond(SipHealthResponse(
+                        reachable = reachable,
+                        aor = aor,
+                        command = command,
+                        unreachableForS = SipCommandDirector.unreachableForMs(aor)?.div(1000),
+                    ))
+                }
+
+                /**
+                 * The phone reports what IT believes about its own SIP health. Paired with the
+                 * qualify verdict above, this makes the disagreement visible — a phone insisting it
+                 * is registered while Asterisk says Unavailable is the exact 2026-08-28 failure, and
+                 * it cannot be seen from either side alone.
+                 *
+                 * Returns the same advisory command as sip-health, so a phone can report and get
+                 * its instruction in one round trip.
+                 *
+                 * POST /api/mobile/telephony/sip-report
+                 */
+                post("/api/mobile/telephony/sip-report") {
+                    val loginInfo = authenticateManager() ?: return@post
+                    val admin = asteriskAdmin
+                        ?: return@post call.respond(HttpStatusCode.NotFound, "Self-hosted telephony not enabled")
+                    val aor = when {
+                        loginInfo.role == "manager" && loginInfo.managerId != null ->
+                            admin.config.managerEndpointId(loginInfo.managerId)
+                        loginInfo.role == "shop" && loginInfo.shopId != null ->
+                            admin.config.phoneEndpointId(loginInfo.shopId)
+                        else -> return@post call.respond(HttpStatusCode.BadRequest, "No SIP identity for this account")
+                    }
+                    val report = runCatching { call.receive<SipCommandDirector.Report>() }.getOrElse {
+                        return@post call.respond(HttpStatusCode.BadRequest, "Malformed report")
+                    }
+                    // Same AMI guard as sip-health: with AMI down every endpoint looks unreachable,
+                    // which would log a false disagreement for every reporting phone. [audit H2]
+                    if (!admin.amiClient.connected) {
+                        return@post call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
+                    }
+                    val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
+                    // Verdict first so the unreachable-since clock is current, then log the
+                    // disagreement against it.
+                    val command = SipCommandDirector.onVerdict(aor, reachable)
+                    SipCommandDirector.onReport(aor, report, reachable)
+                    call.respond(SipStatusReportResponse(
+                        ok = true,
+                        reachable = reachable,
+                        command = command,
+                        unreachableForS = SipCommandDirector.unreachableForMs(aor)?.div(1000),
+                    ))
                 }
 
                 /**

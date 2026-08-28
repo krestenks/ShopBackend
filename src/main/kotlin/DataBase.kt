@@ -978,7 +978,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             ) }
         } catch (_: Exception) {}
 
-        // Tenant-wide on/off-duty flag per manager. Absent row = off duty.
+        // Tenant-wide on/off-duty flag per manager. NOTE: an ABSENT row means ON duty -- see
+        // isManagerOnDuty(), which is an opt-out model so managers who never touch the toggle keep
+        // ringing. The column DEFAULT 0 below only applies to rows that are actually inserted.
         connection.createStatement().use { it.execute("""
             CREATE TABLE IF NOT EXISTS manager_duty (
                 manager_id INTEGER PRIMARY KEY,
