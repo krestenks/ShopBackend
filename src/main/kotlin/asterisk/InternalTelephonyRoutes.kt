@@ -22,6 +22,8 @@ import telephony.resolveShopSenderNumber
  *       → routing verdict: reject | ring | menu_open | menu_closed | menu_temp
  *       (the menu_* verdicts are legacy — the DTMF menu is disabled and never reached)
  *   POST /api/internal/telephony/booking-link  secret, shopId, from, uniqueid → ok | fail
+ *   POST /api/internal/telephony/sms/report    secret, shopId, success, subject, number, report
+ *       → delivery/status report for an outbound SMS (the only signal that a send failed)
  *   POST /api/internal/telephony/call/event    secret, uniqueid, event (operator | menu_timeout)
  *   POST /api/internal/telephony/provision     secret [, shopId] — re-provision Asterisk
  *       (curl-able stopgap until the admin web UI gets a provision button)
@@ -35,6 +37,14 @@ import telephony.resolveShopSenderNumber
  * only "" would silently stop working if that ever changed.
  */
 private val WITHHELD_CALLER_IDS = setOf("anonymous", "unknown", "restricted", "private", "withheld")
+
+/**
+ * How far back a delivery report may reach to find the message it belongs to. chan_quectel reports
+ * within seconds of the submit resolving; a stalled send on a dead SIM took ~5s in the field. An
+ * hour is generous enough to survive a slow network yet far too short to reach a previous, unrelated
+ * message to the same number.
+ */
+private const val REPORT_MATCH_WINDOW_MS = 60L * 60L * 1000L
 
 /** True when the network gave us no usable caller ID. */
 internal fun isWithheldCaller(from: String): Boolean =
@@ -97,6 +107,60 @@ fun Routing.internalTelephonyRoutes(
             translationService = translationService,
         )
         call.respondText(result.name.lowercase())
+    }
+
+    /**
+     * SMS delivery/status report from chan_quectel, via the dialplan 'report' extension.
+     *
+     * This is the ONLY place a failed send becomes visible to the backend. [AmiClient.sendSms]
+     * returns success as soon as the driver ACCEPTS the message into its own queue — it cannot
+     * know whether the network took it — so without this the shop logs "sent" for messages the
+     * modem never delivered. That is exactly what an out-of-credit SIM looks like: the submit
+     * stalls, chan_quectel logs "Error sending message", and nothing reached us.
+     *
+     * `success` is 1/0 straight from the report JSON; `report` is the raw JSON, kept verbatim in
+     * the reliability log because the useful detail (report.info, report.uid) is nested and the
+     * dialplan's JSON_DECODE only reads top-level keys.
+     */
+    post("/api/internal/telephony/sms/report") {
+        val params = call.authorizedParams() ?: return@post
+        val shopId = params["shopId"]?.toIntOrNull()
+            ?: run { call.respond(HttpStatusCode.BadRequest, "shopId required"); return@post }
+        val success = params["success"]?.trim() == "1"
+        val subject = params["subject"]?.trim().orEmpty()
+        val number = params["number"]?.trim().orEmpty()
+        val raw = params["report"]?.trim().orEmpty()
+
+        // chan_quectel also reports on inbound/other subjects; only outgoing SMS concerns us here.
+        if (subject.isNotEmpty() && !subject.equals("sms", ignoreCase = true)) {
+            call.respondText("ignored")
+            return@post
+        }
+
+        if (success) {
+            // Promote queued → sent only now that the network actually took it.
+            db.findOpenOutboundSmsFor(shopId, number, System.currentTimeMillis() - REPORT_MATCH_WINDOW_MS)
+                ?.let { db.updateSmsStatus(it, status = "sent", providerMessageSid = null, errorMessage = null) }
+            call.respondText("ok")
+            return@post
+        }
+
+        val matched = db.findOpenOutboundSmsFor(shopId, number, System.currentTimeMillis() - REPORT_MATCH_WINDOW_MS)
+        matched?.let {
+            db.updateSmsStatus(it, status = "failed", providerMessageSid = null, errorMessage = raw.take(500))
+        }
+        db.recordReliabilityEvent(
+            severity = "error",
+            category = "sms_send_failed",
+            shopId = shopId,
+            message = buildString {
+                append("Outbound SMS to ${number.ifBlank { "(unknown)" }} was not delivered")
+                append(if (matched == null) " (no matching message row)" else " (message #$matched → failed)")
+                if (raw.isNotBlank()) append(". Report: ${raw.take(300)}")
+            },
+        )
+        println("[SMS-REPORT] shop=$shopId to=$number FAILED matched=${matched ?: "none"}")
+        call.respondText("failed")
     }
 
     post("/api/internal/telephony/call/inbound") {

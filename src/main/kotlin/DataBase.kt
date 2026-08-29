@@ -4133,6 +4133,40 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * Newest still-open outbound row for [shopId] to [counterpartyPhone], for attaching a
+     * chan_quectel delivery report to. Only rows created at/after [sinceMs] are considered, so a
+     * late report can't retro-fail an unrelated older message to the same number.
+     *
+     * Matching is on the digits-only SUFFIX because the report carries the number exactly as the
+     * modem dialled it ("51941736") while the row may hold it E.164-normalised ("+4551941736").
+     * Comparing the last 8 digits (a full DK subscriber number) keeps those equivalent without
+     * matching across different subscribers.
+     *
+     * Only 'queued'/'sent' rows are eligible: 'sent' here means "the driver accepted it", which is
+     * precisely the state a report resolves. Returns null when nothing plausible matches.
+     */
+    fun findOpenOutboundSmsFor(shopId: Int, counterpartyPhone: String, sinceMs: Long): Int? {
+        val digits = counterpartyPhone.filter { it.isDigit() }
+        if (digits.length < 6) return null   // too short to identify a subscriber — don't guess
+        val suffix = digits.takeLast(8)
+        val sql = """
+            SELECT id FROM sms_message
+             WHERE shop_id = ? AND direction = 'outbound'
+               AND status IN ('queued', 'sent')
+               AND created_at >= ?
+               AND replace(replace(replace(counterparty_phone, '+', ''), ' ', ''), '-', '') LIKE ?
+             ORDER BY id DESC LIMIT 1
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setLong(2, sinceMs)
+            stmt.setString(3, "%$suffix")
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt(1) else null
+        }
+    }
+
     /** Full thread for a shop + counterparty phone, oldest first. */
     fun getSmsThread(
         shopId: Int,

@@ -210,11 +210,22 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                 appendLine(" same => n,Set(SMS_BODY=$d{JSON_DECODE(SMS,msg)})")
                 appendLine(" same => n,Set(NOTIFY_RESULT=$d{CURL($base/api/internal/telephony/sms/inbound,secret=$secret&shopId=$id&from=$d{URIENCODE($d{CALLERID(num)})}&body=$d{URIENCODE($d{SMS_BODY})})})")
                 appendLine(" same => n,Hangup()")
-                appendLine("; SMS delivery/status reports: chan_quectel starts the PBX at 'report' for")
-                appendLine("; status-report PDUs. We don't act on them yet, but the extension MUST exist")
-                appendLine("; or every report logs a 'sent to invalid extension' warning (constant churn).")
-                appendLine("; Swallow cleanly; wire to the backend later if delivery receipts are needed.")
+                appendLine("; SMS delivery/status reports. chan_quectel starts the PBX here with the report")
+                appendLine("; JSON in \${REPORT}; top-level keys are subject, direction, success, number.")
+                appendLine("; This is the ONLY signal that an outbound SMS failed: the AMI send call returns")
+                appendLine("; as soon as the driver queues the message, so a send that the network refuses")
+                appendLine("; (an out-of-credit SIM being the common case) is otherwise logged as 'sent'.")
+                appendLine("; JSON_DECODE reads top-level keys only, so the nested detail goes over as raw JSON.")
                 appendLine("exten => report,1,NoOp(SMS status report for shop $id from $d{CALLERID(num)})")
+                appendLine(" same => n,Set(R_SUCCESS=$d{JSON_DECODE(REPORT,success)})")
+                appendLine(" same => n,Set(R_SUBJECT=$d{JSON_DECODE(REPORT,subject)})")
+                appendLine(" same => n,Set(R_NUMBER=$d{JSON_DECODE(REPORT,number)})")
+                appendLine(
+                    " same => n,Set(R_RESULT=$d{CURL($base/api/internal/telephony/sms/report," +
+                        "secret=$secret&shopId=$id&success=$d{URIENCODE($d{R_SUCCESS})}" +
+                        "&subject=$d{URIENCODE($d{R_SUBJECT})}&number=$d{URIENCODE($d{R_NUMBER})}" +
+                        "&report=$d{URIENCODE($d{REPORT})})})"
+                )
                 appendLine(" same => n,Hangup()")
                 appendLine()
                 appendLine("[${config.outboundContext(id)}]")
