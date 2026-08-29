@@ -14,6 +14,14 @@ import java.security.SecureRandom
  * Config files are regenerated wholesale from the DB (single source of truth), so
  * provisioning is idempotent and there is no section-surgery to go wrong.
  */
+/**
+ * A shop's modem is physically present and holds the right SIM, but cannot carry a line — in
+ * practice always because its USB audio class is off, so there is no ALSA card and chan_quectel
+ * has no voice path. Thrown rather than returned so the admin UI and the provision endpoint, which
+ * both treat "no exception" as success, report the real outcome.
+ */
+class ModemNotUsableException(message: String) : IllegalStateException(message)
+
 class AsteriskProvisioner(
     private val db: DataBase,
     private val config: AsteriskConfig,
@@ -55,7 +63,30 @@ class AsteriskProvisioner(
         ensureAllManagerEndpoints()
         regenerateShopPrompts(shopId)
         promptGenerator.generateSharedPrompts()
-        regenerateFiles()   // resolves the current modem for every shop's IMSI, then writes + reloads
+        // resolves the current modem for every shop's IMSI, then writes + reloads
+        val trunks = regenerateFiles()
+
+        // No trunk was written for THIS shop -> the line cannot carry calls or SMS. Do not mark it
+        // provisioned and do not return normally: callers (the admin UI, the provision endpoint)
+        // report success purely from "no exception", so a silent return here is how a dead line ends
+        // up displayed as "Provisioned: Yes". Only this shop's own failure throws — a background
+        // regeneration pass must not be broken by some other shop's unusable modem.
+        if (shopId in trunks.skippedNoAudio) {
+            db.recordReliabilityEvent(
+                severity = "error",
+                category = "provision_no_audio",
+                shopId = shopId,
+                message = "Shop $shopId could not be provisioned: its modem exposes no ALSA capture " +
+                    "device, so no GSM trunk was written. The modem's USB audio class (UAC) is " +
+                    "most likely disabled in firmware.",
+            )
+            throw ModemNotUsableException(
+                "Shop $shopId's modem has no audio device, so no GSM trunk could be written — the " +
+                    "line would neither ring nor send SMS. The modem's USB audio class (UAC) is " +
+                    "most likely disabled in firmware; enable it and rescan, then provision again."
+            )
+        }
+
         db.markShopTelephonyProvisioned(shopId)
         val after = db.getShopTelephonyConfig(shopId)
         println("[Asterisk] Provisioned shop $shopId (trunk=${config.trunkName(shopId)}, imsi=${after.imsi}, device=${after.modemDataDevice})")
@@ -90,9 +121,17 @@ class AsteriskProvisioner(
         // GSM extras only for SIM-assigned shops.
         val gsmShops = db.getAllConfiguredShopTelephonyConfigs()
         gsmShops.forEach { regenerateShopPrompts(it.shopId) }
-        regenerateFiles()
-        allShops.forEach { db.markShopTelephonyProvisioned(it.id) }
+        val trunks = regenerateFiles()
+        // A shop whose modem gave us no trunk is NOT provisioned, and must not be stamped as such —
+        // the admin UI reads provisionedAt for its Yes/No badge. Shops with no SIM at all are still
+        // marked: they are intercom-only by design, not failed. Unlike provisionShop this must not
+        // throw; one unusable modem cannot be allowed to abort the whole startup pass.
+        allShops.filter { it.id !in trunks.skippedNoAudio }
+            .forEach { db.markShopTelephonyProvisioned(it.id) }
         println("[Asterisk] Full provisioning pass complete (${allShops.size} shop(s), ${gsmShops.size} with SIM)")
+        if (trunks.skippedNoAudio.isNotEmpty()) {
+            println("[Asterisk] NOT provisioned (modem has no audio device): shops ${trunks.skippedNoAudio.joinToString()}")
+        }
     }
 
     /**
@@ -215,12 +254,13 @@ class AsteriskProvisioner(
         promptGenerator.generateShopPrompts(shopId, db.getShopVoiceConfig(shopId))
     }
 
-    private fun regenerateFiles() {
+    private fun regenerateFiles(): TrunkWriteResult {
         resolveDevicesForAllShops()
         // Only write trunks whose device actually resolved (a modem is present).
         val shops = db.getAllConfiguredShopTelephonyConfigs().filter { !it.modemDataDevice.isNullOrBlank() }
-        quectelConfigWriter.regenerate(shops)
+        val trunks = quectelConfigWriter.regenerate(shops)
         dialplanWriter.regenerate(shops, internalEntries(), managerEntries())
+        return trunks
     }
 
     /**

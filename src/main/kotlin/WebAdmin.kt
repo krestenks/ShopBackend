@@ -404,11 +404,12 @@ class WebAdmin(
                                     table {
                                         thead { tr {
                                             th { +"USB" }; th { +"IMSI" }; th { +"IMEI" }; th { +"Provider" }
-                                            th { +"Signal" }; th { +"Firmware" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
+                                            th { +"Signal" }; th { +"Firmware" }; th { +"Audio" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
                                         } }
                                         tbody {
                                             val unassignedShops = shops.filter { db.getShopTelephonyConfig(it.id).imsi.isNullOrBlank() }
                                             for (m in modems) {
+                                                val usable = !m.alsaDevice.isNullOrBlank()
                                                 tr {
                                                     td { code { +m.usbPort } }
                                                     td { +(m.imsi ?: m.error ?: "-") }
@@ -416,11 +417,26 @@ class WebAdmin(
                                                     td { +(m.provider ?: "-") }
                                                     td { +(m.signal ?: "-") }
                                                     td { code { +(m.firmware ?: "-") } }
+                                                    // No ALSA card = USB audio class off in the modem's
+                                                    // firmware. Such a modem still reports a healthy IMSI,
+                                                    // signal and firmware, so without this column it looks
+                                                    // assignable while chan_quectel can never connect it.
+                                                    td {
+                                                        if (usable) span("badge ok") { +"ok" }
+                                                        else span("badge warn") { +"UAC off" }
+                                                    }
                                                     td { +(m.trunkState ?: "-") }
                                                     td { +(m.atDevice ?: "-") }
                                                     td { +(m.assignedShopName ?: "(unassigned)") }
                                                     td {
-                                                        if (m.imsi != null && m.assignedShopId == null && unassignedShops.isNotEmpty()) {
+                                                        if (!usable) {
+                                                            p("hint") {
+                                                                +"No audio device — this modem cannot carry a line. Enable USB audio, then rescan: "
+                                                            }
+                                                            p { code { +"AT+QCFG=\"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,1" } }
+                                                            p { code { +"AT+CFUN=1,1" } }
+                                                        }
+                                                        if (usable && m.imsi != null && m.assignedShopId == null && unassignedShops.isNotEmpty()) {
                                                             form(action = "/telephony/assign", method = FormMethod.post) {
                                                                 hiddenInput { name = "imsi"; value = m.imsi }
                                                                 select {
@@ -1380,6 +1396,11 @@ class WebAdmin(
                         else -> try {
                             asteriskAdmin.provisioner.assignShopToImsi(sid, imsi)
                             "✅ SIM $imsi assigned and provisioned."
+                        } catch (e: asterisk.ModemNotUsableException) {
+                            // The SIM binding DID persist — only the trunk write failed. Saying
+                            // "assign failed" would send the admin to re-assign a SIM that is
+                            // already assigned, instead of to the modem, which is the real problem.
+                            "⚠️ SIM $imsi assigned, but NOT provisioned: ${e.message}"
                         } catch (e: Exception) {
                             "⚠️ Assign failed: ${e.message}"
                         }

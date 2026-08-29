@@ -46,11 +46,19 @@ private const val GENERATED_HEADER =
  * Server prerequisite (one-time): /etc/asterisk/quectel.conf must contain
  *   #include quectel_shops.conf
  */
+/**
+ * Outcome of a trunk-config write. [skippedNoAudio] holds the shops whose modem exposed no ALSA
+ * capture device, so no usable trunk could be written for them — the caller needs this to avoid
+ * reporting a bring-up as successful when it produced nothing. See [QuectelConfigWriter.regenerate].
+ */
+data class TrunkWriteResult(val written: List<Int>, val skippedNoAudio: List<Int>)
+
 class QuectelConfigWriter(private val config: AsteriskConfig, private val amiClient: AmiClient) {
 
     private val file: Path = Paths.get(config.configPath, "quectel_shops.conf")
 
-    fun regenerate(shops: List<ShopTelephonyConfig>, reload: Boolean = true) {
+    fun regenerate(shops: List<ShopTelephonyConfig>, reload: Boolean = true): TrunkWriteResult {
+        val written = mutableListOf<Int>()
         val skipped = mutableListOf<Int>()
         val content = buildString {
             append(GENERATED_HEADER)
@@ -75,6 +83,7 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
                     continue
                 }
 
+                written += shop.shopId
                 appendLine()
                 appendLine("[${config.trunkName(shop.shopId)}]")
                 appendLine("data=$device")
@@ -96,6 +105,7 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
                 "reboot the modem, and re-provision once the new card appears in /proc/asound/cards."
             )
         }
+        return TrunkWriteResult(written = written, skippedNoAudio = skipped)
     }
 }
 
