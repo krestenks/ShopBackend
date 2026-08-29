@@ -1,0 +1,51 @@
+Deployed to the edge PBX on 2026-08-29. Applies on top of 2d0837f (the wedge/crash
+backport in chan-quectel-wedge-crash-fix.patch), against the RoEdAl fork.
+
+WHY
+  chan_quectel's idle keepalive is a bare "AT" (PING_AT, chosen because query_time is
+  unset and defaults to 0), declared with ATQ_CMD_TIMEOUT_SHORT = 1 second while every
+  other command gets MEDIUM (5s) or LONG (40s). The deadline is stamped after the write
+  in at_queue.c, so it is a true 1s modem-response budget, not queue-wait.
+
+  A timeout on CMD_AT is listed under "critical errors" in at_response_error(), which
+  does `goto e_return` -> returns -1 -> cmd_timeout() logs "Fail to handle response" and
+  sets terminate_monitor = 1. The device is torn down and restarted with no retry: one
+  missed heartbeat kills the modem.
+
+  Observed on shop5 on 2026-08-29. A test SMS went out on a SIM with 0 kr credit; the
+  submit stalled (Asterisk logged "[shop5][SMSTEXT] Error sending message"), the modem
+  could not answer a bare AT inside 1s, and the device restart-looped every 15s for 90s
+  before recovering. 12 such timeouts on shop5 that day; zero on shop1/shop2 across the
+  preceding six days of log.
+
+FIX
+  Give the keepalive MEDIUM (5s). A genuinely wedged modem is still detected, four
+  seconds later. Nothing else changes.
+
+NOTE
+  The edge build tree also carries an unrelated uncommitted change to src/mutils.h
+  (enum2str_def uses a plain ternary instead of the S_COR macro). That predates this work
+  and is part of what builds the currently-deployed module; it is not included here.
+
+Rollback: /home/phone/chan_quectel.so.rollback-20260829-1323 (md5 dc18aba12bab),
+then `sudo systemctl restart asterisk`. Module deployed by this patch: md5 3e507974a2f0.
+
+diff --git a/src/at_command.c b/src/at_command.c
+index 8b6f763..0bb8d0a 100644
+--- a/src/at_command.c
++++ b/src/at_command.c
+@@ -121,7 +121,13 @@ static int __attribute__((format(printf, 4, 5))) at_enqueue_generic(struct cpvt*
+ 
+ int at_enqueue_at(struct cpvt* cpvt)
+ {
+-    static const at_queue_cmd_t cmd = ATQ_CMD_DECLARE_STFT(CMD_AT, RES_OK, AT_CMD(at), 0, ATQ_CMD_TIMEOUT_SHORT, 0);
++    /* MEDIUM (5s), not SHORT (1s). This is the idle keepalive, and a timeout on CMD_AT is
++     * classified as a CRITICAL error in at_response_error() -- it tears the device down and
++     * restarts it with no retry. A modem busy with SMS PDU I/O, or stalled on a submit the
++     * network will not accept (an out-of-credit SIM), routinely needs more than 1s to answer a
++     * bare AT, so the 1s budget turned ordinary backpressure into a 15s restart loop. 5s still
++     * detects a genuinely wedged modem, just four seconds later. */
++    static const at_queue_cmd_t cmd = ATQ_CMD_DECLARE_STFT(CMD_AT, RES_OK, AT_CMD(at), 0, ATQ_CMD_TIMEOUT_MEDIUM, 0);
+ 
+     if (at_queue_insert_const(cpvt, &cmd, 1u, 1)) {
+         chan_quectel_err = E_QUEUE;
