@@ -51,23 +51,51 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
     private val file: Path = Paths.get(config.configPath, "quectel_shops.conf")
 
     fun regenerate(shops: List<ShopTelephonyConfig>, reload: Boolean = true) {
+        val skipped = mutableListOf<Int>()
         val content = buildString {
             append(GENERATED_HEADER)
             for (shop in shops) {
                 val device = shop.modemDataDevice?.trim().orEmpty()
                 if (device.isEmpty()) continue
+
+                // This fleet carries voice over UAC (USB audio class) only — we never emit an
+                // `audio=` tty — so a trunk with no resolvable ALSA capture device cannot carry a
+                // call. Emitting one anyway is worse than emitting nothing: chan_quectel's uac=on
+                // path defaults alsadev to DEFAULT_ALSADEV ("hw:Android"), fails to open it, and
+                // retries every 15s forever. The shop does nothing at all in that state — not even
+                // SMS, because the device never reaches `connected`.
+                //
+                // uac=off is NOT a usable fallback: it only moves the failure one branch over in
+                // pvt_start(), to tty_open("") on the empty audio_tty, which also leaves the device
+                // unconnected. No config yields SMS-without-voice on this driver, so skip the shop
+                // and say why — a missing trunk with a reason beats a trunk that can never connect.
+                val alsaDev = shop.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() }
+                if (alsaDev == null) {
+                    skipped += shop.shopId
+                    continue
+                }
+
                 appendLine()
                 appendLine("[${config.trunkName(shop.shopId)}]")
                 appendLine("data=$device")
                 // UAC (USB audio class) voice path — validated on the EC25-EUX fleet.
                 appendLine("uac=on")
-                shop.modemAlsaDevice?.trim()?.takeIf { it.isNotBlank() }?.let { appendLine("alsadev=$it") }
+                appendLine("alsadev=$alsaDev")
                 appendLine("context=${config.inboundContext(shop.shopId)}")
             }
         }
         writeAtomically(file, content)
         if (reload) amiClient.reloadChanQuectel()
-        println("[Asterisk] Wrote $file (${shops.size} trunk(s))")
+        println("[Asterisk] Wrote $file (${shops.size - skipped.size} trunk(s))")
+        for (sid in skipped) {
+            System.err.println(
+                "[Asterisk] shop $sid NOT provisioned: its modem exposes no ALSA capture device, so " +
+                "it can neither take calls nor send SMS. The modem's USB audio class is most likely " +
+                "disabled in firmware — check AT+QCFG=\"usbcfg\" (the trailing field must be 1, not " +
+                "0). Fix with AT+QCFG=\"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,1 then AT+CFUN=1,1 to " +
+                "reboot the modem, and re-provision once the new card appears in /proc/asound/cards."
+            )
+        }
     }
 }
 
