@@ -4,6 +4,10 @@ How the self-hosted phone system stays up, what breaks it, and how it recovers.
 Written 2026-08-16 after a run of reliability work. See also `manager-phone-setup.md`,
 `phone-server-setup.md`, `asterisk-integration.md`.
 
+> **Changing networking code?** Re-run `network-resilience-tests.md` first. Every bug that
+> suite catches was invisible in normal use — healthy on the desk, on WiFi, plugged in, and
+> broken only when idle, away from WiFi, or moving between networks.
+
 Topology recap: one **edge box** (`phone@192.168.0.192`, tailnet `100.64.0.4`) runs
 Asterisk + chan_quectel + the `shopbackend` jar; a **control-plane box**
 (`kresten@t6.warpfactor.dk`, `server8`) runs Headscale + the onboarding service.
