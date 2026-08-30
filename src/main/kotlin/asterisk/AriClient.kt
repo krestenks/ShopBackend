@@ -70,8 +70,23 @@ class AriClient(private val config: AsteriskConfig) {
             "qualify_frequency" to "30",
             // Manager phones (esp. Samsung) intermittently stall answering OPTIONS for ~1s+
             // even on a healthy tailnet, so the default 3s timeout flaps them to Unavailable
-            // and inbound calls hit "line busy". 8s tolerates those app-side stalls.
-            "qualify_timeout" to "8",
+            // and inbound calls hit "line busy".
+            //
+            // Raised 8 -> 15 on 2026-08-30. Measured true WIRE RTT (tcpdump, OPTIONS correlated to
+            // its response by Call-ID) over 64 samples: median 287ms, p90 455ms, max 951ms — the
+            // phone always answers inside ~1s. But Asterisk's OWN reported figure ran higher over
+            // the same window (median 310ms, max 1451ms) and has reported 3864/6574/7549ms
+            // elsewhere. Since qualify_timeout is evaluated against that reported number, Asterisk
+            // can mark a phone Unavailable that in fact answered promptly — and the backend then
+            // sends recovery commands to a healthy handset, which is pure churn.
+            //
+            // 15s keeps a 15x margin over the measured worst-case wire RTT while tolerating the
+            // reported inflation. Deliberately a mitigation, not a fix: the inflation's cause is
+            // still unexplained (Asterisk CPU was measured at ~0.9% of a core, so NOT load).
+            // Cost of a longer timeout is slower detection of a genuinely dead phone; at
+            // qualify_frequency=30 that is one extra probe cycle, which the SipMonitor already
+            // tolerates.
+            "qualify_timeout" to "15",
             "remove_existing" to "yes",
         ))
         putConfig("auth", "$endpointId-auth", mapOf(
