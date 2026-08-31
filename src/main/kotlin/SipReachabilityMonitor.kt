@@ -32,7 +32,7 @@ class SipReachabilityMonitor(
 ) {
     private companion object {
         const val CHECK_INTERVAL_MS = 120_000L        // poll every 2 min
-        const val DEBOUNCE_CHECKS = 2                 // must be down this many consecutive polls (~4 min)
+        const val DEBOUNCE_CHECKS = 5                 // must be down this many consecutive polls (~10 min)
         const val RENOTIFY_COOLDOWN_MS = 30 * 60_000L // while still down, re-alert at most this often
     }
 
