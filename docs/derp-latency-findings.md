@@ -154,3 +154,64 @@ Not yet settled:
 - **Rollout.** The test build keeps `versionCode = 100` so OTA cannot revert it; a fleet
   release needs vc101 and a new OTA manifest.
 - **The S26 is still on 500 ms** and remains the phone generating nearly all the field alarms.
+
+---
+
+# Rollout, 2026-09-01
+
+## The S26 cannot be fixed remotely — by any route
+
+Worth stating plainly, because it is not obvious from the architecture:
+
+- `ShopScheduleActivity` calls `checkForUpdates(manual = false)` on create, so the app **only
+  looks for an update when a human opens the UI**. There is no background check.
+- `ApkInstaller` fires the system package-installer intent (`REQUEST_INSTALL_PACKAGES`). There is
+  no `DevicePolicyManager` / device-owner anywhere, so **the install needs a tap on the phone**.
+- The only remote command the backend can send is `CMD_RESTART`, which restarts the SIP stack.
+
+So the fix reaches a distant handset exactly when someone there opens the app — no sooner,
+whether the OTA was published today or next week.
+
+## Published: 1.0.100 / vc101
+
+`data/apk/shopmanager-1.0.100.apk` on the edge, sha256
+`8b741f71a5388802aeaadadb1871ce5a53e7b1a237c8efbf230edc5673a0f426`, manifest written to
+`data/apk/version.json` (previous manifest backed up alongside, per the existing convention).
+Both `/api/app/version.json` and `/api/app/download/...` return 401 unauthenticated, i.e. wired.
+
+Validated end to end on the S21 rather than assumed: the prompt appeared with the right release
+notes, the download ran, the sha check passed, and vc101 installed with the signer unchanged.
+
+### ⚠️ Play Protect gates the install, and hides the way through
+
+The step that will strand a non-technical user. After "Update", Google Play Protect interrupts
+with **"App scan recommended — Play Protect hasn't seen this app before"**, offering only:
+
+```
+[ Scan app ]            <- uploads the APK to Google
+[ Don't install app ]
+```
+
+**"Install without scanning" is hidden behind the "More details" chevron** and only appears once
+that is expanded. Neither visible button installs the app. Tell whoever holds the phone:
+
+1. Open ShopManager.
+2. **DOWNLOAD UPDATE** on the "Faster, more reliable ringing" prompt.
+3. **Update** on the system installer.
+4. On the Play Protect screen: **More details → Install without scanning**.
+
+Step 4 is the one to spell out. "Scan app" sends the app binary to Google, which is contrary to
+the deliberate no-Google-dependency stance elsewhere in this system; it is also slower and may
+still end in a warning.
+
+## Mitigation shipped for handsets still on the old pump
+
+`AriClient` now derives `qualify_frequency` per AOR (27–33 s, mean unchanged at 30 s) instead of
+giving every AOR 30 s. The AORs on one handset were created together and stayed in lockstep, so
+Asterisk fired all of a phone's OPTIONS at the same instant — the worst case for a one-message-
+per-tick app. Deployed; the startup provisioning pass re-pushed every AOR (verified: mgr2 33 s,
+mgr3 27 s, shop1 31 s, shop2 32 s, shop4 30 s, shop5 27 s).
+
+Effect on the S26, still on the 500 ms pump: worst-case qualify RTT fell from 2170 ms to 913 ms
+immediately, and the AORs continue to decorrelate as they drift. This addresses the
+serialisation only — **not** the Doze pump stall, which still needs the app update.
