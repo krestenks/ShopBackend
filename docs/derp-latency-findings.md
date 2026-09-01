@@ -109,3 +109,48 @@ ssh phone@192.168.0.192 'column -s, -t < /home/phone/derpprobe.csv | tail -20'
 
 Stop it with `sudo systemctl disable --now derpprobe.service`. The CSV grows ~0.5 MB/day and
 is not self-trimming.
+
+---
+
+# Result of the fix: idle pump 500 ms → 20 ms
+
+Applied 2026-09-01 to the S21 (`eriks-s21`, 100.64.0.7) as ShopManager `1.0.99-pump20`,
+release-signed and installed in place. The S26 was deliberately left on 500 ms as a control in
+the same time window.
+
+Five OPTIONS fired simultaneously:
+
+```
+S21 before   541, 1069, 1578, 2112, 2633 ms   gaps 528/510/533/521   spread 2092 ms
+S21 after     62,   89,  118,  149,  176 ms   gaps  27/ 29/ 31/ 27   spread  114 ms
+S26 control 3984, 4509, 4984, 5500, 5998 ms   gaps 524/475/516/498   spread 2014 ms
+```
+
+| metric (S21) | before | after |
+|---|---|---|
+| burst gap (= pump interval) | 493–568 ms | **20–35 ms** |
+| spread across 5 queued OPTIONS | ~2100 ms | **~111 ms** |
+| single SIP OPTIONS, median | 475 ms | **63 ms** |
+| `app_added_ms` (probe CSV) | 582 ms | **43 ms** |
+| Asterisk qualify RTT, all 5 AORs | 178–472 ms | **63–157 ms** |
+
+The single-OPTIONS median of 63 ms now sits **on the relay floor** (50–90 ms measured
+independently via ICMP and TCP-RST), i.e. the application's contribution is essentially gone.
+The S26 control moved not at all, so this is the pump and not ambient conditions.
+
+`derpprobe.service` caught the transition unattended:
+
+```
+22:52:33  burst_gap=534ms  app_added=582ms  sip_udp=669ms  relay=87ms
+23:06:08  burst_gap=47ms   app_added=43ms   sip_udp=91ms   relay=48ms
+23:09:27  burst_gap=49ms   app_added=43ms   sip_udp=99ms   relay=56ms
+```
+
+Not yet settled:
+
+- **Battery.** The 20 ms pump was previously measured at ~1.6 % of one core, and the wakelock
+  that dominates the drain is unchanged — but that is a bench figure, not a field one. Watch
+  the S21 over a full duty day before rolling out.
+- **Rollout.** The test build keeps `versionCode = 100` so OTA cannot revert it; a fleet
+  release needs vc101 and a new OTA manifest.
+- **The S26 is still on 500 ms** and remains the phone generating nearly all the field alarms.
