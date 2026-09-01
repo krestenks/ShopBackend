@@ -61,13 +61,34 @@ class AriClient(private val config: AsteriskConfig) {
     }
 
     /**
+     * Per-AOR qualify period, deliberately NOT the same number for every AOR.
+     *
+     * One phone hosts several AORs (its own mgr{id} plus a shop{n}-manager for every shop it
+     * covers). With an identical frequency they were all created together and stayed in
+     * lockstep, so Asterisk fired every OPTIONS for that handset at the same instant.
+     *
+     * That is the worst possible arrangement, because the app answers only ONE SIP message per
+     * Core.iterate() tick (measured: replies to a simultaneous burst of 5 came back spaced at
+     * exactly one tick). Five AORs in lockstep therefore made the last one wait five ticks.
+     * Spreading the period means each OPTIONS usually arrives alone and costs a single tick.
+     *
+     * 27..33 keeps the mean at the previous 30 s, so total probe load is unchanged; the values
+     * are derived from the AOR id so they are stable across restarts rather than random. This
+     * is a mitigation for phones still running the old 500 ms pump — the real fix is the pump
+     * itself (ShopManager `ITERATE_INTERVAL_IDLE_MS`, dropped 500 -> 20). See
+     * `docs/derp-latency-findings.md`.
+     */
+    private fun qualifyFrequencyFor(endpointId: String): Int =
+        27 + Math.floorMod(endpointId.hashCode(), 7)
+
+    /**
      * Generic endpoint+auth+aor triplet. The AOR id MUST equal the registering SIP
      * username (= endpointId), or PJSIP's AOR lookup on REGISTER fails with 404.
      */
     private suspend fun upsertSipAccount(endpointId: String, sipPassword: String, context: String, maxContacts: Int = 3) {
         putConfig("aor", endpointId, mapOf(
             "max_contacts" to maxContacts.toString(),
-            "qualify_frequency" to "30",
+            "qualify_frequency" to qualifyFrequencyFor(endpointId).toString(),
             // Manager phones (esp. Samsung) intermittently stall answering OPTIONS for ~1s+
             // even on a healthy tailnet, so the default 3s timeout flaps them to Unavailable
             // and inbound calls hit "line busy".
