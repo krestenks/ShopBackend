@@ -117,7 +117,13 @@ class AmiClient(private val config: AsteriskConfig) {
                 .drop(1)
                 .mapNotNull { line ->
                     val parts = line.trim().split(Regex("\\s+"))
-                    if (parts.size >= 3) parts[0] to parts[2] else null
+                    if (parts.size < 3) return@mapNotNull null
+                    // State can be multi-word ("Not initialized", "Not connected"): take every
+                    // token between Group (idx 1) and the first numeric column (RSSI), so we don't
+                    // truncate it to just "Not". Falls back to the single token if there's no RSSI.
+                    val rssiIdx = (2 until parts.size).firstOrNull { parts[it].toIntOrNull() != null } ?: 3
+                    val state = parts.subList(2, rssiIdx.coerceIn(3, parts.size)).joinToString(" ")
+                    parts[0] to state.ifBlank { parts[2] }
                 }
                 .toMap()
         } catch (e: Exception) {
