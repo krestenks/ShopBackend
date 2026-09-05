@@ -1,5 +1,6 @@
 import asterisk.AmiClient
 import asterisk.ReliabilityAlerter
+import kotlinx.coroutines.runBlocking
 
 /**
  * Auto-recovers a GSM modem wedged in a call state, and flags modems that go down.
@@ -24,6 +25,10 @@ import asterisk.ReliabilityAlerter
 class ModemStuckWatchdog(
     private val amiClient: AmiClient,
     private val alerter: ReliabilityAlerter,
+    /** Re-scan modems by IMSI + rewrite/reload the trunk config when the restart/reload ladder
+     *  can't recover a modem — fixes a stale device path after a USB re-enumeration (the
+     *  2026-09-05 outage). Returns true if a device path actually changed. Null disables the stage. */
+    private val resyncDevices: (suspend () -> Boolean)? = null,
     private val enabled: Boolean = System.getenv("MODEM_WATCHDOG_ENABLED")?.lowercase() != "false",
 ) {
     private companion object {
@@ -53,6 +58,7 @@ class ModemStuckWatchdog(
     // after DOWN_RETRY_LADDER_MS rather than giving up forever. lastNagAt gates the periodic re-alert.
     private val ladderExhaustedAt = HashMap<String, Long>()
     private val lastNagAt = HashMap<String, Long>()
+    private val resyncedThisPass = HashSet<String>()   // device-path resync already tried this ladder pass
 
     fun start() {
         if (!enabled) {
@@ -105,7 +111,7 @@ class ModemStuckWatchdog(
     private fun clearDownState(trunk: String) {
         downStreak.remove(trunk)
         downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk)
-        ladderExhaustedAt.remove(trunk); lastNagAt.remove(trunk)
+        ladderExhaustedAt.remove(trunk); lastNagAt.remove(trunk); resyncedThisPass.remove(trunk)
     }
 
     private fun handleOrphan(trunk: String, state: String) {
@@ -150,7 +156,8 @@ class ModemStuckWatchdog(
             // giving up forever — the modem may have become restart-recoverable in the meantime.
             ladderExhaustedAt[trunk]?.let {
                 if (now - it >= DOWN_RETRY_LADDER_MS) {
-                    downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk); ladderExhaustedAt.remove(trunk)
+                    downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk)
+                    ladderExhaustedAt.remove(trunk); resyncedThisPass.remove(trunk)
                 }
             }
 
@@ -186,6 +193,26 @@ class ModemStuckWatchdog(
                 if (anyQuectelCall) return   // defer the reload until no call is live; re-evaluate next tick
                 // Reload fired but the modem hasn't come back yet — give it time to re-init before alerting.
                 if (now - lastChanReloadAt < RELOAD_GRACE_MS) return
+                // Stage 2.5 — restarts + reload didn't help → the device path is probably stale after a
+                // USB re-enumeration. Re-scan modems by IMSI and rewrite the trunk config (once per pass).
+                // No live call can be up here (we returned above if one was), so the reload is safe.
+                val resync = resyncDevices
+                if (resync != null && trunk !in resyncedThisPass) {
+                    resyncedThisPass.add(trunk)
+                    val changed = runCatching { runBlocking { resync() } }
+                        .onFailure { println("[ModemWatchdog] device resync failed: ${it.message}") }
+                        .getOrDefault(false)
+                    println("[ModemWatchdog] resynced device paths after failed restarts of $trunk (changed=$changed)")
+                    if (changed) {
+                        alerter.record(
+                            "warn", "modem_resync", shopIdOf(trunk),
+                            "Modem '$trunk' was down after restarts+reload — re-scanned modems and rewrote the " +
+                                "trunk config (stale device path, likely a USB re-enumeration)",
+                            alertAdmin = false,
+                        )
+                        return   // give the rewrite+reload time to re-init before judging it exhausted
+                    }
+                }
                 ladderExhaustedAt[trunk] = now   // pass done; retried after DOWN_RETRY_LADDER_MS (never permanent)
             }
         }

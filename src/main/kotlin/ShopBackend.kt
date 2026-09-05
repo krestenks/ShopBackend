@@ -141,7 +141,13 @@ object ShopBackend {
 
         // Auto-recover a GSM modem wedged in a call state (chan_quectel lost a hangup → stuck
         // "Dialing" → all calls fail until restarted), and flag down modems. See [ModemStuckWatchdog].
-        ModemStuckWatchdog(amiClient, reliabilityAlerter).start()
+        ModemStuckWatchdog(
+            amiClient, reliabilityAlerter,
+            // When the restart/reload ladder can't recover a down modem, re-scan by IMSI and
+            // rewrite the trunk config — self-heals a stale device path after a USB re-enumeration
+            // (the 2026-09-05 outage) instead of churning restarts against the wrong ttyUSB.
+            resyncDevices = { provisioner.resyncModemDevices() },
+        ).start()
 
         // Once a day, refresh each Lebara shop's prepaid balance so a low balance surfaces as a
         // top-up nudge in the manager app (see [LebaraBalanceMonitor] + the balance-alerts endpoint).

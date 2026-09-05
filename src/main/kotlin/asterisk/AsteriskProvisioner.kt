@@ -264,6 +264,28 @@ class AsteriskProvisioner(
     }
 
     /**
+     * Targeted recovery for "the trunk config points at a stale device after a USB re-enumeration"
+     * (the 2026-09-05 outage: ttyUSB numbers reshuffled, so shops pointed at SIM-less spares).
+     * Re-scans the physically-present modems, re-resolves each shop's device paths by IMSI, and —
+     * ONLY if a path actually changed — rewrites and reloads the chan_quectel trunk config. The
+     * ModemStuckWatchdog calls this when its restart/reload ladder can't otherwise recover a down
+     * modem. Reloads chan_quectel when it rewrites, so callers must ensure no GSM call is live.
+     * Returns true if any shop's device path changed (i.e. a re-scan actually fixed something).
+     */
+    suspend fun resyncModemDevices(): Boolean {
+        val before = db.getAllConfiguredShopTelephonyConfigs()
+            .associate { it.shopId to (it.modemDataDevice to it.modemAlsaDevice) }
+        resolveDevicesForAllShops()   // re-scan by IMSI + persist any device-path change
+        val after = db.getAllConfiguredShopTelephonyConfigs()
+        val changed = after.any { before[it.shopId] != (it.modemDataDevice to it.modemAlsaDevice) }
+        if (changed) {
+            quectelConfigWriter.regenerate(after.filter { !it.modemDataDevice.isNullOrBlank() })  // writes + reloads
+            println("[Asterisk] resyncModemDevices: device paths changed — rewrote + reloaded chan_quectel trunks")
+        }
+        return changed
+    }
+
+    /**
      * Removes a shop's SIM binding (GSM trunk goes away) and regenerates. The SIP
      * accounts stay — internal intercom keeps working without a SIM.
      */
