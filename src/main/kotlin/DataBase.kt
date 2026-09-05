@@ -4738,10 +4738,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val currentFailures = getCustomerCallAppScreening(customerId)?.failureCount ?: 0
         val newFailures = currentFailures + 1
         // Backoff: 2^newFailures hours, capped at 24h
-        val backoffMs = minOf(
-            (1L shl newFailures) * 60L * 60L * 1000L,  // 2^n hours in ms
-            24L * 60L * 60L * 1000L,                    // 24h cap
-        )
+        // 2^n hours, guarded against bit-shift overflow. After several failures widen the cap from
+        // 24h to 7 days so a persistently-failing number retries ~weekly, not daily forever
+        // (RapidAPI quota hygiene). It is never excluded — it still retries and self-heals.
+        val shiftHours = 1L shl minOf(newFailures, 20)
+        val capMs = if (newFailures >= 6) 7L * 24L * 60L * 60L * 1000L else 24L * 60L * 60L * 1000L
+        val backoffMs = minOf(shiftHours * 60L * 60L * 1000L, capMs)
         val nextRetryAt = screenedAt + backoffMs
 
         val sql = """

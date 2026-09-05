@@ -65,13 +65,30 @@ class ModemResolver {
         return vendor == EC25_VENDOR && product == EC25_PRODUCT
     }
 
-    /** /sys/bus/usb/devices/<port>:1.2/{ttyUSBn|tty/ttyUSBn} → /dev/ttyUSBn */
+    /**
+     * Resolves the modem's AT/data serial device, PREFERRING the stable /dev/serial/by-path/ node
+     * over the raw /dev/ttyUSBn. ttyUSB numbers are reassigned by enumeration order on every USB
+     * re-enumeration, so a persisted /dev/ttyUSBn silently starts pointing at a DIFFERENT physical
+     * modem (this caused a 2-shop outage on 2026-09-05 — shops pinned to ttyUSB15/11 landed on
+     * SIM-less spares after a hub reset). The by-path node is tied to the physical USB socket and
+     * survives re-enumeration. Falls back to /dev/ttyUSBn if no by-path symlink is present.
+     */
     private fun resolveAtDevice(usbPort: String): String? {
         val ifaceDir = File("/sys/bus/usb/devices/$usbPort$AT_INTERFACE_SUFFIX")
         if (!ifaceDir.isDirectory) return null
         val tty = ifaceDir.listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
             ?: File(ifaceDir, "tty").listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
-        return tty?.let { "/dev/$it" }
+            ?: return null
+        val ttyPath = "/dev/$tty"
+        return stableByPathFor(ttyPath) ?: ttyPath
+    }
+
+    /** The /dev/serial/by-path/ symlink that resolves to [ttyPath] (stable across re-enum), or null. */
+    private fun stableByPathFor(ttyPath: String): String? {
+        val canonicalTty = runCatching { File(ttyPath).canonicalPath }.getOrNull() ?: return null
+        return File("/dev/serial/by-path").listFiles().orEmpty()
+            .firstOrNull { runCatching { it.canonicalPath }.getOrNull() == canonicalTty }
+            ?.absolutePath
     }
 
     /** Finds the ALSA sound card whose USB parent device is [usbPort]. */

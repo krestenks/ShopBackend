@@ -8,6 +8,11 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 // ─── Public exceptions ────────────────────────────────────────────────────────
 
@@ -29,7 +34,10 @@ data class CallAppRapidApiConfig(
     val apiKey: String,
     val host: String    = "callapp.p.rapidapi.com",
     val baseUrl: String = "https://callapp.p.rapidapi.com",
-    val timeoutMs: Long = 1_200,
+    // 5s, not 1.2s: the old tight timeout turned slow-but-valid replies into timeouts, and each
+    // timed-out request still counts against the RapidAPI quota, then retries — burning quota on
+    // lookups that never succeed.
+    val timeoutMs: Long = 5_000,
 )
 
 // ─── Interface ────────────────────────────────────────────────────────────────
@@ -313,13 +321,11 @@ internal data class CallAppApiResponseDto(
     val status: Boolean = false,
     val message: String? = null,
     val timestamp: Long? = null,
-    val data: CallAppDataDto? = null,
-)
-
-@Serializable
-internal data class CallAppDataDto(
-    val name: String? = null,
-    val priority: Int? = null,
+    // `data` is an object {name, priority} on a hit, but the API returns it as a plain STRING
+    // ("Invalid phone number or data not found.") on a miss. Declaring it as a raw JsonElement
+    // (not a typed object) means a miss no longer throws a JSON error — which was mis-recording
+    // every not-found number as an "error" and putting it on an endless retry loop (quota drain).
+    val data: JsonElement? = null,
 )
 
 private val responseJson = Json { ignoreUnknownKeys = true }
@@ -369,13 +375,17 @@ class CallAppRapidApiClient(
         // Parse JSON — let malformed JSON exceptions bubble up so callers decide
         val dto = responseJson.decodeFromString(CallAppApiResponseDto.serializer(), rawBody)
 
-        val resolvedName = dto.data?.name?.trim()?.takeIf { it.isNotBlank() }
+        // On a hit `data` is an object {name, priority}; on a miss it's a plain string
+        // ("...not found"). A non-object (or absent) `data` is a clean NOT-FOUND, not an error.
+        val dataObj = dto.data as? JsonObject
+        val resolvedName = dataObj?.get("name")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+        val priority = dataObj?.get("priority")?.jsonPrimitive?.intOrNull
         val found = dto.status && resolvedName != null
 
         return CallAppLookupResult(
             found     = found,
             name      = resolvedName,
-            priority  = dto.data?.priority,
+            priority  = priority,
             status    = dto.status,
             message   = dto.message,
             timestamp = dto.timestamp,
