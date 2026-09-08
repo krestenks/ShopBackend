@@ -917,12 +917,21 @@ class WebAdmin(
                 val name = params["name"] ?: ""
                 val address = params["address"] ?: ""
                 val directions = params["directions"] ?: ""
-                val impOwnerId = call.impersonatedOwnerId()
-                if (impOwnerId != null) {
-                    db.addShopForOwner(impOwnerId, name, address, directions)
-                } else {
-                    db.addShop(name, address, directions)
+                // A shop MUST have an owner: the app's owner-scope auth guard 403s on any shop with a
+                // null owner_id, which logs the manager out of screens that list it (observed
+                // 2026-09-08: shop6 was created ownerless via the old `else db.addShop(...)` path,
+                // breaking the Phone Status screen). Use the impersonated owner, or the sole owner if
+                // there's exactly one; never create an ownerless shop.
+                val ownerId = call.impersonatedOwnerId() ?: db.getAllOwners().singleOrNull()?.id
+                if (ownerId == null) {
+                    call.respondText(
+                        "Cannot add a shop without an owner — impersonate/select an owner first " +
+                            "(there is no single default owner to fall back to).",
+                        status = HttpStatusCode.BadRequest,
+                    )
+                    return@post
                 }
+                db.addShopForOwner(ownerId, name, address, directions)
                 call.respondRedirect("/shops")
             }
 
