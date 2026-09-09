@@ -558,12 +558,14 @@ class MobileApi(
                     // Managers only.
                     if (loginInfo.role == "manager" && loginInfo.managerId != null &&
                         (report.rsrp != null || report.signalLevel != null || report.transport != null ||
-                            report.batteryPct != null || report.dozeWhitelisted != null)) {
+                            report.batteryPct != null || report.dozeWhitelisted != null ||
+                            report.appVersion != null)) {
                         db.upsertManagerSignal(
                             loginInfo.managerId, report.rsrp, report.rsrq,
                             report.signalLevel, report.signalDbm, report.transport,
                             report.batteryPct, report.batteryCharging,
                             report.dozeWhitelisted, report.bgRestricted, report.powerSave, report.dataSaver,
+                            report.appVersion,
                         )
                         println("[Signal] mgr${loginInfo.managerId} transport=${report.transport} " +
                             "level=${report.signalLevel} rsrp=${report.rsrp} rsrq=${report.rsrq} dbm=${report.signalDbm} " +

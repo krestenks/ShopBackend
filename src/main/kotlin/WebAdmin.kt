@@ -684,7 +684,12 @@ class WebAdmin(
                             tbody {
                                 for (m in managers.sortedByDescending { dutyById[it.id] == true }) {
                                     tr {
-                                        td { +m.name }
+                                        td {
+                                            +m.name
+                                            sigById[m.id]?.appVersion?.let {
+                                                div { style = "color:#5f6368;font-size:11px;"; +"app $it" }
+                                            }
+                                        }
                                         td { dutyBadge(dutyById[m.id] == true, if (dutyById[m.id] == true) "On duty" else "Off duty") }
                                         telemetryCells(m.id)
                                     }

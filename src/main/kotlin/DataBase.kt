@@ -1007,6 +1007,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 bg_restricted    INTEGER,
                 power_save       INTEGER,
                 data_saver       TEXT,
+                app_version      TEXT,
                 updated_at       INTEGER NOT NULL
             )
         """.trimIndent()) }
@@ -1014,6 +1015,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         for (col in listOf(
             "battery_pct INTEGER", "battery_charging INTEGER",
             "doze_whitelisted INTEGER", "bg_restricted INTEGER", "power_save INTEGER", "data_saver TEXT",
+            "app_version TEXT",
         )) {
             runCatching { connection.createStatement().use { it.execute("ALTER TABLE manager_signal ADD COLUMN $col") } }
         }
@@ -3363,6 +3365,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val batteryPct: Int?, val batteryCharging: Boolean?,
         val dozeWhitelisted: Boolean?, val bgRestricted: Boolean?, val powerSave: Boolean?,
         val dataSaver: String?,
+        val appVersion: String?,
         val updatedAt: Long,
     )
 
@@ -3371,21 +3374,21 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         managerId: Int, rsrp: Int?, rsrq: Int?, level: Int?, dbm: Int?, transport: String?,
         batteryPct: Int? = null, batteryCharging: Boolean? = null,
         dozeWhitelisted: Boolean? = null, bgRestricted: Boolean? = null, powerSave: Boolean? = null,
-        dataSaver: String? = null,
+        dataSaver: String? = null, appVersion: String? = null,
     ) {
         fun bit(b: Boolean?) = b?.let { if (it) 1 else 0 }
         connection.prepareStatement("""
             INSERT INTO manager_signal
                 (manager_id, rsrp, rsrq, signal_level, signal_dbm, transport, battery_pct, battery_charging,
-                 doze_whitelisted, bg_restricted, power_save, data_saver, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 doze_whitelisted, bg_restricted, power_save, data_saver, app_version, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(manager_id) DO UPDATE SET
                 rsrp=excluded.rsrp, rsrq=excluded.rsrq, signal_level=excluded.signal_level,
                 signal_dbm=excluded.signal_dbm, transport=excluded.transport,
                 battery_pct=excluded.battery_pct, battery_charging=excluded.battery_charging,
                 doze_whitelisted=excluded.doze_whitelisted, bg_restricted=excluded.bg_restricted,
                 power_save=excluded.power_save, data_saver=excluded.data_saver,
-                updated_at=excluded.updated_at
+                app_version=excluded.app_version, updated_at=excluded.updated_at
         """.trimIndent()).use { stmt ->
             stmt.setInt(1, managerId)
             if (rsrp != null) stmt.setInt(2, rsrp) else stmt.setNull(2, java.sql.Types.INTEGER)
@@ -3399,7 +3402,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             bit(bgRestricted).let { if (it != null) stmt.setInt(10, it) else stmt.setNull(10, java.sql.Types.INTEGER) }
             bit(powerSave).let { if (it != null) stmt.setInt(11, it) else stmt.setNull(11, java.sql.Types.INTEGER) }
             if (dataSaver != null) stmt.setString(12, dataSaver) else stmt.setNull(12, java.sql.Types.VARCHAR)
-            stmt.setLong(13, System.currentTimeMillis())
+            if (appVersion != null) stmt.setString(13, appVersion) else stmt.setNull(13, java.sql.Types.VARCHAR)
+            stmt.setLong(14, System.currentTimeMillis())
             stmt.executeUpdate()
         }
     }
@@ -3409,7 +3413,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val out = mutableListOf<ManagerSignal>()
         connection.prepareStatement(
             """SELECT manager_id, rsrp, rsrq, signal_level, signal_dbm, transport, battery_pct, battery_charging,
-                      doze_whitelisted, bg_restricted, power_save, data_saver, updated_at FROM manager_signal"""
+                      doze_whitelisted, bg_restricted, power_save, data_saver, app_version, updated_at FROM manager_signal"""
         ).use { stmt ->
             val rs = stmt.executeQuery()
             fun ni(col: String): Int? { val v = rs.getInt(col); return if (rs.wasNull()) null else v }
@@ -3423,6 +3427,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     batteryCharging = nb("battery_charging"),
                     dozeWhitelisted = nb("doze_whitelisted"), bgRestricted = nb("bg_restricted"),
                     powerSave = nb("power_save"), dataSaver = rs.getString("data_saver"),
+                    appVersion = rs.getString("app_version"),
                     updatedAt = rs.getLong("updated_at"),
                 )
             }
