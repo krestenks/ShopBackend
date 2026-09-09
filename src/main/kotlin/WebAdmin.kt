@@ -586,6 +586,11 @@ class WebAdmin(
                 val shops = if (impOwnerId != null) db.getShopsByOwner(impOwnerId) else db.getAllShops()
                 val dutyById = managers.associate { it.id to db.isManagerOnDuty(it.id) }
                 val nameById = managers.associate { it.id to it.name }
+                // Latest per-phone telemetry (signal / battery / Android throttle state), reported on
+                // the app's SIP watchdog tick. Empty for phones on an app build that predates it.
+                val sigById = runCatching { db.getAllManagerSignals().associateBy { it.managerId } }
+                    .getOrDefault(emptyMap())
+                val nowMs = System.currentTimeMillis()
 
                 fun FlowContent.dutyBadge(on: Boolean, label: String) {
                     span {
@@ -596,6 +601,69 @@ class WebAdmin(
                     }
                 }
 
+                val muted = "color:#5f6368;"
+                val danger = "color:#b3261e;font-weight:600;"
+
+                /** Signal / battery / connection-health / last-seen cells for a manager's phone. */
+                fun TR.telemetryCells(mid: Int) {
+                    val s = sigById[mid]
+                    if (s == null) {
+                        repeat(3) { td { span { style = muted; +"—" } } }
+                        td { span { style = muted; +"no report" } }
+                        return
+                    }
+                    // Signal
+                    td {
+                        if (s.level == null && s.dbm == null && s.rsrp == null) {
+                            span { style = muted; +(s.transport ?: "—") }
+                        } else {
+                            +("📶 " + (s.level?.let { "$it/4" } ?: "?"))
+                            (s.dbm ?: s.rsrp)?.let { +" ($it dBm)" }
+                            s.transport?.let { span { style = muted; +" · $it" } }
+                        }
+                    }
+                    // Battery
+                    td {
+                        val p = s.batteryPct
+                        if (p == null) { span { style = muted; +"—" } } else {
+                            val low = p < 20 && s.batteryCharging != true
+                            span {
+                                if (low) style = danger
+                                val icon = if (s.batteryCharging == true) "🔌" else if (low) "🪫" else "🔋"
+                                +"$icon $p%"
+                            }
+                        }
+                    }
+                    // Connection health (Android throttle warnings)
+                    td {
+                        if (s.dozeWhitelisted == null && s.bgRestricted == null && s.powerSave == null) {
+                            span { style = muted; +"—" }
+                        } else {
+                            val warns = buildList {
+                                if (s.dozeWhitelisted == false) add("Doze off")
+                                if (s.bgRestricted == true) add("bg-restricted")
+                                if (s.powerSave == true) add("power-save")
+                                if (s.dataSaver == "on") add("data-saver")
+                            }
+                            if (warns.isEmpty()) span { style = "color:#137333;"; +"✓ OK" }
+                            else span { style = danger; +("⚠ " + warns.joinToString(", ")) }
+                        }
+                    }
+                    // Last seen
+                    td {
+                        val mins = (nowMs - s.updatedAt) / 60000
+                        span {
+                            if (mins >= 5) style = danger
+                            +when {
+                                mins < 1 -> "just now"
+                                mins < 60 -> "${mins}m ago"
+                                mins < 1440 -> "${mins / 60}h ago"
+                                else -> "${mins / 1440}d ago"
+                            }
+                        }
+                    }
+                }
+
                 call.respondAdminPage(
                     titleText = "Availability",
                     subtitle = "Who is on duty (receiving calls) right now",
@@ -603,18 +671,25 @@ class WebAdmin(
                 ) {
                     val onCount = dutyById.values.count { it }
                     div("panel") {
-                        h3 { +"Manager duty" }
-                        p("hint") { +"$onCount of ${managers.size} manager(s) on duty. Managers set this in the app (Availability). No row yet = on duty by default." }
+                        h3 { +"Manager duty & phone health" }
+                        p("hint") {
+                            +"$onCount of ${managers.size} manager(s) on duty. Managers set duty in the app (Availability); no row yet = on duty by default. "
+                            +"Signal / battery / connection come from each phone's ~60s report — \"—\" means the phone is on an older app build that doesn't send it, and a stale \"last seen\" or red warning flags a phone likely to miss calls."
+                        }
                         table {
-                            thead { tr { th { +"Manager" }; th { +"Status" } } }
+                            thead { tr {
+                                th { +"Manager" }; th { +"Status" }; th { +"Signal" }
+                                th { +"Battery" }; th { +"Connection" }; th { +"Last seen" }
+                            } }
                             tbody {
                                 for (m in managers.sortedByDescending { dutyById[it.id] == true }) {
                                     tr {
                                         td { +m.name }
                                         td { dutyBadge(dutyById[m.id] == true, if (dutyById[m.id] == true) "On duty" else "Off duty") }
+                                        telemetryCells(m.id)
                                     }
                                 }
-                                if (managers.isEmpty()) tr { td { colSpan = "2"; +"No managers." } }
+                                if (managers.isEmpty()) tr { td { colSpan = "6"; +"No managers." } }
                             }
                         }
                     }
