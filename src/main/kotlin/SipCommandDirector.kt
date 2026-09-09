@@ -69,6 +69,11 @@ object SipCommandDirector {
         val signalDbm: Int? = null,
         /** Active transport at report time: "cellular" | "wifi" | "other" | "none". */
         val transport: String? = null,
+        // ── Battery telemetry (added 2026-09; nullable — older apps omit them) ──
+        /** Battery charge 0..100 (%). Null if unavailable. A phone that dies overnight goes dark. */
+        val batteryPct: Int? = null,
+        /** True while charging/full. Null if unavailable. */
+        val batteryCharging: Boolean? = null,
     )
 
     private class State {
