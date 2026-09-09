@@ -210,7 +210,10 @@ object ShopBackend {
 
         embeddedServer(Netty, port = port, host = host) {
             install(ContentNegotiation) {
-                json(Json { prettyPrint = false })
+                // ignoreUnknownKeys so the app can add report fields (e.g. signal metrics) without
+                // 400ing against an older backend — previously any unknown key blinded the whole
+                // sip-report path, which forced field-smuggling hacks app-side.
+                json(Json { prettyPrint = false; ignoreUnknownKeys = true })
             }
             install(Sessions) {
                 cookie<WebAdmin.AdminSession>("ADMIN_SESSION")

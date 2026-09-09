@@ -553,6 +553,17 @@ class MobileApi(
                     // disagreement against it.
                     val command = SipCommandDirector.onVerdict(aor, reachable)
                     SipCommandDirector.onReport(aor, report, reachable)
+                    // Persist + log the phone's radio signal (piggybacked on the report) so outages
+                    // can be correlated with LTE signal / wifi-vs-cellular. Managers only.
+                    if (loginInfo.role == "manager" && loginInfo.managerId != null &&
+                        (report.rsrp != null || report.signalLevel != null || report.transport != null)) {
+                        db.upsertManagerSignal(
+                            loginInfo.managerId, report.rsrp, report.rsrq,
+                            report.signalLevel, report.signalDbm, report.transport,
+                        )
+                        println("[Signal] mgr${loginInfo.managerId} transport=${report.transport} " +
+                            "level=${report.signalLevel} rsrp=${report.rsrp} rsrq=${report.rsrq} dbm=${report.signalDbm}")
+                    }
                     call.respond(SipStatusReportResponse(
                         ok = true,
                         reachable = reachable,

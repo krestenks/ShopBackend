@@ -990,6 +990,20 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             )
         """.trimIndent()) }
 
+        // Latest radio/signal telemetry reported by each manager's phone (piggybacked on sip-report).
+        // One row per manager, overwritten each report — used to correlate outages with LTE signal.
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS manager_signal (
+                manager_id   INTEGER PRIMARY KEY,
+                rsrp         INTEGER,
+                rsrq         INTEGER,
+                signal_level INTEGER,
+                signal_dbm   INTEGER,
+                transport    TEXT,
+                updated_at   INTEGER NOT NULL
+            )
+        """.trimIndent()) }
+
         ensureManagerPoolBackfill()
 
         // Push device tokens (FCM) — one row per (ref_type, ref_id, token). Used to
@@ -3322,6 +3336,52 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     rs.getInt("id"), rs.getLong("created_at"), rs.getString("severity"),
                     rs.getString("category"), sid, rs.getString("message"),
                 ))
+            }
+        }
+        return out
+    }
+
+    /** Latest reported radio/signal telemetry for a manager's phone. */
+    data class ManagerSignal(
+        val managerId: Int,
+        val rsrp: Int?, val rsrq: Int?, val level: Int?, val dbm: Int?,
+        val transport: String?, val updatedAt: Long,
+    )
+
+    /** Store a manager phone's latest signal report (one row per manager, overwritten). */
+    fun upsertManagerSignal(managerId: Int, rsrp: Int?, rsrq: Int?, level: Int?, dbm: Int?, transport: String?) {
+        connection.prepareStatement("""
+            INSERT INTO manager_signal (manager_id, rsrp, rsrq, signal_level, signal_dbm, transport, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(manager_id) DO UPDATE SET
+                rsrp=excluded.rsrp, rsrq=excluded.rsrq, signal_level=excluded.signal_level,
+                signal_dbm=excluded.signal_dbm, transport=excluded.transport, updated_at=excluded.updated_at
+        """.trimIndent()).use { stmt ->
+            stmt.setInt(1, managerId)
+            if (rsrp != null) stmt.setInt(2, rsrp) else stmt.setNull(2, java.sql.Types.INTEGER)
+            if (rsrq != null) stmt.setInt(3, rsrq) else stmt.setNull(3, java.sql.Types.INTEGER)
+            if (level != null) stmt.setInt(4, level) else stmt.setNull(4, java.sql.Types.INTEGER)
+            if (dbm != null) stmt.setInt(5, dbm) else stmt.setNull(5, java.sql.Types.INTEGER)
+            if (transport != null) stmt.setString(6, transport) else stmt.setNull(6, java.sql.Types.VARCHAR)
+            stmt.setLong(7, System.currentTimeMillis())
+            stmt.executeUpdate()
+        }
+    }
+
+    /** All managers' latest signal reports (for the admin UI / monitoring). */
+    fun getAllManagerSignals(): List<ManagerSignal> {
+        val out = mutableListOf<ManagerSignal>()
+        connection.prepareStatement(
+            "SELECT manager_id, rsrp, rsrq, signal_level, signal_dbm, transport, updated_at FROM manager_signal"
+        ).use { stmt ->
+            val rs = stmt.executeQuery()
+            fun ni(col: String): Int? { val v = rs.getInt(col); return if (rs.wasNull()) null else v }
+            while (rs.next()) {
+                out += ManagerSignal(
+                    managerId = rs.getInt("manager_id"),
+                    rsrp = ni("rsrp"), rsrq = ni("rsrq"), level = ni("signal_level"), dbm = ni("signal_dbm"),
+                    transport = rs.getString("transport"), updatedAt = rs.getLong("updated_at"),
+                )
             }
         }
         return out

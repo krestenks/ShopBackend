@@ -58,6 +58,17 @@ object SipCommandDirector {
         /** The app's consecutive-unreachable counter. */
         val unreachableStreak: Int? = null,
         val appVersion: String? = null,
+        // ── Radio/signal telemetry (added 2026-09; nullable — older apps omit them) ──
+        /** LTE/NR reference signal power (dBm), e.g. -95. Null if unavailable. */
+        val rsrp: Int? = null,
+        /** LTE/NR reference signal quality (dB), e.g. -11. Null if unavailable. */
+        val rsrq: Int? = null,
+        /** Coarse signal bars 0..4 from SignalStrength.level. */
+        val signalLevel: Int? = null,
+        /** Overall signal strength (dBm) from SignalStrength. */
+        val signalDbm: Int? = null,
+        /** Active transport at report time: "cellular" | "wifi" | "other" | "none". */
+        val transport: String? = null,
     )
 
     private class State {
