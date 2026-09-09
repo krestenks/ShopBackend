@@ -558,15 +558,27 @@ class MobileApi(
                     // Managers only.
                     if (loginInfo.role == "manager" && loginInfo.managerId != null &&
                         (report.rsrp != null || report.signalLevel != null || report.transport != null ||
-                            report.batteryPct != null)) {
+                            report.batteryPct != null || report.dozeWhitelisted != null)) {
                         db.upsertManagerSignal(
                             loginInfo.managerId, report.rsrp, report.rsrq,
                             report.signalLevel, report.signalDbm, report.transport,
                             report.batteryPct, report.batteryCharging,
+                            report.dozeWhitelisted, report.bgRestricted, report.powerSave, report.dataSaver,
                         )
                         println("[Signal] mgr${loginInfo.managerId} transport=${report.transport} " +
                             "level=${report.signalLevel} rsrp=${report.rsrp} rsrq=${report.rsrq} dbm=${report.signalDbm} " +
                             "battery=${report.batteryPct}%${if (report.batteryCharging == true) "+chg" else ""}")
+                        // Throttle state — the reason an alive app can still be SIP-unreachable. Flag
+                        // the actionable ones loudly so "phone off the Doze whitelist" is greppable.
+                        if (report.dozeWhitelisted != null || report.bgRestricted != null ||
+                            report.powerSave != null || report.dataSaver != null || report.iterateSuspendedMs != null) {
+                            val warn = (report.dozeWhitelisted == false) || (report.bgRestricted == true) ||
+                                (report.powerSave == true)
+                            println("[DeviceState]${if (warn) " WARN" else ""} mgr${loginInfo.managerId} " +
+                                "dozeWhitelisted=${report.dozeWhitelisted} bgRestricted=${report.bgRestricted} " +
+                                "powerSave=${report.powerSave} deviceIdle=${report.deviceIdle} " +
+                                "dataSaver=${report.dataSaver} pumpSuspendedMs=${report.iterateSuspendedMs}")
+                        }
                     }
                     call.respond(SipStatusReportResponse(
                         ok = true,

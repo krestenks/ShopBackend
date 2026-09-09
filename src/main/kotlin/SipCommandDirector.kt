@@ -72,8 +72,21 @@ object SipCommandDirector {
         // ── Battery telemetry (added 2026-09; nullable — older apps omit them) ──
         /** Battery charge 0..100 (%). Null if unavailable. A phone that dies overnight goes dark. */
         val batteryPct: Int? = null,
-        /** True while charging/full. Null if unavailable. */
+        /** True while on external power (plugged). Null if unavailable. */
         val batteryCharging: Boolean? = null,
+        // ── Android throttle state (added 2026-09) — why an alive app is still SIP-unreachable ──
+        /** On the battery-optimization (Doze) whitelist? The state silently lost on a reboot. */
+        val dozeWhitelisted: Boolean? = null,
+        /** Background-restricted by the OS? */
+        val bgRestricted: Boolean? = null,
+        /** Battery saver on? */
+        val powerSave: Boolean? = null,
+        /** In Doze right now? */
+        val deviceIdle: Boolean? = null,
+        /** Data Saver status: "off" | "whitelisted" | "on". */
+        val dataSaver: String? = null,
+        /** ms the SIP pump lost to CPU suspend (Doze) since last iterate; -1 = never. */
+        val iterateSuspendedMs: Long? = null,
     )
 
     private class State {
