@@ -149,6 +149,12 @@ object ShopBackend {
             resyncDevices = { provisioner.resyncModemDevices() },
         ).start()
 
+        // Detect one-way audio on an answered manager call — the phone's mic uplink goes dead so the
+        // customer hears silence and hangs up (~15 s in, logs as OPERATOR_BRIDGED cause=31). Asterisk
+        // doesn't drop it and the modem is fine, so it was invisible until customers complained.
+        // See [OneWayAudioMonitor].
+        OneWayAudioMonitor(amiClient, reliabilityAlerter).start()
+
         // Once a day, refresh each Lebara shop's prepaid balance so a low balance surfaces as a
         // top-up nudge in the manager app (see [LebaraBalanceMonitor] + the balance-alerts endpoint).
         LebaraBalanceMonitor(db, telephonyService, amiClient).start()

@@ -8,6 +8,7 @@ import org.asteriskjava.manager.ManagerConnectionFactory
 import org.asteriskjava.manager.ManagerConnectionState
 import org.asteriskjava.manager.action.AbstractManagerAction
 import org.asteriskjava.manager.action.CommandAction
+import org.asteriskjava.manager.action.GetVarAction
 import org.asteriskjava.manager.action.ManagerAction
 import org.asteriskjava.manager.action.OriginateAction
 import org.asteriskjava.manager.event.ManagerEvent
@@ -99,6 +100,23 @@ class AmiClient(private val config: AsteriskConfig) {
     fun command(cliCommand: String): List<String> {
         val response = sendAction(CommandAction(cliCommand))
         return (response as? CommandResponse)?.result ?: listOfNotNull(response.message)
+    }
+
+    /**
+     * Reads a channel variable / dialplan function live over AMI (Getvar). Used to sample a live
+     * call's RTP counters, e.g. `CHANNEL(rtpqos,audio,rxcount)`. Returns null if the channel is
+     * gone, the function is unsupported, the value is empty/"(null)", or AMI is down — callers
+     * treat null as "unknown" and never act on it.
+     */
+    fun getChannelVar(channel: String, variable: String): String? {
+        if (!connected) return null
+        return try {
+            val resp = sendAction(GetVarAction(channel, variable), 5_000)
+            (resp.getAttribute("Value") ?: resp.getAttribute("value"))
+                ?.takeIf { it.isNotBlank() && !it.equals("(null)", ignoreCase = true) }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     fun reloadChanQuectel() {
