@@ -11,12 +11,17 @@ import asterisk.ReliabilityAlerter
  * does not drop it (rtp_timeout=0) and the modem is fine, so nothing surfaced it — it was only ever
  * caught from customer complaints. Restarting the ShopManager app on the handset restores the uplink.
  *
- * Detection: for each Up PJSIP manager channel (mgrN / shopN-manager), sample the audio RTP
- * counters live via `CHANNEL(rtpqos,audio,{rx,tx}count)`. If we are TRANSMITTING to the phone
- * (txcount past [MIN_TX_COUNT]) but have RECEIVED nothing new for [ONEWAY_STALL_MS] while the call
- * is up, that is one-way audio (customer hears silence) → alert admin once per call. A single
+ * Detection: read live per-channel RTP counters from `pjsip show channelstats` (Receive Count /
+ * Transmit Count). For each manager channel (mgrN / shopN-manager), if we are TRANSMITTING to the
+ * phone (Tx past [MIN_TX_COUNT]) but the Receive Count has not moved for [ONEWAY_STALL_MS] while the
+ * call is up, that is one-way audio (customer hears silence) → alert admin once per call. A single
  * received packet resets the stall, so ordinary jitter/loss never trips it. Both-directions-silent
  * is deliberately NOT flagged here (that is a media-path/coverage stall, a different fault).
+ *
+ * NB: the first cut read RTP via `CHANNEL(rtpqos,audio,rxcount)` over AMI Getvar — validated
+ * 2026-09-10 to return null mid-call on this Asterisk (18.10), so the monitor silently skipped every
+ * call and never alerted (proven against a real one-way drop). `pjsip show channelstats` DOES report
+ * a live, incrementing Receive Count, so it is the source now.
  *
  * Set ONEWAY_MONITOR_ENABLED=false to disable.
  */
@@ -30,7 +35,9 @@ class OneWayAudioMonitor(
         const val MIN_UPTIME_S = 4            // ignore brand-new channels still negotiating media
         const val ONEWAY_STALL_MS = 6_000L    // no inbound RTP for this long (while outbound flows) = one-way
         const val MIN_TX_COUNT = 50L          // require real downstream media before judging (rules out idle/dead)
-        val MGR_RE = Regex("""PJSIP/(?:mgr\d+|shop\d+-manager)-""")
+        // channelstats prints the ChannelId WITHOUT the "PJSIP/" prefix and may truncate a long name
+        // in its fixed-width column, so match by PREFIX (not an anchored full match).
+        val CHANSTATS_MGR_RE = Regex("""^(mgr\d+|shop\d+-manager)-""")
         val GSM_RE = Regex("""Quectel/shop(\d+)-""")
     }
 
@@ -60,30 +67,31 @@ class OneWayAudioMonitor(
 
     private fun runCheck() {
         if (!amiClient.connected) return
-        // Concise fields: name!ctx!exten!prio!state!app!data!cid!acct!ama!duration!bridged!uniqueid
-        val lines = amiClient.command("core show channels concise")
         val now = System.currentTimeMillis()
-        val liveUids = HashSet<String>()
 
-        // Best-effort affected shop: the single GSM leg currently up (used for the log + preferred
-        // sender SIM). Null when ambiguous or absent — the alert still fires, just without a shop.
-        val gsmShop = lines.mapNotNull { GSM_RE.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+        // Best-effort affected shop: the single GSM leg currently up (for the log + preferred SIM).
+        val gsmShop = amiClient.command("core show channels concise")
+            .mapNotNull { GSM_RE.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
             .distinct().singleOrNull()
 
+        // Live per-channel RTP counters. A channelstats data line, whitespace-split, with an optional
+        // leading BridgeId, is:  [BridgeId] ChannelId UpTime Codec  RxCount RxLost RxPct RxJit  TxCount ...
+        // so relative to the ChannelId token: +1 UpTime, +3 RxCount, +7 TxCount.
+        val lines = amiClient.command("pjsip show channelstats")
+        val liveIds = HashSet<String>()
+
         for (line in lines) {
-            val f = line.split("!")
-            val name = f.getOrNull(0) ?: continue
-            if (!MGR_RE.containsMatchIn(name)) continue
-            if (!f.getOrNull(4).equals("Up", ignoreCase = true)) continue
-            val durS = f.getOrNull(10)?.toIntOrNull() ?: 0
-            val uid = f.getOrNull(12)?.takeIf { it.isNotBlank() } ?: name
-            liveUids.add(uid)
-            if (durS < MIN_UPTIME_S) continue
+            val tok = line.trim().split(Regex("\\s+"))
+            val i = tok.indexOfFirst { CHANSTATS_MGR_RE.containsMatchIn(it) }
+            if (i < 0 || tok.size < i + 8) continue
+            val chanId = tok[i]
+            val upSec = parseUpTime(tok[i + 1])
+            val rx = tok[i + 3].toLongOrNull() ?: continue
+            val tx = tok[i + 7].toLongOrNull() ?: continue
+            liveIds.add(chanId)
+            if (upSec < MIN_UPTIME_S) continue
 
-            val rx = amiClient.getChannelVar(name, "CHANNEL(rtpqos,audio,rxcount)")?.toLongOrNull() ?: continue
-            val tx = amiClient.getChannelVar(name, "CHANNEL(rtpqos,audio,txcount)")?.toLongOrNull() ?: continue
-
-            val t = tracks.getOrPut(uid) { Track(rx, tx, now, false) }
+            val t = tracks.getOrPut(chanId) { Track(rx, tx, now, false) }
             if (rx > t.lastRx) {          // any inbound packet clears the stall
                 t.lastRx = rx
                 t.lastRxProgressAt = now
@@ -94,14 +102,25 @@ class OneWayAudioMonitor(
             val inboundStalled = now - t.lastRxProgressAt >= ONEWAY_STALL_MS
             if (!t.alerted && downstreamFlowing && inboundStalled) {
                 t.alerted = true
-                val mgr = name.removePrefix("PJSIP/").substringBefore('-')
-                val msg = "One-way audio: '$mgr' answered a call but is sending NO microphone audio " +
-                    "(rx=$rx tx=$tx after ${durS}s) — the customer hears silence. Restart the ShopManager " +
-                    "app on that manager's phone to restore its mic uplink."
-                println("[OneWayAudio] $msg (uid=$uid)")
+                val mgr = chanId.substringBefore('-')
+                val msg = "One-way audio: '$mgr' answered a call but is receiving NO microphone audio " +
+                    "(rx=$rx flat, tx=$tx after ${upSec}s) — the customer hears silence. Restart the " +
+                    "ShopManager app on that manager's phone to restore its mic uplink."
+                println("[OneWayAudio] $msg (chan=$chanId)")
                 alerter.record("error", "one_way_audio", gsmShop, msg, alertAdmin = true)
             }
         }
-        tracks.keys.retainAll(liveUids)   // forget calls that have ended
+        tracks.keys.retainAll(liveIds)   // forget calls that have ended
+    }
+
+    /** "HH:MM:SS" / "MM:SS" / "SS" → seconds. */
+    private fun parseUpTime(hms: String): Int {
+        val p = hms.split(":").map { it.toIntOrNull() ?: return 0 }
+        return when (p.size) {
+            3 -> p[0] * 3600 + p[1] * 60 + p[2]
+            2 -> p[0] * 60 + p[1]
+            1 -> p[0]
+            else -> 0
+        }
     }
 }
