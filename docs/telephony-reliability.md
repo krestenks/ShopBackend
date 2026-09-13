@@ -79,6 +79,39 @@ phone registered.)
 
 ---
 
+### 5. Calls cut out mid-conversation at ~15 s (CLCC reaper vs VoLTE)
+The fix for #3 added a CLCC reconciliation that releases a call the modem no longer lists.
+It was too impatient — `CLCC_REAP_MISSES = 2` (~10 s at the 5 s poll) — and started hanging up
+**healthy, bridged calls** about 15 s after answer. Proof it was a false positive: the CLCC reply
+arriving moments after each reap listed the call as `state:0` (**ACTIVE**).
+
+**Why only some shops.** Perfect 4/4 correlation with **VoLTE**: the two modems with
+`AT+QCFG="ims",1` averaged ~1.1–1.2 false reaps per call; the two at the default (`ims,0`)
+averaged ~0 across 89 calls. Same firmware, identical `quectel show device settings`, same USB
+hub — the EC25 simply reports IMS voice calls inconsistently in the polled `AT+CLCC`. See
+[phone-server-setup.md](phone-server-setup.md) §7b.
+
+**How to recognise it** (do this *before* suspecting the app or the network):
+- `grep "CLCC reap" /var/log/asterisk/dropcatch` — a reap logged with **`channel:yes` is always a
+  bug**, never a legitimate catch.
+- Check the hangup cause: a constant **~15–18 s call ending `cause=31`** is the reaper;
+  **`cause=16`** is a real party hanging up.
+- The manager phone and the network will both look innocent, because they are — the phone's RTP
+  runs clean (0 lost, ~0 jitter) right up to the teardown, on wifi and cellular alike.
+
+**The red herring.** The reap released only Asterisk's side and never sent `AT+CHUP`, so the modem
+still believed the call was up: the *caller's* handset kept a running timer on a silent line for
+minutes (observed 2m46s against an 18 s Asterisk-side call). That looks exactly like a phone or
+audio fault and sends you chasing the handset.
+
+**Fixed** (edge repo `/home/phone/asterisk-chan-quectel`): `4c861cf` raises the threshold to 6, and
+to **24 (~2 min) for a call Asterisk still holds a channel for**, skips reconciliation when a CLCC
+line fails to parse, and issues `at_enqueue_hangup()` when genuinely reaping so the caller is
+released. `f71b1f9` then closes the underlying hole: an entry the parser declines to process
+(a `mode:1` PDP bearer, an out-of-range state) no longer falls through without setting
+`CALL_FLAG_ALIVE` — if the modem lists an index at all, the call on it is not absent. It logs a
+warning naming the mode/state, so a recurrence is visible instead of silent.
+
 ## Reliability event log + admin alerts
 `ReliabilityAlerter` records events to the `reliability_event` table (capped 1000) and, for
 call-blocking ones, SMSes the admin (from a currently-healthy SIM, via `SmsQueue`, rate-limited

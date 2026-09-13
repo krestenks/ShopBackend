@@ -153,6 +153,65 @@ card id via udev (`ATTR{id}="EC25Shop1"`) or use `hw:CARD=EC25EUX,DEV=0` style
 addressing per USB path. Configure the resulting name in the shop's
 "ALSA audio device" field.
 
+## 7b. Modem radio config — UAC audio, and leave VoLTE alone
+
+Two separate settings. Only the first is required.
+
+**USB audio (UAC) — required.** A fresh EC25 ships with the audio interface off,
+so `chan_quectel` has no `alsadev` to open. Enable it once per modem, then reboot
+the modem:
+
+```
+AT+QCFG="usbcfg",0x2C7C,0x0125,1,1,1,1,1,0,1
+AT+CFUN=1,1
+```
+
+(The trailing `1` is the UAC flag. The backend surfaces this same hint when it
+detects a modem with no audio device.)
+
+**VoLTE / IMS — leave at the factory default (`AT+QCFG="ims",0`). Do not enable it.**
+
+It is tempting to turn VoLTE on "so the modem works on the Danish network". That
+is not necessary and it actively costs reliability:
+
+- Voice works today over **CSFB**. Telenor DK still accepts a combined EPS/IMSI
+  attach — `AT+CREG?` returns `1` with AcT `7` (E-UTRAN), which is exactly the
+  indicator that circuit-switched fallback is available. Verified on modems with
+  IMS off that have carried hundreds of calls.
+- With `ims,1` the EC25 (fw `EC25EUXGAR08A19M1`) reports IMS voice calls
+  **inconsistently in the polled `AT+CLCC` listing**. That starves
+  `chan_quectel`'s CLCC reconciliation, which then decides a live call is
+  stranded and hangs up on the customer mid-conversation. Measured 2026-09-13:
+  the two modems with `ims,1` averaged **~1.1–1.2 false reaps per call**; the two
+  at the default averaged **~0 across 89 calls**. See
+  [telephony-reliability.md](telephony-reliability.md).
+
+Also expect, and do **not** try to "clean up", extra `+CLCC` lines like
+`+CLCC: 1,1,0,1,0,"",128`. Those `mode:1` entries are the modem's **PDP data
+bearers**, mapping 1:1 onto `AT+CGACT?` — context 1 is the default internet
+bearer (the LTE attach itself), context 2 is `ims`. Deactivating context 1
+detaches the modem from LTE entirely. Nothing is stuck.
+
+**When this guidance expires.** CSFB only exists while 2G does. Once Danish
+operators switch 2G off, VoLTE becomes mandatory and `ims` must be enabled on
+every modem. Do not enable it before then without first confirming the
+`at_response_clcc` hardening is deployed (edge commits `4c861cf` + `f71b1f9`),
+or calls will start dropping at ~15s again.
+
+**Checking a modem without disturbing calls.** `chan_quectel` holds only the
+`:1.2` USB interface; `:1.0`, `:1.1` and `:1.3` are free, so you can query a live
+modem with zero risk to calls in progress:
+
+```bash
+ls -l /dev/serial/by-path/ | grep 1.2.2     # find the modem's ttyUSBn set
+sudo stty -F /dev/ttyUSB12 115200 raw -echo
+sudo bash -c "exec 3<>/dev/ttyUSB12; printf 'AT+QCFG=\"ims\"\r' >&3; timeout 2 cat <&3"
+```
+
+Send **queries only** on that port — a hangup command there would drop a real
+call. Note `asterisk -rx "quectel cmd ..."` is useless for this: `chan_quectel`
+discards any reply it cannot parse, so you see `↳ [OK]` and no data.
+
 ## 8. First provisioning + smoke test
 
 1. Start the backend, log into the web admin → Shops → Edit shop → GSM Telephony.
