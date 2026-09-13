@@ -51,13 +51,17 @@ class ModemScanner(
         // any shop has an IMSI assigned.
         val heldByUsbPort: Map<String, String> = trunkUsbPorts(physical)
 
-        // Fail closed. quectelDeviceStates() returns an EMPTY map when AMI is down or its reply is
-        // unparseable — indistinguishable from "no modem is held". Probing then writes AT commands
-        // to a port chan_quectel owns, and AT-port contention is the documented way the driver loses
-        // a hangup and wedges the modem (audit finding 8): we would manufacture the very fault the
-        // watchdog then "repairs" with restarts. If we cannot establish which modems are in use, do
-        // not touch any of them.
-        val amiUsable = amiClient?.connected == true && heldByUsbPort.isNotEmpty()
+        // Fail closed on "I could not ask" — but NOT on "the answer was empty".
+        //
+        // Probing writes AT commands to a port chan_quectel may own, and AT-port contention is the
+        // documented way the driver loses a hangup and wedges (audit finding 8), so we must not probe
+        // a modem whose trunk status is unknown. The question is whether AMI ANSWERED, though, not
+        // whether any trunk happened to resolve: an empty answer is legitimate on a box that has not
+        // been provisioned yet, and keying on emptiness deadlocks it — no trunk means no probe, no
+        // probe means no IMSI, and no IMSI means no trunk can ever be created. It also disabled the
+        // USB-re-enumeration self-heal, whose whole premise is that every configured device path has
+        // stopped matching a present modem.
+        val amiUsable = amiClient == null || amiClient.quectelDeviceStatesOrNull() != null
 
         val shopNames = db.getAllShops().associate { it.id to it.name }
 
@@ -72,9 +76,9 @@ class ModemScanner(
             val filled = when {
                 trunk != null -> readFromAmi(base, trunk)
                 !amiUsable -> {
-                    println("[ModemScanner] ${m.usbPort}: cannot confirm no trunk holds this modem " +
-                        "(AMI unavailable) — not probing")
-                    base
+                    println("[ModemScanner] ${m.usbPort}: AMI did not answer 'quectel show devices', " +
+                        "so we cannot tell whether a trunk holds this modem — not probing")
+                    base.copy(error = "not probed (AMI unavailable)")
                 }
                 else -> probe(base)
             }

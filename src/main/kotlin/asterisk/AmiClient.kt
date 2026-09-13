@@ -152,28 +152,46 @@ class AmiClient(private val config: AsteriskConfig) {
      * Trunk state per chan_quectel device from `quectel show devices`
      * ("Free", "Not connected", "Ring", ...). Empty when AMI is down.
      */
+    /**
+     * As [quectelDeviceStates], but **null when we could not ask** — an empty map then means the
+     * answer really was "no trunks are configured", which is a legitimate state (a box that has not
+     * been provisioned yet) and quite different from "AMI did not answer".
+     *
+     * Callers that use the result to decide whether it is safe to touch a modem must use this;
+     * conflating the two broke first-time provisioning once already.
+     */
+    fun quectelDeviceStatesOrNull(): Map<String, String>? {
+        if (!connected) return null
+        val lines = commandOrNull("quectel show devices") ?: return null
+        // A real listing starts with the column header; anything else means we did not get one.
+        if (lines.isEmpty() || !(lines[0].contains("ID") && lines[0].contains("State"))) return null
+        return parseDeviceStates(lines)
+    }
+
     fun quectelDeviceStates(): Map<String, String> {
         if (!connected) return emptyMap()
         return try {
-            // Columns: ID  Group  State  RSSI  Mode  Provider Name  Model  Firmware  IMEI  IMSI  Number
-            command("quectel show devices")
-                .drop(1)
-                .mapNotNull { line ->
-                    val parts = line.trim().split(Regex("\\s+"))
-                    if (parts.size < 3) return@mapNotNull null
-                    // State can be multi-word ("Not initialized", "Not connected"): take every
-                    // token between Group (idx 1) and the first numeric column (RSSI), so we don't
-                    // truncate it to just "Not". Falls back to the single token if there's no RSSI.
-                    val rssiIdx = (2 until parts.size).firstOrNull { parts[it].toIntOrNull() != null } ?: 3
-                    val state = parts.subList(2, rssiIdx.coerceIn(3, parts.size)).joinToString(" ")
-                    parts[0] to state.ifBlank { parts[2] }
-                }
-                .toMap()
+            parseDeviceStates(command("quectel show devices"))
         } catch (e: Exception) {
             println("[AMI] quectel show devices failed: ${e.message}")
             emptyMap()
         }
     }
+
+    /** Columns: ID  Group  State  RSSI  Mode  Provider  Model  Firmware  IMEI  IMSI  Number */
+    private fun parseDeviceStates(lines: List<String>): Map<String, String> =
+        lines.drop(1)
+            .mapNotNull { line ->
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size < 3) return@mapNotNull null
+                // State can be multi-word ("Not initialized", "Not connected"): take every
+                // token between Group (idx 1) and the first numeric column (RSSI), so we don't
+                // truncate it to just "Not". Falls back to the single token if there's no RSSI.
+                val rssiIdx = (2 until parts.size).firstOrNull { parts[it].toIntOrNull() != null } ?: 3
+                val state = parts.subList(2, rssiIdx.coerceIn(3, parts.size)).joinToString(" ")
+                parts[0] to state.ifBlank { parts[2] }
+            }
+            .toMap()
 
     fun reloadDialplan() {
         command("dialplan reload")
@@ -187,21 +205,45 @@ class AmiClient(private val config: AsteriskConfig) {
      *
      * Line shape: `  Contact:  mgr2/sip:mgr2@ip:port   <hash>  Avail   <rtt>`
      */
-    fun pjsipReachableAors(): Set<String> {
-        if (!connected) return emptySet()
-        return try {
-            command("pjsip show contacts").mapNotNull { line ->
-                val t = line.trim()
-                if (!t.startsWith("Contact:")) return@mapNotNull null
-                val cols = t.removePrefix("Contact:").trim().split(Regex("\\s+"))
-                // cols: [aor/contactUri, hash, status, rtt]
-                val aor = cols.getOrNull(0)?.substringBefore('/')?.takeIf { it.isNotBlank() }
-                if (aor != null && cols.getOrNull(2) == "Avail") aor else null
-            }.toSet()
-        } catch (e: Exception) {
-            println("[AMI] pjsip show contacts failed: ${e.message}")
-            emptySet()
-        }
+    /**
+     * Is THIS endpoint on a call right now? true / false / **null if we cannot tell**.
+     *
+     * Deliberately per-AOR. Gating a per-handset action on "is anything anywhere on the box busy"
+     * is so conservative on a multi-shop system that the action can effectively never run — and the
+     * endpoint we are judging is unreachable, so it is the least likely one to be on a call.
+     */
+    fun aorOnCallOrNull(aor: String): Boolean? {
+        if (!connected) return null
+        val lines = commandOrNull("core show channels") ?: return null
+        if (lines.none { ACTIVE_CALLS_RE.containsMatchIn(it) }) return null   // not a complete listing
+        return lines.any { it.contains("PJSIP/$aor-") }
+    }
+
+    fun pjsipReachableAors(): Set<String> = pjsipReachableAorsOrNull() ?: emptySet()
+
+    /**
+     * As [pjsipReachableAors], but **null when we could not ask**.
+     *
+     * This matters more than it looks: an empty set reads as "every phone in the fleet is
+     * unreachable", and that verdict is what starts the clock on telling handsets to rebuild their
+     * SIP core or restart their process. A permission change, a truncated reply or an action timeout
+     * must not be able to condemn the whole fleet at once — see docs/recovery-code-rules.md §2.
+     *
+     * A valid listing is proven by the `Contact:` header line, which `pjsip show contacts` always
+     * emits even when it has no contacts to list.
+     */
+    fun pjsipReachableAorsOrNull(): Set<String>? {
+        if (!connected) return null
+        val lines = commandOrNull("pjsip show contacts") ?: return null
+        if (lines.none { it.contains("Contact:") }) return null   // not a listing: we could not ask
+        return lines.mapNotNull { line ->
+            val t = line.trim()
+            if (!t.startsWith("Contact:")) return@mapNotNull null
+            val cols = t.removePrefix("Contact:").trim().split(Regex("\\s+"))
+            // cols: [aor/contactUri, hash, status, rtt]
+            val aor = cols.getOrNull(0)?.substringBefore('/')?.takeIf { it.isNotBlank() }
+            if (aor != null && cols.getOrNull(2) == "Avail") aor else null
+        }.toSet()
     }
 
     /**

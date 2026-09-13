@@ -82,9 +82,16 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
             ami = amiClient,
             callStateOverride = RecoveryAudit.CallState.IDLE,   // guard proved no GSM call is up
         )
-        runCatching { amiClient.reloadChanQuectel() }
-            .onFailure { println("[Asterisk] deferred chan_quectel reload failed: ${it.message}"); return false }
+        // Clear BEFORE reloading. If a regenerate() lands while the reload is in flight it sets the
+        // flag again and we run once more; clearing afterwards would instead mark that newer config
+        // as applied when it never was, leaving a shop silently taking no calls.
         reloadPending = false
+        runCatching { amiClient.reloadChanQuectel() }
+            .onFailure {
+                println("[Asterisk] deferred chan_quectel reload failed: ${it.message}")
+                reloadPending = true
+                return false
+            }
         println("[Asterisk] applied deferred chan_quectel reload (box was idle)")
         return true
     }
@@ -141,12 +148,12 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
         // So also require every trunk we just wrote to actually exist in the running module.
         val previous = runCatching { if (Files.exists(file)) Files.readString(file) else null }.getOrNull()
         val expectedTrunks = written.map { config.trunkName(it) }.toSet()
-        val runningTrunks = runCatching { amiClient.quectelDeviceStates().keys }.getOrNull()
-        // Null/empty => could not ask; do not use that to claim the module is stale, or every
-        // AMI blip would trigger a fleet-wide reload. Only a positive answer that is MISSING a
-        // trunk counts as stale.
-        val moduleStale = runningTrunks != null && runningTrunks.isNotEmpty() &&
-            !runningTrunks.containsAll(expectedTrunks)
+        // Tri-state: null means we could not ask (never claim staleness from that, or an AMI blip
+        // would reload the fleet). An EMPTY-but-valid answer is not the same thing — "the module has
+        // loaded no trunks at all" is the most broken state it can be in, and treating it as
+        // "cannot tell" disarmed this check in exactly the scenario the comment above describes.
+        val runningTrunks = amiClient.quectelDeviceStatesOrNull()?.keys
+        val moduleStale = runningTrunks != null && !runningTrunks.containsAll(expectedTrunks)
         val unchanged = previous == content && !moduleStale
         if (moduleStale && previous == content) {
             println("[Asterisk] quectel_shops.conf unchanged but the running module is missing " +

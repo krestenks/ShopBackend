@@ -145,19 +145,31 @@ object SipCommandDirector {
             // a handset that was reporting itself healthy. While any call is up — or while we cannot
             // tell — degrade to the non-destructive rung instead of standing down entirely, so a
             // genuinely deaf phone still gets nudged.
-            val callState = RecoveryAudit.callState(ami)
-            val wanted = if (callState == RecoveryAudit.CallState.IDLE) escalation else CMD_REFRESH
-
-            // Cooldown, and never re-send the identical command back to back.
+            // Cooldown FIRST. callState() is a blocking AMI round trip, and this runs from a Ktor
+            // request handler on every poll of a phone that has been down a while — doing it above
+            // the cooldown meant paying for a `core show channels` four times out of five only to
+            // throw the answer away, while holding this lock.
             if (now - st.lastCommandAt < COMMAND_COOLDOWN_MS) return null
 
+            // Per-AOR, not box-wide. A box-wide check is so conservative on a multi-shop system
+            // during business hours that 'rebuild' could never fire at all — and since a degraded
+            // refresh also burns the cooldown below, a genuinely deaf handset would be nudged with
+            // the rung its own ladder is already running, forever, which is precisely the inertia
+            // this class exists to break. The endpoint being judged is unreachable, so it is the
+            // least likely one to be mid-call. Unknown still degrades: that is the safe direction.
+            val onCall = ami?.aorOnCallOrNull(aor)
+            val wanted = if (onCall == false) escalation else CMD_REFRESH
+
             if (wanted != escalation) {
+                val why = if (onCall == null) "cannot tell whether it is on a call" else "it is on a call"
                 println("[SipCommand] $aor unreachable ${downMs / 1000}s -> would send '$escalation', " +
-                    "but calls=${callState.name.lowercase()} — sending '$wanted' instead")
+                    "but $why — sending '$wanted' instead")
             }
 
             st.lastCommand = wanted
-            st.lastCommandAt = now
+            // Only an escalation consumes the cooldown. Stamping it for a degraded refresh would
+            // let a permanently-busy (or permanently-unknown) box hold the ladder at rung 0 forever.
+            if (wanted == escalation) st.lastCommandAt = now
             println("[SipCommand] $aor unreachable ${downMs / 1000}s -> sending '$wanted'" +
                 (st.lastReport?.let { " (phone last reported state=${it.state} registered=${it.registered})" } ?: ""))
 
@@ -173,6 +185,9 @@ object SipCommandDirector {
                     strength = RecoveryAudit.Evidence.WEAK,
                     blast = RecoveryAudit.Blast.PHONE,
                     ami = ami, alerter = alerter,
+                    // We just measured this; without the override fired() would issue a SECOND
+                    // `core show channels` on the same locked, blocking path.
+                    callStateOverride = RecoveryAudit.CallState.IDLE,   // proven: this AOR is not on a call
                 )
             }
             return wanted

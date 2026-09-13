@@ -359,8 +359,11 @@ object ShopBackend {
         Executors.newSingleThreadScheduledExecutor(tf).scheduleAtFixedRate({
             try {
                 writer.applyPendingReloadIfIdle()
-            } catch (e: Exception) {
-                println("[Asterisk] deferred reload drain error: ${e.message}")
+            } catch (t: Throwable) {
+                // Throwable, not Exception: scheduleAtFixedRate cancels the task permanently on any
+                // escaped throwable, and an Error here would silently end the drain for the life of
+                // the process — after which a withheld reload is owed forever, with no log line.
+                println("[Asterisk] deferred reload drain error: ${t.message}")
             }
         }, 60, 60, TimeUnit.SECONDS)
     }

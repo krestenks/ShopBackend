@@ -506,7 +506,13 @@ class MobileApi(
                     if (!admin.amiClient.connected) {
                         return@get call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
                     }
-                    val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
+                    // ...and the same reasoning one level deeper: `connected` only says the socket is
+                    // logged in. A permission change, a truncated reply or an action timeout makes
+                    // the contact listing unusable, and an empty set would condemn EVERY phone at
+                    // once — the fleet-wide false-unreachable this 503 exists to prevent.
+                    val reachableAors = admin.amiClient.pjsipReachableAorsOrNull()
+                        ?: return@get call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
+                    val reachable = reachableAors.contains(aor)
                     // The backend sees the truth minutes before the phone can. Once the phone's own
                     // ladder has demonstrably failed, hand it a command instead of waiting.
                     val command = SipCommandDirector.onVerdict(aor, reachable, ami = admin.amiClient)
@@ -548,7 +554,13 @@ class MobileApi(
                     if (!admin.amiClient.connected) {
                         return@post call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
                     }
-                    val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
+                    // ...and the same reasoning one level deeper: `connected` only says the socket is
+                    // logged in. A permission change, a truncated reply or an action timeout makes
+                    // the contact listing unusable, and an empty set would condemn EVERY phone at
+                    // once — the fleet-wide false-unreachable this 503 exists to prevent.
+                    val reachableAors = admin.amiClient.pjsipReachableAorsOrNull()
+                        ?: return@post call.respond(HttpStatusCode.ServiceUnavailable, "AMI inconclusive")
+                    val reachable = reachableAors.contains(aor)
                     // Verdict first so the unreachable-since clock is current, then log the
                     // disagreement against it.
                     val command = SipCommandDirector.onVerdict(aor, reachable, ami = admin.amiClient)
