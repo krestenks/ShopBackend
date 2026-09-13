@@ -87,6 +87,8 @@ object SipCommandDirector {
         val dataSaver: String? = null,
         /** ms the SIP pump lost to CPU suspend (Doze) since last iterate; -1 = never. */
         val iterateSuspendedMs: Long? = null,
+        /** Mic-state snapshot from a recent one-way (dead-uplink) call — root-cause without adb. */
+        val audioDiag: String? = null,
     )
 
     private class State {

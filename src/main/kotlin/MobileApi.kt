@@ -581,6 +581,11 @@ class MobileApi(
                                 "powerSave=${report.powerSave} deviceIdle=${report.deviceIdle} " +
                                 "dataSaver=${report.dataSaver} pumpSuspendedMs=${report.iterateSuspendedMs}")
                         }
+                        // Root-cause for one-way audio: the phone's mic state at the moment it went
+                        // silent (why Android muted our capture). Only present after a one-way call.
+                        if (report.audioDiag != null) {
+                            println("[AudioDiag] mgr${loginInfo.managerId}: ${report.audioDiag}")
+                        }
                     }
                     call.respond(SipStatusReportResponse(
                         ok = true,
