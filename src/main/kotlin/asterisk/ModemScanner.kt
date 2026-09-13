@@ -51,6 +51,14 @@ class ModemScanner(
         // any shop has an IMSI assigned.
         val heldByUsbPort: Map<String, String> = trunkUsbPorts(physical)
 
+        // Fail closed. quectelDeviceStates() returns an EMPTY map when AMI is down or its reply is
+        // unparseable — indistinguishable from "no modem is held". Probing then writes AT commands
+        // to a port chan_quectel owns, and AT-port contention is the documented way the driver loses
+        // a hangup and wedges the modem (audit finding 8): we would manufacture the very fault the
+        // watchdog then "repairs" with restarts. If we cannot establish which modems are in use, do
+        // not touch any of them.
+        val amiUsable = amiClient?.connected == true && heldByUsbPort.isNotEmpty()
+
         val shopNames = db.getAllShops().associate { it.id to it.name }
 
         return physical.map { m ->
@@ -61,7 +69,15 @@ class ModemScanner(
                 alsaDevice = m.alsaDev,
                 held = trunk != null,
             )
-            val filled = if (trunk != null) readFromAmi(base, trunk) else probe(base)
+            val filled = when {
+                trunk != null -> readFromAmi(base, trunk)
+                !amiUsable -> {
+                    println("[ModemScanner] ${m.usbPort}: cannot confirm no trunk holds this modem " +
+                        "(AMI unavailable) — not probing")
+                    base
+                }
+                else -> probe(base)
+            }
             val shopId = filled.imsi?.let { db.findShopIdByImsi(it) }
             filled.copy(assignedShopId = shopId, assignedShopName = shopId?.let { shopNames[it] })
         }.sortedBy { it.usbPort }

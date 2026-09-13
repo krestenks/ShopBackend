@@ -102,11 +102,15 @@ object ShopBackend {
         AsteriskEventHandler(amiClient, db).start()
         val ariClient = AriClient(asteriskConfig)
         val modemScanner = ModemScanner(db, asteriskConfig, amiClient)
+        // Hoisted so the deferred-reload drain below can reach it: a trunk-config change that
+        // arrives while a GSM call is up is withheld rather than dropping the call, and applied
+        // once the box is idle.
+        val quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient)
         val provisioner = AsteriskProvisioner(
             db = db,
             config = asteriskConfig,
             ariClient = ariClient,
-            quectelConfigWriter = QuectelConfigWriter(asteriskConfig, amiClient),
+            quectelConfigWriter = quectelConfigWriter,
             dialplanWriter = DialplanWriter(asteriskConfig, amiClient),
             promptGenerator = PromptGenerator(asteriskConfig),
             modemScanner = modemScanner,
@@ -170,6 +174,7 @@ object ShopBackend {
 
         // Background cleanup
         startCleanupScheduler(db)
+        startDeferredReloadDrain(quectelConfigWriter)
 
         // Optional CallApp phone-name screening (set CALLAPP_RAPIDAPI_KEY env var to enable)
         val callAppApiKey = System.getenv("CALLAPP_RAPIDAPI_KEY")
@@ -230,9 +235,17 @@ object ShopBackend {
             JwtConfig.install(this, db)
 
             routing {
-                // Liveness/health snapshot for the external cron backstop + at-a-glance ops.
+                // Liveness/health snapshot for the external backstop + at-a-glance ops.
                 // Unauthenticated on purpose (no sensitive data); 200 when every covered shop is
-                // call-ready, 503 otherwise so `curl -fsS` can gate a restart.
+                // call-ready, 503 otherwise.
+                //
+                // Do NOT gate an automatic restart on the STATUS CODE (`curl -fsS` and friends).
+                // 503 is a readiness verdict about shops and phones, much of which is outside this
+                // process — a manager letting their phone die would restart the backend, and a
+                // backend restart re-provisions and can reload chan_quectel, dropping calls fleet-
+                // wide. The deployed backstop (standby/health-check.sh) is correct: it treats ANY
+                // HTTP response as alive and only acts when the process stops answering entirely.
+                // Liveness is "did it reply", not "did it reply 200". See docs/recovery-code-rules.md.
                 get("/health") {
                     val snap = systemHealthMonitor.snapshot
                     call.respond(
@@ -331,6 +344,25 @@ object ShopBackend {
                 println("[CallAppScreening] Scheduler error: ${e.message}")
             }
         }, 30, 6 * 60 * 60L, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Drains a chan_quectel reload that was withheld because a GSM call was in progress.
+     *
+     * The reload re-inits every trunk on the box, so a trunk-config change arriving mid-call is
+     * written to disk but not applied (audit finding 4). This retries every minute and applies it
+     * the moment the box is idle — so correctness is delayed by up to a minute instead of costing
+     * somebody their call.
+     */
+    private fun startDeferredReloadDrain(writer: asterisk.QuectelConfigWriter) {
+        val tf = ThreadFactory { r -> Thread(r, "quectel-reload-drain").apply { isDaemon = true } }
+        Executors.newSingleThreadScheduledExecutor(tf).scheduleAtFixedRate({
+            try {
+                writer.applyPendingReloadIfIdle()
+            } catch (e: Exception) {
+                println("[Asterisk] deferred reload drain error: ${e.message}")
+            }
+        }, 60, 60, TimeUnit.SECONDS)
     }
 
     private fun startCleanupScheduler(db: DataBase) {

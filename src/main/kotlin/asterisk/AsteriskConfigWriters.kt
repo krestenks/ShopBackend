@@ -57,6 +57,38 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
 
     private val file: Path = Paths.get(config.configPath, "quectel_shops.conf")
 
+    /**
+     * Set when the trunk config changed but the reload was withheld because a GSM call was up (or we
+     * could not tell). The file on disk is already current; only Asterisk's view is stale.
+     * [applyPendingReloadIfIdle] drains this once the box is quiet.
+     */
+    @Volatile
+    var reloadPending: Boolean = false
+        private set
+
+    /**
+     * Apply a previously deferred chan_quectel reload, but only once no GSM call is up. Safe to call
+     * on a timer; a no-op unless a reload is actually owed. Returns true if it reloaded.
+     */
+    fun applyPendingReloadIfIdle(): Boolean {
+        if (!reloadPending) return false
+        if (amiClient.anyQuectelCallOrNull() != false) return false
+        RecoveryAudit.fired(
+            action = "module reload chan_quectel.so (deferred)",
+            target = "PBX",
+            evidence = "trunk config changed earlier while a call was up; box now idle",
+            strength = RecoveryAudit.Evidence.STRONG,
+            blast = RecoveryAudit.Blast.PBX,
+            ami = amiClient,
+            callStateOverride = RecoveryAudit.CallState.IDLE,   // guard proved no GSM call is up
+        )
+        runCatching { amiClient.reloadChanQuectel() }
+            .onFailure { println("[Asterisk] deferred chan_quectel reload failed: ${it.message}"); return false }
+        reloadPending = false
+        println("[Asterisk] applied deferred chan_quectel reload (box was idle)")
+        return true
+    }
+
     fun regenerate(shops: List<ShopTelephonyConfig>, reload: Boolean = true): TrunkWriteResult {
         val written = mutableListOf<Int>()
         val skipped = mutableListOf<Int>()
@@ -93,20 +125,60 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
                 appendLine("context=${config.inboundContext(shop.shopId)}")
             }
         }
+        // A chan_quectel reload re-inits EVERY trunk on the box, dropping any GSM call in any shop.
+        // This runs on every backend start, so before the guard below it was the most reliable way
+        // we had of hanging up live calls — a crash-restart was enough (audit finding 4).
+        //
+        // Two rules, in order of how much they buy:
+        //   1. Reload only if the file actually changed. At startup it is byte-identical virtually
+        //      always, so this alone removes nearly all of the exposure.
+        //   2. Never reload while a GSM call is up — and treat "cannot tell" as "a call is up".
+        //
+        // "Unchanged" must mean "the RUNNING module already matches", not merely "the file on disk
+        // matches". Those differ whenever a reload was deferred and the process restarted before the
+        // drain won (reloadPending is in-memory only): the file is current, Asterisk is not, and a
+        // pure byte comparison would skip the reload forever — that shop silently takes no calls.
+        // So also require every trunk we just wrote to actually exist in the running module.
+        val previous = runCatching { if (Files.exists(file)) Files.readString(file) else null }.getOrNull()
+        val expectedTrunks = written.map { config.trunkName(it) }.toSet()
+        val runningTrunks = runCatching { amiClient.quectelDeviceStates().keys }.getOrNull()
+        // Null/empty => could not ask; do not use that to claim the module is stale, or every
+        // AMI blip would trigger a fleet-wide reload. Only a positive answer that is MISSING a
+        // trunk counts as stale.
+        val moduleStale = runningTrunks != null && runningTrunks.isNotEmpty() &&
+            !runningTrunks.containsAll(expectedTrunks)
+        val unchanged = previous == content && !moduleStale
+        if (moduleStale && previous == content) {
+            println("[Asterisk] quectel_shops.conf unchanged but the running module is missing " +
+                "${expectedTrunks - runningTrunks!!} — reloading to catch up")
+        }
+
         writeAtomically(file, content)
-        if (reload) {
-            // A chan_quectel reload re-inits EVERY trunk on the box, so it drops any GSM call in
-            // any shop. It is unguarded here and fires on every backend start (audit finding 4),
-            // which makes it the single most reliable way we have to hang up a live call.
-            RecoveryAudit.fired(
-                action = "module reload chan_quectel.so",
-                target = "PBX",
-                evidence = "quectel_shops.conf regenerated (${written.size} trunk(s))",
-                strength = RecoveryAudit.Evidence.STRONG,   // the config write itself is the trigger
-                blast = RecoveryAudit.Blast.PBX,
-                ami = amiClient,
-            )
-            amiClient.reloadChanQuectel()
+
+        if (reload && !unchanged) {
+            val anyCall = amiClient.anyQuectelCallOrNull()
+            if (anyCall != false) {
+                val why = if (anyCall == null) "could not determine whether a call is live" else "a GSM call is live"
+                println("[Asterisk] quectel_shops.conf changed but NOT reloading — $why. " +
+                    "The file on disk is current; it applies on the next reload.")
+                reloadPending = true
+            } else {
+                RecoveryAudit.fired(
+                    action = "module reload chan_quectel.so",
+                    target = "PBX",
+                    evidence = "quectel_shops.conf content changed (${written.size} trunk(s)); no Quectel channel up",
+                    strength = RecoveryAudit.Evidence.STRONG,
+                    blast = RecoveryAudit.Blast.PBX,
+                    ami = amiClient,
+                    // The guard above proved no GSM channel is up, which is the only kind this
+                    // action can damage; a PJSIP call being up is not a violation.
+                    callStateOverride = RecoveryAudit.CallState.IDLE,
+                )
+                amiClient.reloadChanQuectel()
+                reloadPending = false
+            }
+        } else if (reload) {
+            println("[Asterisk] quectel_shops.conf unchanged — skipping chan_quectel reload")
         }
         println("[Asterisk] Wrote $file (${shops.size - skipped.size} trunk(s))")
         for (sid in skipped) {

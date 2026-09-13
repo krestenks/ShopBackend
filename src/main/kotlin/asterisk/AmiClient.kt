@@ -42,6 +42,10 @@ class AmiClient(private val config: AsteriskConfig) {
         val CALL_STATES = setOf(
             "dialing", "incoming", "active", "alerting", "held", "waiting", "ringing", "calling",
         )
+
+        /** The `N active calls` summary of `core show channels`; its presence also proves the
+         *  listing is real and complete rather than an error string or a truncated reply. */
+        val ACTIVE_CALLS_RE = Regex("""(\d+)\s+active\s+calls?""", RegexOption.IGNORE_CASE)
     }
 
     private val connection: ManagerConnection =
@@ -95,10 +99,49 @@ class AmiClient(private val config: AsteriskConfig) {
     fun sendAction(action: ManagerAction, timeoutMs: Long = 10_000): ManagerResponse =
         connection.sendAction(action, timeoutMs)
 
-    /** Runs an Asterisk CLI command over AMI and returns its output lines. */
+    /**
+     * Runs an Asterisk CLI command over AMI and returns its output lines.
+     *
+     * NOTE the lossy fallback: when the reply is not a [CommandResponse] (AMI error, the `Command`
+     * class not permitted, a truncated reply) this returns a one-element list holding an error
+     * string. That is fine for logging, but it is indistinguishable from a real, empty result — so
+     * a caller that greps the output to decide whether something is *absent* will conclude "no" when
+     * the truth is "I could not ask". That confusion caused the incidents in
+     * docs/recovery-paths-audit-2026-09-13.md.
+     *
+     * **Any code using this to authorise a destructive action must use [commandOrNull] instead.**
+     */
     fun command(cliCommand: String): List<String> {
-        val response = sendAction(CommandAction(cliCommand))
-        return (response as? CommandResponse)?.result ?: listOfNotNull(response.message)
+        // Send ONCE, then project. Delegating to commandOrNull() and retrying on null would issue
+        // the command a second time whenever the reply was unusable — and these are side-effecting
+        // CLI commands (module reload, quectel restart, sms send). A reload whose reply merely timed
+        // out would be executed twice, doubling the window in which every trunk is re-initialised.
+        val response = rawCommand(cliCommand)
+        return (response as? CommandResponse)?.result ?: listOfNotNull(response?.message)
+    }
+
+    /**
+     * As [command], but returns null when Asterisk did not give us a usable answer, so "the command
+     * listed nothing" is distinguishable from "the command did not run". See
+     * docs/recovery-code-rules.md §2 — inconclusive input must fail closed.
+     */
+    fun commandOrNull(cliCommand: String): List<String>? =
+        (rawCommand(cliCommand) as? CommandResponse)?.result
+
+    private fun rawCommand(cliCommand: String): ManagerResponse? =
+        runCatching { sendAction(CommandAction(cliCommand)) }.getOrNull()
+
+    /**
+     * True when a GSM (chan_quectel) call is up, false when provably none, **null if unknown**.
+     * Used to gate chan_quectel reloads, which re-init every trunk on the box.
+     */
+    fun anyQuectelCallOrNull(): Boolean? {
+        if (!connected) return null
+        val lines = commandOrNull("core show channels") ?: return null
+        // Require the summary line: without it the listing may be truncated and an absent channel
+        // proves nothing.
+        if (lines.none { ACTIVE_CALLS_RE.containsMatchIn(it) }) return null
+        return lines.any { it.contains("Quectel/") }
     }
 
     fun reloadChanQuectel() {

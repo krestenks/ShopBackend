@@ -47,6 +47,9 @@ object RecoveryAudit {
      */
     private val ACTIVE_CALLS_RE = Regex("""(\d+)\s+active\s+calls?""", RegexOption.IGNORE_CASE)
 
+    /** Channels can exist without a call (a leg that is ringing but not yet bridged). */
+    private val ACTIVE_CHANNELS_RE = Regex("""(\d+)\s+active\s+channels?""", RegexOption.IGNORE_CASE)
+
     /**
      * Record that a destructive recovery action fired.
      *
@@ -68,10 +71,18 @@ object RecoveryAudit {
         ami: AmiClient? = null,
         alerter: ReliabilityAlerter? = null,
         shopId: Int? = null,
+        /**
+         * Overrides the box-wide call check when the action's guard used a narrower, more accurate
+         * notion of "a call that this action would damage" — e.g. a chan_quectel reload only harms
+         * GSM channels, so a PJSIP intercom call being up is not a violation. Without this the alarm
+         * fires on the safe, normal path, and an alarm that cries wolf gets ignored — which is how
+         * the 139-a-day reaper warnings went unnoticed for two weeks.
+         */
+        callStateOverride: CallState? = null,
     ) {
         // Never let auditing break the thing it audits.
         runCatching {
-            val callState = callState(ami)
+            val callState = callStateOverride ?: callState(ami)
 
             val line = "[Recovery] $action target=$target blast=${blast.name.lowercase()} " +
                 "evidence=$evidence strength=${strength.name} callLive=${callState.name.lowercase()}"
@@ -116,7 +127,9 @@ object RecoveryAudit {
         val client = ami ?: return CallState.UNKNOWN
         if (!client.connected) return CallState.UNKNOWN
 
-        return runCatching { parseCallState(client.command("core show channels")) }
+        // commandOrNull, never command(): the latter substitutes an error string for a failed query,
+        // which would read as a listing containing no calls.
+        return runCatching { parseCallState(client.commandOrNull("core show channels")) }
             .getOrDefault(CallState.UNKNOWN)
     }
 
@@ -126,9 +139,17 @@ object RecoveryAudit {
      */
     internal fun parseCallState(lines: List<String>?): CallState {
         if (lines.isNullOrEmpty()) return CallState.UNKNOWN
-        val match = lines.firstNotNullOfOrNull { ACTIVE_CALLS_RE.find(it) }
+        val calls = lines.firstNotNullOfOrNull { ACTIVE_CALLS_RE.find(it) }
             ?: return CallState.UNKNOWN          // no "N active calls" line => this is not a listing
-        val active = match.groupValues[1].toIntOrNull() ?: return CallState.UNKNOWN
-        return if (active > 0) CallState.LIVE else CallState.IDLE
+        val callCount = calls.groupValues[1].toIntOrNull() ?: return CallState.UNKNOWN
+
+        // "N active channels" and "M active calls" are different numbers: an inbound leg that is
+        // ringing but not yet bridged is a channel with no call. Answering IDLE there would let a
+        // guard authorise hanging up on a phone that is ringing at that instant, so treat EITHER
+        // counter being non-zero as LIVE — §3 wants the safe direction.
+        val channelCount = lines.firstNotNullOfOrNull { ACTIVE_CHANNELS_RE.find(it) }
+            ?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+        return if (callCount > 0 || channelCount > 0) CallState.LIVE else CallState.IDLE
     }
 }

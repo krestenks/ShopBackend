@@ -84,17 +84,31 @@ class ModemStuckWatchdog(
         if (!amiClient.connected) return
         val states = amiClient.quectelDeviceStates()
         if (states.isEmpty()) return
-        val channels = amiClient.command("core show channels")
+        // commandOrNull, not command(): the latter hands back an error string on a failed query,
+        // which contains no "Quectel/" and therefore reads as "nothing is on a call" — turning an
+        // AMI hiccup into a restart of every busy modem (audit finding 6). No listing, no decisions.
+        // We need the channel listing to tell an orphaned modem from a busy one. When we cannot get
+        // a usable one, suspend the DESTRUCTIVE branches only — detection, streak accounting and the
+        // admin alert must keep running, or a genuinely dead modem goes silent for as long as the
+        // AMI query is broken (and if the AMI user lacks the command class, that is forever).
+        // Weak evidence may still justify alerting; it just may not justify destroying anything.
+        val channels = amiClient.commandOrNull("core show channels")
+        val channelsUsable = channels != null && channels.any { AmiClient.ACTIVE_CALLS_RE.containsMatchIn(it) }
+        if (!channelsUsable) {
+            println("[ModemWatchdog] channel listing unavailable/incomplete — " +
+                "alerting still active, automatic restarts/reloads suspended this pass")
+        }
         // A chan_quectel reload re-inits ALL trunks and would drop any live GSM call, so the
         // down-recovery ladder must never reload while any Quectel channel is up.
-        val anyQuectelCall = channels.any { it.contains("Quectel/") }
+        val anyQuectelCall = !channelsUsable || channels!!.any { it.contains("Quectel/") }
 
         for ((trunk, rawState) in states) {
             val state = rawState.trim()
             when {
                 state.lowercase() in AmiClient.CALL_STATES -> {
                     clearDownState(trunk)
-                    if (channels.any { it.contains("Quectel/$trunk-") }) { orphanStreak.remove(trunk); continue }
+                    if (!channelsUsable) { orphanStreak.remove(trunk); continue }
+                    if (channels!!.any { it.contains("Quectel/$trunk-") }) { orphanStreak.remove(trunk); continue }
                     handleOrphan(trunk, state)
                 }
                 state.equals("Free", ignoreCase = true) -> {
@@ -102,7 +116,7 @@ class ModemStuckWatchdog(
                 }
                 else -> {  // not Free, not in a call → modem down / unusable
                     orphanStreak.remove(trunk)
-                    handleDown(trunk, state, anyQuectelCall)
+                    handleDown(trunk, state, anyQuectelCall, channelsUsable)
                 }
             }
         }
@@ -157,13 +171,13 @@ class ModemStuckWatchdog(
      *      SIM/signal), then re-run the whole ladder every [DOWN_RETRY_LADDER_MS] and re-nag admin
      *      every [RENAG_INTERVAL_MS] until the modem is usable again.
      */
-    private fun handleDown(trunk: String, state: String, anyQuectelCall: Boolean) {
+    private fun handleDown(trunk: String, state: String, anyQuectelCall: Boolean, channelsUsable: Boolean = true) {
         val streak = (downStreak[trunk] ?: 0) + 1
         downStreak[trunk] = streak
         if (streak < DOWN_CHECKS) return          // debounce: ride out normal init/teardown first
         val now = System.currentTimeMillis()
 
-        if (downAutoRecover) {
+        if (downAutoRecover && channelsUsable) {
             // If a previous ladder pass gave up, retry the WHOLE ladder after a cooldown instead of
             // giving up forever — the modem may have become restart-recoverable in the meantime.
             ladderExhaustedAt[trunk]?.let {

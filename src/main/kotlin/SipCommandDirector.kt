@@ -132,35 +132,49 @@ object SipCommandDirector {
             val since = st.firstUnreachableAt ?: now.also { st.firstUnreachableAt = it }
             val downMs = now - since
 
-            val wanted = when {
+            val escalation = when {
                 downMs >= RESTART_AFTER_MS -> CMD_RESTART
                 downMs >= REBUILD_AFTER_MS -> CMD_REBUILD
                 else -> null
             } ?: return null
 
+            // 'rebuild' tears down the phone's SIP core and 'restart' kills its process; both drop
+            // whatever call that handset is on. Qualify is not trustworthy enough to spend a live
+            // call on — an unreachable verdict routinely coexists with a phone that is answering
+            // fine (the DISAGREEMENT case below), and on 2026-09-07 we sent 'restart' three times to
+            // a handset that was reporting itself healthy. While any call is up — or while we cannot
+            // tell — degrade to the non-destructive rung instead of standing down entirely, so a
+            // genuinely deaf phone still gets nudged.
+            val callState = RecoveryAudit.callState(ami)
+            val wanted = if (callState == RecoveryAudit.CallState.IDLE) escalation else CMD_REFRESH
+
             // Cooldown, and never re-send the identical command back to back.
             if (now - st.lastCommandAt < COMMAND_COOLDOWN_MS) return null
+
+            if (wanted != escalation) {
+                println("[SipCommand] $aor unreachable ${downMs / 1000}s -> would send '$escalation', " +
+                    "but calls=${callState.name.lowercase()} — sending '$wanted' instead")
+            }
 
             st.lastCommand = wanted
             st.lastCommandAt = now
             println("[SipCommand] $aor unreachable ${downMs / 1000}s -> sending '$wanted'" +
                 (st.lastReport?.let { " (phone last reported state=${it.state} registered=${it.registered})" } ?: ""))
 
-            // 'rebuild' tears down the phone's SIP core; 'restart' kills its process outright. Both
-            // drop whatever call that handset is on, and neither end checks for one (audit finding 5).
-            // The evidence is weak twice over: qualify can report a responsive phone Unavailable, and
-            // the phone itself frequently disagrees (see the DISAGREEMENT line in onReport).
-            // Note the call check is box-wide, not per-AOR, so it over-reports slightly — for an
-            // action this destructive, and this rare, that is the right direction to err in.
-            RecoveryAudit.fired(
-                action = "command phone '$wanted'",
-                target = aor,
-                evidence = "qualify says unreachable ${downMs / 1000}s; phone last said " +
-                    "state=${st.lastReport?.state} registered=${st.lastReport?.registered}",
-                strength = RecoveryAudit.Evidence.WEAK,
-                blast = RecoveryAudit.Blast.PHONE,
-                ami = ami, alerter = alerter,
-            )
+            // Only the destructive rungs are worth auditing; 'refresh' re-asserts registration and
+            // cannot drop a call. Note the call check is box-wide rather than per-AOR, so it is
+            // slightly conservative — for an action this destructive, that is the right direction.
+            if (wanted != CMD_REFRESH) {
+                RecoveryAudit.fired(
+                    action = "command phone '$wanted'",
+                    target = aor,
+                    evidence = "qualify says unreachable ${downMs / 1000}s; phone last said " +
+                        "state=${st.lastReport?.state} registered=${st.lastReport?.registered}",
+                    strength = RecoveryAudit.Evidence.WEAK,
+                    blast = RecoveryAudit.Blast.PHONE,
+                    ami = ami, alerter = alerter,
+                )
+            }
             return wanted
         }
     }

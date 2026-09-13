@@ -74,4 +74,22 @@ class RecoveryAuditTest {
     fun `singular 'active call' is parsed`() {
         assertEquals(CallState.LIVE, RecoveryAudit.parseCallState(listOf("1 active call")))
     }
+
+    @Test
+    fun `a ringing channel with no bridged call is LIVE, not IDLE`() {
+        // An inbound leg that is ringing but not yet answered is a channel with no call. Reporting
+        // IDLE here would let a guard authorise hanging up on a phone that is ringing right now,
+        // so either counter being non-zero must read as LIVE.
+        assertEquals(
+            CallState.LIVE,
+            RecoveryAudit.parseCallState(
+                listOf(
+                    "Channel              Location             State   Application(Data)",
+                    "PJSIP/mgr2-00000003  from-gsm-shop1:1     Ring    AppDial((Outgoing Line))",
+                    "1 active channels",
+                    "0 active calls",
+                )
+            ),
+        )
+    }
 }

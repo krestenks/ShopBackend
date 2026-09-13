@@ -80,9 +80,16 @@ class SystemHealthMonitor(
             val managerReachable = onDuty.any { reachable.contains(config.managerEndpointId(it)) }
             val trunk = config.trunkName(shop.id)
             val hasModem = modemStates.containsKey(trunk)
-            val modemFree = modemStates[trunk]?.trim().equals("Free", ignoreCase = true)
+            val state = modemStates[trunk]?.trim()
+            val modemFree = state.equals("Free", ignoreCase = true)
+            // A modem carrying a call reports Ring/Incoming/Active, NOT Free — so treating "not
+            // Free" as unhealthy made /health answer 503 for the duration of every normal call,
+            // i.e. the busier the shop the sicker it looked (audit finding 7). A modem on a call is
+            // demonstrably working. Busy is healthy.
+            val modemBusyOnCall = state?.lowercase() in AmiClient.CALL_STATES
+            val modemUsable = modemFree || modemBusyOnCall
             // Call-ready = a manager can be rung AND (if the shop has a GSM trunk) it can carry the call.
-            val callReady = managerReachable && (!hasModem || modemFree)
+            val callReady = managerReachable && (!hasModem || modemUsable)
             ShopHealth(shop.id, shop.name, managerReachable, hasModem, modemFree, callReady)
         }
 
