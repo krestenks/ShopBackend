@@ -1,6 +1,12 @@
 # Audit: automated recovery paths that can drop live calls
 
-**Date:** 2026-09-13. **Status:** findings verified, fixes NOT yet applied (deliberately deferred).
+**Date:** 2026-09-13. **Status: ALL NINE FIXED, REVIEWED AND DEPLOYED** the same day — see
+[Resolution](#resolution) at the end for the per-finding status, the commits, and the three defects
+the review caught in the fixes themselves.
+
+The findings below are kept in their original, pre-fix wording: they are the record of what was
+wrong and why, and the reasoning is what makes the rules in
+[recovery-code-rules.md](recovery-code-rules.md) worth following.
 
 Triggered by the CLCC-reaper incident, in which a self-healing watchdog hung up healthy bridged
 calls ~15s after answer (see [telephony-reliability.md](telephony-reliability.md) failure mode 5).
@@ -203,3 +209,56 @@ watchdog then "repairs" with restarts.
 Every fix should land with the observability described in
 [recovery-code-rules.md](recovery-code-rules.md): a destructive action that fires must say so, and
 name the evidence it acted on.
+
+---
+
+# Resolution
+
+All nine fixed, reviewed and deployed on 2026-09-13.
+
+| # | Finding | Fix | Status |
+|---|---|---|---|
+| 1 | `AT+CLCC` timeout tears down the modem | `CMD_AT_CLCC` out of the critical list | edge `f8c6ae0` — deployed |
+| 2 | `cmd_timeout()` ignores the error classification | needs consecutive strikes **and** `PVT_NO_CHANS` | edge `f8c6ae0` — deployed |
+| 3 | app `onAvailable` → unguarded `bounceNetwork()` | call-aware, mirrors `recoverAfterHandover` | app `40d12f3` — OTA 1.0.107 |
+| 4 | every backend restart reloads chan_quectel | reload only if changed **and** no GSM call | `6caf996` — **verified in production** |
+| 5 | backend commands a phone to restart mid-call | degrades to `refresh`; guarded on both ends | `6caf996` + `40d12f3` |
+| 6 | `AmiClient.command()` fails open | `commandOrNull()` / `anyQuectelCallOrNull()` | `6caf996` — deployed |
+| 7 | `/health` 503 *because* a call is in progress | busy is healthy; comment rewritten | `6caf996` — deployed |
+| 8 | `ModemScanner` AT-probes when AMI is down | fails closed | `6caf996` — deployed |
+| 9 | assorted unguarded app teardowns | all guarded; see the app commit | app `40d12f3` — OTA 1.0.107 |
+
+Finding 4 is confirmed by the deploy itself: the backend restart logged
+`quectel_shops.conf unchanged — skipping chan_quectel reload`, where previously it would have
+re-initialised every trunk on the box.
+
+Also fixed while in the area, from the same audit pass: the taskprocessor high-water mark restarting
+a device carrying calls, and the `ATD`-failure path releasing a call without hanging it up on the
+modem (which manufactured the wedge the reconciliation exists to clean up).
+
+## What the review caught — the part worth remembering
+
+Three defects **in the fixes**, two of them worse than the bugs being fixed. All three were
+found by reviewing the diff against [recovery-code-rules.md](recovery-code-rules.md), and all three
+would otherwise have shipped:
+
+1. **`command()` executed every CLI command twice** on the failure path — it delegated to
+   `commandOrNull()` (which had already sent the action) and retried on null. On
+   `module reload chan_quectel.so` that is two fleet-wide trunk re-inits, inside the change written
+   to prevent one.
+2. **The pump-stall deferral deadlocked.** Deferring `restartIterateLoop()` while a call is active
+   reads as obviously correct — but the pump is the only caller of `Core.iterate()`, so a stalled
+   pump cannot process the far end's BYE, `callsNb` never drops, `hasActiveCall()` stays true
+   forever, and the stall permanently defers its own cure. It also returned before the health
+   report, so the backend would have stopped seeing the phone entirely. Now bounded by a hard limit,
+   and it falls through instead of returning.
+3. **The canary would have cried wolf.** `RecoveryAudit` counted *all* channels while the reload
+   guard checked only GSM ones, so every legitimate reload during a PJSIP call would have paged the
+   admin — the precise way an alarm becomes noise and gets ignored, which is how the reaper's 139
+   daily warnings went unread for two weeks. Separately, `parseCallState` read a *ringing* channel
+   as `IDLE`, which is the unsafe direction once it is used as a guard rather than as logging.
+
+The general lesson, and the reason the review step is now in `CLAUDE.md`: **a fix to recovery code
+is itself recovery code**, and deserves the same suspicion as the thing it replaces. "Be more
+careful before destroying state" has a symmetric failure — being so careful that nothing is ever
+recovered — and #2 was exactly that.
