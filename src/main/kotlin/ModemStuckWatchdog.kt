@@ -1,3 +1,4 @@
+import asterisk.RecoveryAudit
 import asterisk.AmiClient
 import asterisk.ReliabilityAlerter
 import kotlinx.coroutines.runBlocking
@@ -123,6 +124,17 @@ class ModemStuckWatchdog(
         lastRestartAt[trunk] = now
         orphanStreak.remove(trunk)
 
+        // WEAK: "no matching channel in a listing we may not have received" — the guard reads the
+        // same fail-open channel list as everything else (audit finding 6), so announce it.
+        RecoveryAudit.fired(
+            action = "quectel restart now",
+            target = trunk,
+            evidence = "state='$state' with no Quectel/$trunk channel for $ORPHAN_CHECKS checks",
+            strength = RecoveryAudit.Evidence.WEAK,
+            blast = RecoveryAudit.Blast.TRUNK,
+            ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
+        )
+
         val out = amiClient.command("quectel restart now $trunk").joinToString(" ").trim()
         println("[ModemWatchdog] restart $trunk -> ${out.ifBlank { "scheduled" }}")
         alerter.record(
@@ -168,6 +180,14 @@ class ModemStuckWatchdog(
                     if (now - (lastDownRestartAt[trunk] ?: 0L) < RESTART_COOLDOWN_MS) return
                     lastDownRestartAt[trunk] = now
                     downRestartAttempts[trunk] = attempts + 1
+                    RecoveryAudit.fired(
+                        action = "quectel restart now (down-recover ${attempts + 1}/$MAX_DOWN_RESTARTS)",
+                        target = trunk,
+                        evidence = "state='$state' not Free and no call for $DOWN_CHECKS checks",
+                        strength = RecoveryAudit.Evidence.WEAK,
+                        blast = RecoveryAudit.Blast.TRUNK,
+                        ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
+                    )
                     val out = amiClient.command("quectel restart now $trunk").joinToString(" ").trim()
                     println("[ModemWatchdog] down-recover restart $trunk (attempt ${attempts + 1}/$MAX_DOWN_RESTARTS) -> ${out.ifBlank { "scheduled" }}")
                     alerter.record(
@@ -180,6 +200,17 @@ class ModemStuckWatchdog(
                 // Stage 2 — restarts didn't help: one global chan_quectel reload (never during a live call).
                 if (!anyQuectelCall && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
                     lastChanReloadAt = now
+                    // PBX-wide: re-inits every trunk. anyQuectelCall comes from a channel listing we
+                    // cannot prove we received, so this is exactly where an independent check earns
+                    // its keep — RecoveryAudit answers UNKNOWN rather than assuming idle.
+                    RecoveryAudit.fired(
+                        action = "module reload chan_quectel.so",
+                        target = "PBX (triggered by $trunk)",
+                        evidence = "$trunk still down after $MAX_DOWN_RESTARTS restarts; anyQuectelCall=false",
+                        strength = RecoveryAudit.Evidence.WEAK,
+                        blast = RecoveryAudit.Blast.PBX,
+                        ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
+                    )
                     runCatching { amiClient.reloadChanQuectel() }
                         .onFailure { println("[ModemWatchdog] chan_quectel reload failed: ${it.message}") }
                     println("[ModemWatchdog] reloaded chan_quectel after $MAX_DOWN_RESTARTS failed restarts of $trunk")

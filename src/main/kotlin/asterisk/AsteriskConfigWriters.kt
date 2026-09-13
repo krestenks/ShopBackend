@@ -94,7 +94,20 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
             }
         }
         writeAtomically(file, content)
-        if (reload) amiClient.reloadChanQuectel()
+        if (reload) {
+            // A chan_quectel reload re-inits EVERY trunk on the box, so it drops any GSM call in
+            // any shop. It is unguarded here and fires on every backend start (audit finding 4),
+            // which makes it the single most reliable way we have to hang up a live call.
+            RecoveryAudit.fired(
+                action = "module reload chan_quectel.so",
+                target = "PBX",
+                evidence = "quectel_shops.conf regenerated (${written.size} trunk(s))",
+                strength = RecoveryAudit.Evidence.STRONG,   // the config write itself is the trigger
+                blast = RecoveryAudit.Blast.PBX,
+                ami = amiClient,
+            )
+            amiClient.reloadChanQuectel()
+        }
         println("[Asterisk] Wrote $file (${shops.size - skipped.size} trunk(s))")
         for (sid in skipped) {
             System.err.println(

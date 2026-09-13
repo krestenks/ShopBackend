@@ -39,6 +39,20 @@ config, bounce a socket, or command another device to restart.
 **Opt-out:** if Kresten says to defer/skip testing or review, do so — and say plainly what is
 unreviewed so the debt is visible.
 
+### "review changes" — go deep, cost is not a consideration
+
+When Kresten says **"review changes"** (or "review this"), his time to fix a production fault is far
+more expensive than tokens. Do the thorough version, not a quick read:
+
+- Fan out **parallel subagents** over the diff — correctness, the recovery-code checklist below,
+  blast radius, concurrency/lifecycle, and error/inconclusive paths — rather than one shallow pass.
+- **Verify every serious claim yourself** before reporting it. Subagents are fast and sometimes
+  wrong; read the cited lines. Report findings as CONFIRMED (you read it) or SUSPECTED.
+- Check the **runtime evidence too**, not just the code: what the logs on the edge say this code
+  actually did. Static analysis finds what *could* fire; the logs show what *does*.
+- Rank by **blast radius x likelihood** and say plainly what you would fix first — and what is fine.
+  A short list of real problems beats a long list of observations.
+
 The one rule that matters most: **weak evidence (a timeout, a missed poll, an unparsed response, a
 failed query) must never authorise destroying working state.** "I could not determine" is a third
 state, distinct from "no", and it must fail closed.

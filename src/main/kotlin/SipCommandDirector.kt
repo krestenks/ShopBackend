@@ -1,3 +1,4 @@
+import asterisk.RecoveryAudit
 import kotlinx.serialization.Serializable
 import java.util.concurrent.ConcurrentHashMap
 
@@ -109,7 +110,13 @@ object SipCommandDirector {
      *
      * @return a command string, or null to leave the phone's own ladder alone.
      */
-    fun onVerdict(aor: String, reachable: Boolean, now: Long = System.currentTimeMillis()): String? {
+    fun onVerdict(
+        aor: String,
+        reachable: Boolean,
+        now: Long = System.currentTimeMillis(),
+        ami: asterisk.AmiClient? = null,
+        alerter: asterisk.ReliabilityAlerter? = null,
+    ): String? {
         val st = stateFor(aor)
         synchronized(st) {
             if (reachable) {
@@ -138,6 +145,22 @@ object SipCommandDirector {
             st.lastCommandAt = now
             println("[SipCommand] $aor unreachable ${downMs / 1000}s -> sending '$wanted'" +
                 (st.lastReport?.let { " (phone last reported state=${it.state} registered=${it.registered})" } ?: ""))
+
+            // 'rebuild' tears down the phone's SIP core; 'restart' kills its process outright. Both
+            // drop whatever call that handset is on, and neither end checks for one (audit finding 5).
+            // The evidence is weak twice over: qualify can report a responsive phone Unavailable, and
+            // the phone itself frequently disagrees (see the DISAGREEMENT line in onReport).
+            // Note the call check is box-wide, not per-AOR, so it over-reports slightly — for an
+            // action this destructive, and this rare, that is the right direction to err in.
+            RecoveryAudit.fired(
+                action = "command phone '$wanted'",
+                target = aor,
+                evidence = "qualify says unreachable ${downMs / 1000}s; phone last said " +
+                    "state=${st.lastReport?.state} registered=${st.lastReport?.registered}",
+                strength = RecoveryAudit.Evidence.WEAK,
+                blast = RecoveryAudit.Blast.PHONE,
+                ami = ami, alerter = alerter,
+            )
             return wanted
         }
     }

@@ -1,3 +1,4 @@
+import asterisk.RecoveryAudit
 import asterisk.AmiClient
 import asterisk.AsteriskConfig
 import asterisk.ReliabilityAlerter
@@ -104,6 +105,19 @@ class SystemHealthMonitor(
 
         lastAsteriskRestartAt = now
         restartsToday++
+        // Kills every call and registration on the box. By construction we cannot check for live
+        // calls here — this branch only runs because AMI is unreachable, so RecoveryAudit will
+        // answer UNKNOWN. That is the honest answer and worth recording: an AMI-only fault (rotated
+        // secret, manager.conf permissions) looks identical to a dead PBX from here, and would
+        // restart a perfectly healthy Asterisk carrying live calls.
+        RecoveryAudit.fired(
+            action = "systemctl restart asterisk",
+            target = "PBX",
+            evidence = "AMI continuously unreachable for ${(now - amiDownSince) / 60000}min",
+            strength = RecoveryAudit.Evidence.WEAK,
+            blast = RecoveryAudit.Blast.PBX,
+            ami = amiClient, alerter = alerter,
+        )
         val ok = runCatching {
             val p = ProcessBuilder("sudo", "systemctl", "restart", "asterisk").redirectErrorStream(true).start()
             p.waitFor()

@@ -509,7 +509,7 @@ class MobileApi(
                     val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
                     // The backend sees the truth minutes before the phone can. Once the phone's own
                     // ladder has demonstrably failed, hand it a command instead of waiting.
-                    val command = SipCommandDirector.onVerdict(aor, reachable)
+                    val command = SipCommandDirector.onVerdict(aor, reachable, ami = admin.amiClient)
                     call.respond(SipHealthResponse(
                         reachable = reachable,
                         aor = aor,
@@ -551,7 +551,7 @@ class MobileApi(
                     val reachable = admin.amiClient.pjsipReachableAors().contains(aor)
                     // Verdict first so the unreachable-since clock is current, then log the
                     // disagreement against it.
-                    val command = SipCommandDirector.onVerdict(aor, reachable)
+                    val command = SipCommandDirector.onVerdict(aor, reachable, ami = admin.amiClient)
                     SipCommandDirector.onReport(aor, report, reachable)
                     // Persist + log the phone's radio signal + battery (piggybacked on the report) so
                     // outages can be correlated with LTE signal, wifi-vs-cellular, and a dying battery.
