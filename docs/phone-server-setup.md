@@ -220,6 +220,20 @@ registered. Only once the profile brings up the `ims` context does it become
 and meaningless on shop5/shop6, and why it is set here for **parity and for the
 2G sunset**, not because it fixes anything today.
 
+**If the state digit stays `0` after ~10 minutes, the modem never requested the IMS PDN at attach**
+(it attached before the carrier profile applied -- a boot race, seen on shop6 2026-09-16). Bring the
+bearer up by hand on the free tty and the IMS stack registers over it on its own retry, typically
+within ~10 min:
+
+```
+AT+CGACT=1,2          -> OK, then AT+CGACT? shows +CGACT: 2,1
+AT+QCFG="ims"         -> "ims",1,1 a few minutes later
+```
+
+This is a write, but a small one: it activates a data context and does not touch the voice path.
+**It was applied by hand, so re-check `ims` after any reboot of that modem** -- the boot race can
+recur, and the remedy is this one command.
+
 Voice currently runs over **CSFB**, which works with or without VoLTE: Telenor DK
 accepts a combined EPS/IMSI attach, so `AT+CREG?` returns `1` with AcT `7`. When
 Danish operators switch 2G off, CSFB disappears and IMS registration (`1,1`)
@@ -240,10 +254,9 @@ becomes the only voice path — another reason every modem should already be at
 > `4c861cf` (thresholds 6, and 24 ≈ 2 min while Asterisk still holds a channel) and
 > `f71b1f9` (never treat a listed-but-unparsed index as absent). **Keep those deployed; a
 > chan_quectel rebuild that loses them will start dropping calls on every shop, not two.**
-> **Status 2026-09-16:** shop1, shop2 and shop5 read `1,1`. shop6 has the carrier profile
-> active but stayed at `1,0` -- configured, IMS not registered -- so it is still on CSFB and
-> still in the safe CLCC regime. Same operator and IMSI range as the others, cause not yet
-> established. After any modem gains `1,1`, check for a week:
+> **Status 2026-09-16: all four modems read `1,1`.** shop6 needed the manual `AT+CGACT=1,2`
+> above; the other three registered at boot. So the whole fleet is now in the flaky-CLCC regime
+> and this hardening is load-bearing for every shop. After any modem gains `1,1`, check for a week:
 > `grep "CLCC reap" /var/log/asterisk/dropcatch | grep channel:yes` must stay empty.
 >
 > The mid-call drops themselves were the reaper, not VoLTE. Do not disable VoLTE on the
@@ -282,9 +295,8 @@ AT+CGDCONT?     → "", "ims", "SOS"
 ```
 
 Anything else means that shop is the odd one out, and it will be the one with the
-unexplained SMS failures. As of 2026-09-16 all four have `AutoSel,1` + the `ims`/`SOS`
-contexts; shop6 is configured `ims,1` but has not registered IMS (`1,0`), so it is not yet
-identical to the other three. The working idle-gated change script is `/home/phone/mbn-shop6.sh` on the
+unexplained SMS failures. As of 2026-09-16 all four are identical: `AutoSel,1`, `ROW_Generic_3GPP`
+active, `""`/`ims`/`SOS` contexts, `ims,1,1` and `CGACT: 2,1`. The working idle-gated change script is `/home/phone/mbn-shop6.sh` on the
 edge — copy it and change `SOCK`/`DEV`/`CARD` rather than typing AT commands by
 hand, because it aborts *before* the reboot if any readback is wrong.
 
