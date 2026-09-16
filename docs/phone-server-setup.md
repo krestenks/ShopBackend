@@ -153,54 +153,110 @@ card id via udev (`ATTR{id}="EC25Shop1"`) or use `hw:CARD=EC25EUX,DEV=0` style
 addressing per USB path. Configure the resulting name in the shop's
 "ALSA audio device" field.
 
-## 7b. Modem radio config — UAC audio, and leave VoLTE alone
+## 7b. Modem radio config — the three settings every EC25 must have
 
-Two separate settings. Only the first is required.
+**All three are required, on every modem, and two of ours ran for months without
+them.** A half-configured EC25 works *most* of the time — it registers, it carries
+calls, it sends most SMS — so the gap shows up as an intermittent reliability
+problem months later, not as a failure at install time. Configure every new modem
+the same way and there is nothing to correlate later.
 
-**USB audio (UAC) — required.** A fresh EC25 ships with the audio interface off,
-so `chan_quectel` has no `alsadev` to open. Enable it once per modem, then reboot
-the modem:
+Apply the three below, then **one** `AT+CFUN=1,1` (or `quectel reset shopN`) and
+verify. Do it while the trunk is idle: `quectel show device state shopN` → `Free`,
+and no `Quectel/shopN-` channel in `core show channels`. Activating a carrier
+profile can trigger a second self-reboot a few seconds later, so allow ~2 min.
+
+### 1. USB audio (UAC) — without it there is no voice path at all
+
+A fresh EC25 ships with the audio interface off, so `chan_quectel` has no
+`alsadev` to open.
 
 ```
 AT+QCFG="usbcfg",0x2C7C,0x0125,1,1,1,1,1,0,1
-AT+CFUN=1,1
 ```
 
 (The trailing `1` is the UAC flag. The backend surfaces this same hint when it
-detects a modem with no audio device.)
+detects a modem with no audio device.) After the reboot the modem must appear in
+`/proc/asound/cards` as `EC25EUX_<n>`, and `quectel show device settings shopN`
+must show `Audio UAC : hw:CARD=EC25EUX_<n>`. **If that card name changes or
+disappears, stop and roll back** — the trunk is mute even though it looks healthy.
 
-**VoLTE / IMS — leave at the factory default (`AT+QCFG="ims",0`). Do not enable it.**
+### 2. Carrier profile (MBN) — without it SMS submits intermittently time out
 
-It is tempting to turn VoLTE on "so the modem works on the Danish network". That
-is not necessary and it actively costs reliability:
+```
+AT+QMBNCFG="AutoSel",1
+```
 
-- Voice works today over **CSFB**. Telenor DK still accepts a combined EPS/IMSI
-  attach — `AT+CREG?` returns `1` with AcT `7` (E-UTRAN), which is exactly the
-  indicator that circuit-switched fallback is available. Verified on modems with
-  IMS off that have carried hundreds of calls.
-- With `ims,1` the EC25 (fw `EC25EUXGAR08A19M1`) reports IMS voice calls
-  **inconsistently in the polled `AT+CLCC` listing**. That starves
-  `chan_quectel`'s CLCC reconciliation, which then decides a live call is
-  stranded and hangs up on the customer mid-conversation. Measured 2026-09-13:
-  the two modems with `ims,1` averaged **~1.1–1.2 false reaps per call**; the two
-  at the default averaged **~0 across 89 calls**. See
-  [telephony-reliability.md](telephony-reliability.md).
+This makes the modem auto-select the operator profile at boot. On Telenor/Lebara
+DK it lands on `ROW_Generic_3GPP`, which is what defines the **`ims` and `SOS` PDP
+contexts** — a modem without it has only the bare internet context.
 
-Also expect, and do **not** try to "clean up", extra `+CLCC` lines like
-`+CLCC: 1,1,0,1,0,"",128`. Those `mode:1` entries are the modem's **PDP data
-bearers**, mapping 1:1 onto `AT+CGACT?` — context 1 is the default internet
-bearer (the LTE attach itself), context 2 is `ims`. Deactivating context 1
-detaches the modem from LTE entirely. Nothing is stuck.
+**Evidence (2026-09-13 → 16).** shop5 and shop6 ran at `AutoSel,0` for months.
+~4.5% of their SMS submits timed out (the 40s `+CMGS` wait) — and *only* theirs;
+shop1 and shop2, which had the profile, never did. shop5 was given the profile on
+2026-09-14 and then sent **67 messages with 0 failures** (p ≈ 3.2% that a modem
+with the old failure rate does that by chance). shop6 was brought into line on
+2026-09-16. Treat this as the required setting it is.
 
-**When this guidance expires.** CSFB only exists while 2G does. Once Danish
-operators switch 2G off, VoLTE becomes mandatory and `ims` must be enabled on
-every modem. Do not enable it before then without first confirming the
-`at_response_clcc` hardening is deployed (edge commits `4c861cf` + `f71b1f9`),
-or calls will start dropping at ~15s again.
+Verify:
 
-**Checking a modem without disturbing calls.** `chan_quectel` holds only the
-`:1.2` USB interface; `:1.0`, `:1.1` and `:1.3` are free, so you can query a live
-modem with zero risk to calls in progress:
+```
+AT+QMBNCFG="AutoSel"     → +QMBNCFG: "AutoSel",1
+AT+QMBNCFG="List"        → one row with selected=1,activated=1, "ROW_Generic_3GPP"
+AT+CGDCONT?              → three contexts: "", "ims", "SOS"
+AT+CGACT?                → +CGACT: 2,1   (the ims bearer is up)
+```
+
+### 3. VoLTE / IMS — set it, but know it is inert on its own
+
+```
+AT+QCFG="ims",1
+```
+
+**`ims,1` does nothing until a carrier profile is active.** The readback is
+`<config>,<state>`: with no MBN you get `"ims",1,0` — configured, never
+registered. Only once the profile brings up the `ims` context does it become
+`"ims",1,1`. This is exactly why "we enabled VoLTE on that modem" was both true
+and meaningless on shop5/shop6, and why it is set here for **parity and for the
+2G sunset**, not because it fixes anything today.
+
+Voice currently runs over **CSFB**, which works with or without VoLTE: Telenor DK
+accepts a combined EPS/IMSI attach, so `AT+CREG?` returns `1` with AcT `7`. When
+Danish operators switch 2G off, CSFB disappears and IMS registration (`1,1`)
+becomes the only voice path — another reason every modem should already be at
+`1,1` rather than discovered to be at `1,0` on the day it matters.
+
+> **Correction, and the risk it creates.** An earlier version of this section said
+> to leave VoLTE off, because the two `ims,1` modems averaged ~1.1 false CLCC reaps
+> per call while the two at default averaged ~0 across 89 calls. That correlation is
+> real and was measured per call, so it is **not** a traffic-volume artifact — but the
+> causal variable is IMS *actually registered* (`1,1`), not the config flag. shop5/shop6
+> read `ims,1,0` or `0,0`, so their calls went over CSFB, where the EC25 reports `+CLCC`
+> consistently. shop1/shop2 were at `1,1` and made real IMS calls, which the modem lists
+> unreliably in the polled `AT+CLCC`.
+>
+> **So bringing all four modems to `1,1` moves the whole fleet into the regime where CLCC
+> is flaky.** That is only safe because the reaper hardening is deployed — edge commits
+> `4c861cf` (thresholds 6, and 24 ≈ 2 min while Asterisk still holds a channel) and
+> `f71b1f9` (never treat a listed-but-unparsed index as absent). **Keep those deployed; a
+> chan_quectel rebuild that loses them will start dropping calls on every shop, not two.**
+> After any modem gains `1,1`, check for a week:
+> `grep "CLCC reap" /var/log/asterisk/dropcatch | grep channel:yes` must stay empty.
+>
+> The mid-call drops themselves were the reaper, not VoLTE. Do not disable VoLTE on the
+> old reasoning.
+
+### Expect these `+CLCC` lines; do not "clean them up"
+
+Extra entries like `+CLCC: 1,1,0,1,0,"",128` are the modem's **PDP data bearers**,
+mapping 1:1 onto `AT+CGACT?` — context 1 is the default internet bearer (the LTE
+attach itself), context 2 is `ims`. Deactivating context 1 detaches the modem from
+LTE entirely. Nothing is stuck.
+
+### Checking a modem without disturbing calls
+
+`chan_quectel` holds only the `:1.2` USB interface; `:1.0`, `:1.1` and `:1.3` are
+free, so you can query a live modem with zero risk to calls in progress:
 
 ```bash
 ls -l /dev/serial/by-path/ | grep 1.2.2     # find the modem's ttyUSBn set
@@ -211,6 +267,28 @@ sudo bash -c "exec 3<>/dev/ttyUSB12; printf 'AT+QCFG=\"ims\"\r' >&3; timeout 2 c
 Send **queries only** on that port — a hangup command there would drop a real
 call. Note `asterisk -rx "quectel cmd ..."` is useless for this: `chan_quectel`
 discards any reply it cannot parse, so you see `↳ [OK]` and no data.
+
+### Fleet audit — is every modem configured the same?
+
+A one-liner worth running after any modem swap. For each shop, on its free tty:
+
+```
+AT+QCFG="ims"   → "ims",1,1
+AT+QMBNCFG="AutoSel"  → "AutoSel",1
+AT+CGDCONT?     → "", "ims", "SOS"
+```
+
+Anything else means that shop is the odd one out, and it will be the one with the
+unexplained SMS failures. As of 2026-09-16 all four (shop1, shop2, shop5, shop6)
+match. The working idle-gated change script is `/home/phone/mbn-shop6.sh` on the
+edge — copy it and change `SOCK`/`DEV`/`CARD` rather than typing AT commands by
+hand, because it aborts *before* the reboot if any readback is wrong.
+
+**Rollback**, if a modem misbehaves after the change:
+
+```
+AT+QMBNCFG="AutoSel",0 ; AT+QMBNCFG="Deactivate" ; AT+QCFG="ims",0 ; AT+CFUN=1,1
+```
 
 ## 8. First provisioning + smoke test
 

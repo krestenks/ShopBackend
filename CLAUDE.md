@@ -97,5 +97,5 @@ separate and fine (subject to Rule 2). Note `origin` on the edge chan_quectel re
 - [docs/recovery-code-rules.md](docs/recovery-code-rules.md) — rules + checklist for destructive code
 - [docs/telephony-reliability.md](docs/telephony-reliability.md) — known failure modes and fixes
 - [docs/phone-server-setup.md](docs/phone-server-setup.md) — edge setup; §7b modem radio config
-  (UAC required; **leave VoLTE at default**)
+  (UAC required; **all three settings — UAC + carrier profile + VoLTE — on every modem**)
 - [docs/manager-phone-setup.md](docs/manager-phone-setup.md) — per-handset Android settings

@@ -79,17 +79,24 @@ phone registered.)
 
 ---
 
-### 5. Calls cut out mid-conversation at ~15 s (CLCC reaper vs VoLTE)
+### 5. Calls cut out mid-conversation at ~15 s (the CLCC reaper — not VoLTE)
 The fix for #3 added a CLCC reconciliation that releases a call the modem no longer lists.
 It was too impatient — `CLCC_REAP_MISSES = 2` (~10 s at the 5 s poll) — and started hanging up
 **healthy, bridged calls** about 15 s after answer. Proof it was a false positive: the CLCC reply
 arriving moments after each reap listed the call as `state:0` (**ACTIVE**).
 
-**Why only some shops.** Perfect 4/4 correlation with **VoLTE**: the two modems with
-`AT+QCFG="ims",1` averaged ~1.1–1.2 false reaps per call; the two at the default (`ims,0`)
-averaged ~0 across 89 calls. Same firmware, identical `quectel show device settings`, same USB
-hub — the EC25 simply reports IMS voice calls inconsistently in the polled `AT+CLCC`. See
-[phone-server-setup.md](phone-server-setup.md) §7b.
+**Why only some shops — and why that no longer protects anyone.** Perfect 4/4 correlation with
+**IMS actually registered**: the two modems reading `AT+QCFG="ims"` → `1,1` averaged ~1.1–1.2 false
+reaps per call; the two whose IMS was never registered averaged ~0 across 89 calls. Measured per
+call, so it is not a volume artifact. Same firmware, identical `quectel show device settings`, same
+USB hub — the EC25 simply reports IMS voice calls inconsistently in the polled `AT+CLCC`, while CSFB
+calls list cleanly.
+
+Note the causal variable is the *state*, not the config flag: a modem set to `ims,1` with no carrier
+profile stays at `1,0` and keeps making CSFB calls. **Since 2026-09-16 all four modems are at `1,1`**
+(see [phone-server-setup.md](phone-server-setup.md) §7b), so every shop is now in the flaky-CLCC
+regime and the hardening below is load-bearing fleet-wide rather than for two shops. Watch
+`grep "CLCC reap" /var/log/asterisk/dropcatch | grep channel:yes` — it must stay empty.
 
 **How to recognise it** (do this *before* suspecting the app or the network):
 - `grep "CLCC reap" /var/log/asterisk/dropcatch` — a reap logged with **`channel:yes` is always a
