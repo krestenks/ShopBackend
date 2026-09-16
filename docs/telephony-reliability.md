@@ -93,9 +93,10 @@ USB hub — the EC25 simply reports IMS voice calls inconsistently in the polled
 calls list cleanly.
 
 Note the causal variable is the *state*, not the config flag: a modem set to `ims,1` with no carrier
-profile stays at `1,0` and keeps making CSFB calls. **Since 2026-09-16 all four modems are at `1,1`**
-(see [phone-server-setup.md](phone-server-setup.md) §7b), so every shop is now in the flaky-CLCC
-regime and the hardening below is load-bearing fleet-wide rather than for two shops. Watch
+profile stays at `1,0` and keeps making CSFB calls. **Since 2026-09-16 shop1, shop2 and shop5 are at
+`1,1`** (see [phone-server-setup.md](phone-server-setup.md) §7b) -- shop6 has the profile but has not
+registered IMS -- so three of four shops are in the flaky-CLCC regime and the hardening below is
+load-bearing for them, not just the original two. Watch
 `grep "CLCC reap" /var/log/asterisk/dropcatch | grep channel:yes` — it must stay empty.
 
 **How to recognise it** (do this *before* suspecting the app or the network):
