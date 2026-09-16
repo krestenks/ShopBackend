@@ -44,7 +44,7 @@ they overlap under load. One reply arriving 5.1s late drops every call on the sh
 
 This is the same weak signal that commit `6c341d6` just ruled insufficient to kill *one* call, but
 here it is authorised to kill *all* of them. Especially relevant on shop1/shop2, whose CLCC is
-demonstrably unreliable (IMS-registered calls; since 2026-09-16 that is all four shops — see
+demonstrably unreliable (IMS-registered calls; since 2026-09-16 that is shop1, shop2 and shop5 — see
 [phone-server-setup.md](phone-server-setup.md) 7b).
 
 **Fix:** remove `CMD_AT_CLCC` from the critical list — a late CLCC is not a dead modem. Give
