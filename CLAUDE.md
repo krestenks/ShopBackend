@@ -89,6 +89,11 @@ separate and fine (subject to Rule 2). Note `origin` on the edge chan_quectel re
 - **Packet counts are not audio.** RTP flowing proves delivery, not content.
 - **Beware symptoms that point away from the cause.** A reaped call left the *caller's* handset
   showing a running timer on a dead line for minutes — it looked exactly like a phone fault.
+- **`module reload chan_quectel.so` does not load new chan_quectel code** — only an Asterisk restart
+  does. Verify what is *running*: `sudo grep chan_quectel /proc/$(pidof asterisk)/maps` must not say
+  `(deleted)`. A deploy that checks the file on disk will report success on the old code.
+- **A modem that goes mute with no USB drop** after an SMS: check for an orphaned SMS prompt first
+  (failure mode 6 in docs/telephony-reliability.md).
 - Never leave a detached `rasterisk`/`pjsip set logger on`; that filled the disk for 8 days once.
   Reset `core set debug 0` when done.
 

@@ -120,6 +120,53 @@ released. `f71b1f9` then closes the underlying hole: an entry the parser decline
 `CALL_FLAG_ALIVE` — if the modem lists an index at all, the call on it is not absent. It logs a
 warning naming the mode/state, so a recurrence is visible instead of silent.
 
+### 6. A modem goes mute for hours after an SMS (orphaned SMS prompt)
+**Symptom.** One trunk stops answering entirely: `AT command timeout` over and over, the trunk
+reads `Not initialized`, calls and SMS to that shop fail — yet there is **no USB disconnect**, the
+other modems are fine, and neither `quectel restart` nor the watchdog's reloads bring it back.
+shop5, 2026-09-17 22:47 → ~01:15: 253 AT timeouts, and the watchdog reloaded the whole PBX four
+times trying.
+
+**Cause.** To send an SMS, chan_quectel sends `AT+CMGS=<len>`, waits (5 s) for the modem's `>`
+prompt, then sends the PDU. If the prompt arrives *after* that timeout, the SMS task has already
+been failed and removed; the late `>` found nothing waiting and was ignored. But a modem that has
+issued `>` is in **PDU input mode**: every byte it receives is treated as message body until
+Ctrl-Z (send) or ESC (abort). So every later command — keepalives, init, everything — was swallowed.
+Nothing outside can fix that: a restart only reopens the port, and a reset needs a working AT port
+to deliver `AT+CFUN=1,1`. It is the same family as the Sep 14 segfault (a late `+CMGS` reply after
+its task was removed) — that fix covered the result stage, this is the prompt stage.
+
+**Proven on the EC25** (spare tty, nothing sent): at a `>` prompt `AT` and `AT+CSQ` get no reply;
+one ESC byte answers `OK` and the modem is normal again. A bare ESC with no prompt pending gets no
+reply at all. `ESC`+`AT+CSQ` answers `+CSQ: n,m OK` normally and a bare `OK` at a prompt — exactly
+one `OK` either way.
+
+**How to recognise it:**
+- `grep "unexpected SMS PROMPT\|Orphaned SMS prompt\|stuck at an SMS prompt" /var/log/asterisk/dropcatch`
+- A burst of `AT command timeout` on one shop that starts in the same second as an
+  `[AT+CMGS] ... Error sending message`.
+- No kernel USB events for that modem (`journalctl -k | grep 1-1.2.x`) — it never rebooted.
+
+**Fixed** (edge `2ac3b38`, live 2026-09-19 00:28):
+- An orphaned prompt now gets an **ESC** (`at_enqueue_escape`, uid −2), logged
+  `Orphaned SMS prompt aborted - modem is answering commands again`. The SMS is reported failed and
+  nothing is sent.
+- **Before every device (re)init** chan_quectel sends `ESC`+`AT+CSQ` and reads until the `OK` is
+  followed by 200 ms of silence (2 s cap), then drains. That clears a prompt left over when the
+  device restarted before the ESC went out, logs `Modem was stuck at an SMS prompt` when it rescues
+  one, and cannot shift init's reply accounting (reading only to the *first* `OK` would have let a
+  stale `OK` credit the probe's reply to init — IMEI parsed as IMSI; a review caught that).
+
+**And the blast radius it exposed** (backend `bad80b0`): the watchdog's down-recovery ladder
+re-runs every 30 min and each pass ended in a PBX-wide `module reload chan_quectel.so`, which
+briefly drops every healthy shop too. It now spends **one** reload per down-episode (re-armed after
+6 h, logged `[Recovery] SUPPRESSED ... bound=1/episode`); trunk restarts, resync and admin nags
+carry on as before.
+
+**Deploying chan_quectel code needs a full Asterisk restart.** `module reload chan_quectel.so` only
+re-runs the module's config reload — the process keeps the old `.so` in memory. Verify what is
+*running*: `sudo grep chan_quectel /proc/$(pidof asterisk)/maps` must not say `(deleted)`.
+
 ## Reliability event log + admin alerts
 `ReliabilityAlerter` records events to the `reliability_event` table (capped 1000) and, for
 call-blocking ones, SMSes the admin (from a currently-healthy SIM, via `SmsQueue`, rate-limited
