@@ -42,6 +42,7 @@ class ModemStuckWatchdog(
         const val RELOAD_GRACE_MS = 90_000L         // let a chan_quectel reload finish re-init before giving up
         const val DOWN_RETRY_LADDER_MS = 30 * 60_000L    // after the ladder is exhausted, re-run the whole ladder at most this often (never give up permanently)
         const val RENAG_INTERVAL_MS = 2 * 60 * 60_000L   // re-alert admin about a still-down modem at most this often
+        const val RELOAD_REARM_MS = 6 * 60 * 60_000L     // a down-episode earns one more PBX reload after this long
     }
 
     /** Kill switch for the down-modem AUTO-RECOVERY ladder (restart→reload). The orphan-in-call
@@ -60,6 +61,9 @@ class ModemStuckWatchdog(
     private val ladderExhaustedAt = HashMap<String, Long>()
     private val lastNagAt = HashMap<String, Long>()
     private val resyncedThisPass = HashSet<String>()   // device-path resync already tried this ladder pass
+    // One PBX-wide reload per down-episode (re-armed after RELOAD_REARM_MS). Reset only when the trunk
+    // recovers (clearDownState), NOT per ladder pass — see ReloadBudget.
+    private val reloadBudget = ReloadBudget(RELOAD_REARM_MS)
 
     fun start() {
         if (!enabled) {
@@ -127,6 +131,7 @@ class ModemStuckWatchdog(
         downStreak.remove(trunk)
         downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk)
         ladderExhaustedAt.remove(trunk); lastNagAt.remove(trunk); resyncedThisPass.remove(trunk)
+        reloadBudget.reset(trunk)
     }
 
     private fun handleOrphan(trunk: String, state: String) {
@@ -165,8 +170,10 @@ class ModemStuckWatchdog(
      * 2026-09-02: shop5 recovered on a single restart ~33 h after the ladder first gave up), so we run
      * a bounded recovery ladder, alert with a diagnosis, and then KEEP RETRYING rather than giving up:
      *   1. up to [MAX_DOWN_RESTARTS] `quectel restart now {trunk}`, spaced by [RESTART_COOLDOWN_MS];
-     *   2. still down → one `module reload chan_quectel.so` per [CHAN_RELOAD_COOLDOWN_MS] (skipped
-     *      while any GSM call is live, since a reload drops all trunks);
+     *   2. still down → ONE `module reload chan_quectel.so` per down-episode, and globally at most one
+     *      per [CHAN_RELOAD_COOLDOWN_MS] (skipped while any GSM call is live, since a reload drops all
+     *      trunks). Later ladder passes in the same episode keep the per-trunk restarts but do not
+     *      reload again — the reload already failed, and repeating it only widens the outage;
      *   3. still down after that → record `modem_down` + admin SMS (diagnosed: init-failure vs
      *      SIM/signal), then re-run the whole ladder every [DOWN_RETRY_LADDER_MS] and re-nag admin
      *      every [RENAG_INTERVAL_MS] until the modem is usable again.
@@ -212,8 +219,10 @@ class ModemStuckWatchdog(
                     return
                 }
                 // Stage 2 — restarts didn't help: one global chan_quectel reload (never during a live call).
-                if (!anyQuectelCall && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
+                val reloadSpent = !reloadBudget.available(trunk, now)
+                if (!anyQuectelCall && !reloadSpent && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
                     lastChanReloadAt = now
+                    reloadBudget.spend(trunk, now)
                     // PBX-wide: re-inits every trunk. anyQuectelCall comes from a channel listing we
                     // cannot prove we received, so this is exactly where an independent check earns
                     // its keep — RecoveryAudit answers UNKNOWN rather than assuming idle.
@@ -236,6 +245,13 @@ class ModemStuckWatchdog(
                     return
                 }
                 if (anyQuectelCall) return   // defer the reload until no call is live; re-evaluate next tick
+                // Speak only when the budget is what is blocking the reload (the global cooldown has
+                // elapsed), i.e. once per later ladder pass — not on the grace ticks right after a reload.
+                if (reloadSpent && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
+                    println("[Recovery] SUPPRESSED module reload chan_quectel.so target=PBX (triggered by $trunk) " +
+                        "reason=already reloaded for this down-episode without effect; repeating only takes the " +
+                        "healthy trunks down too bound=1/episode rearm_in=${reloadBudget.msUntilRearm(trunk, now) / 60_000}min")
+                }
                 // Reload fired but the modem hasn't come back yet — give it time to re-init before alerting.
                 if (now - lastChanReloadAt < RELOAD_GRACE_MS) return
                 // Stage 2.5 — restarts + reload didn't help → the device path is probably stale after a
