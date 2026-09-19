@@ -157,11 +157,25 @@ one `OK` either way.
   one, and cannot shift init's reply accounting (reading only to the *first* `OK` would have let a
   stale `OK` credit the probe's reply to init — IMEI parsed as IMSI; a review caught that).
 
-**And the blast radius it exposed** (backend `bad80b0`): the watchdog's down-recovery ladder
-re-runs every 30 min and each pass ended in a PBX-wide `module reload chan_quectel.so`, which
-briefly drops every healthy shop too. It now spends **one** reload per down-episode (re-armed after
-6 h, logged `[Recovery] SUPPRESSED ... bound=1/episode`); trunk restarts, resync and admin nags
-carry on as before.
+**What the watchdog did meanwhile, and what that review changed** (backend, 2026-09-19). The
+down-recovery ladder re-ran every 30 min and each pass ended in `module reload chan_quectel.so` —
+four times that night. That rung turned out to be a **no-op**: with an unchanged config
+chan_quectel's `pvt_reconfigure` restarts no device, so it neither helped shop5 nor touched the
+healthy shops (an earlier note here claimed it dropped them; it did not). It has been removed. What
+does recover a stuck modem is the per-trunk `quectel restart`, which now also sends the pre-init
+ESC — on 09-17 chan_quectel was restarting shop5 every ~30 s itself, so the first cycle would have
+cleared it.
+
+The rung that **had** hurt a healthy shop was the device-path **resync**. 2026-09-12 16:03: run
+while shop6's modem was hung (its IMSI not found, so it kept `EC25EUX_3`), the scan put the healthy
+shop5 on `EC25EUX_3`; the rewrite restarted shop5 onto a card another trunk held and shop5 could not
+open audio until a manual restart six minutes later. Now (`DevicePathPlanner`): the watchdog may only
+move trunks it has confirmed down, a shop is only moved onto a complete scan result, and any move
+that would give one device to two trunks is dropped (logged `[Recovery] SUPPRESSED device-path
+rewrite` plus a `device_rewrite_refused` reliability event); the other shops' moves still apply. A
+genuine re-enumeration that swaps two shops' sound cards is still applied. Provisioning a shop that
+ends up with no device now fails loudly instead of reporting a dead line as provisioned. A live call
+elsewhere now only skips the resync for that pass instead of holding back the admin alert.
 
 **Deploying chan_quectel code needs a full Asterisk restart.** `module reload chan_quectel.so` only
 re-runs the module's config reload — the process keeps the old `.so` in memory. Verify what is

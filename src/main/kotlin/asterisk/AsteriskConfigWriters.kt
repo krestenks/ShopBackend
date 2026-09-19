@@ -132,9 +132,10 @@ class QuectelConfigWriter(private val config: AsteriskConfig, private val amiCli
                 appendLine("context=${config.inboundContext(shop.shopId)}")
             }
         }
-        // A chan_quectel reload re-inits EVERY trunk on the box, dropping any GSM call in any shop.
-        // This runs on every backend start, so before the guard below it was the most reliable way
-        // we had of hanging up live calls — a crash-restart was enough (audit finding 4).
+        // A chan_quectel reload restarts every trunk whose config CHANGED (pvt_reconfigure leaves an
+        // unchanged trunk alone), dropping a GSM call on it. This runs on every backend start, and
+        // startup used to rewrite the device paths routinely, so before the guard below it was the most
+        // reliable way we had of hanging up live calls — a crash-restart was enough (audit finding 4).
         //
         // Two rules, in order of how much they buy:
         //   1. Reload only if the file actually changed. At startup it is byte-identical virtually

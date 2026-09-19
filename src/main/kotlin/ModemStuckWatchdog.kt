@@ -1,7 +1,6 @@
 import asterisk.RecoveryAudit
 import asterisk.AmiClient
 import asterisk.ReliabilityAlerter
-import kotlinx.coroutines.runBlocking
 
 /**
  * Auto-recovers a GSM modem wedged in a call state, and flags modems that go down.
@@ -16,7 +15,7 @@ import kotlinx.coroutines.runBlocking
  *
  * Down: a modem that is neither Free nor on a call (e.g. "Not initialized", "Not connected") for
  * several minutes means GSM calls to that shop are dead. Auto-recovery runs a bounded ladder
- * (restarts → chan_quectel reload); if that doesn't clear it, admin is alerted with a diagnosis
+ * ([DownRecoveryLadder]: per-trunk restarts → device resync); if that doesn't clear it, admin is alerted with a diagnosis
  * (modem/voice-init failure — restart-recoverable — vs a genuine SIM/signal fault) and the ladder
  * is RETRIED every DOWN_RETRY_LADDER_MS — it never gives up permanently, since a modem stuck
  * "Not initialized" is often restart-recoverable a while later (observed 2026-09-02: shop5 sat down
@@ -26,44 +25,26 @@ import kotlinx.coroutines.runBlocking
 class ModemStuckWatchdog(
     private val amiClient: AmiClient,
     private val alerter: ReliabilityAlerter,
-    /** Re-scan modems by IMSI + rewrite/reload the trunk config when the restart/reload ladder
-     *  can't recover a modem — fixes a stale device path after a USB re-enumeration (the
-     *  2026-09-05 outage). Returns true if a device path actually changed. Null disables the stage. */
-    private val resyncDevices: (suspend () -> Boolean)? = null,
+    /** Re-scan modems by IMSI and move ONLY the given confirmed-down shops when restarts can't
+     *  recover them — fixes a stale device path after a USB re-enumeration (the 2026-09-05 outage)
+     *  without ever rewriting a working trunk (2026-09-12). Returns true if a path actually changed.
+     *  Null disables the stage. */
+    private val resyncDevices: (suspend (downShopIds: Set<Int>) -> Boolean)? = null,
     private val enabled: Boolean = System.getenv("MODEM_WATCHDOG_ENABLED")?.lowercase() != "false",
 ) {
     private companion object {
         const val CHECK_INTERVAL_MS = 60_000L
         const val ORPHAN_CHECKS = 2                 // consecutive orphan detections before restart (~2 min)
-        const val DOWN_CHECKS = 4                   // consecutive not-usable checks before we act (~4 min)
         const val RESTART_COOLDOWN_MS = 3 * 60_000L // don't restart the same trunk more often than this
-        const val MAX_DOWN_RESTARTS = 2             // per-trunk `quectel restart` attempts before escalating
-        const val CHAN_RELOAD_COOLDOWN_MS = 30 * 60_000L // global chan_quectel reload, at most this often
-        const val RELOAD_GRACE_MS = 90_000L         // let a chan_quectel reload finish re-init before giving up
-        const val DOWN_RETRY_LADDER_MS = 30 * 60_000L    // after the ladder is exhausted, re-run the whole ladder at most this often (never give up permanently)
-        const val RENAG_INTERVAL_MS = 2 * 60 * 60_000L   // re-alert admin about a still-down modem at most this often
-        const val RELOAD_REARM_MS = 6 * 60 * 60_000L     // a down-episode earns one more PBX reload after this long
     }
 
-    /** Kill switch for the down-modem AUTO-RECOVERY ladder (restart→reload). The orphan-in-call
+    /** Kill switch for the down-modem AUTO-RECOVERY ladder (restart→resync). The orphan-in-call
      *  restart and the down alerting stay on regardless. Set MODEM_DOWN_AUTORECOVER=false to disable. */
     private val downAutoRecover = System.getenv("MODEM_DOWN_AUTORECOVER")?.lowercase() != "false"
 
     private val orphanStreak = HashMap<String, Int>()
-    private val downStreak = HashMap<String, Int>()
     private val lastRestartAt = HashMap<String, Long>()
-    // Down-recovery ladder state.
-    private val downRestartAttempts = HashMap<String, Int>()
-    private val lastDownRestartAt = HashMap<String, Long>()
-    @Volatile private var lastChanReloadAt = 0L
-    // Set when a ladder pass (restarts + reload) has exhausted for a trunk; the pass is retried
-    // after DOWN_RETRY_LADDER_MS rather than giving up forever. lastNagAt gates the periodic re-alert.
-    private val ladderExhaustedAt = HashMap<String, Long>()
-    private val lastNagAt = HashMap<String, Long>()
-    private val resyncedThisPass = HashSet<String>()   // device-path resync already tried this ladder pass
-    // One PBX-wide reload per down-episode (re-armed after RELOAD_REARM_MS). Reset only when the trunk
-    // recovers (clearDownState), NOT per ladder pass — see ReloadBudget.
-    private val reloadBudget = ReloadBudget(RELOAD_REARM_MS)
+    private val downLadder = DownRecoveryLadder(AsteriskLadderActions(), autoRecover = downAutoRecover)
 
     fun start() {
         if (!enabled) {
@@ -100,38 +81,30 @@ class ModemStuckWatchdog(
         val channelsUsable = channels != null && channels.any { AmiClient.ACTIVE_CALLS_RE.containsMatchIn(it) }
         if (!channelsUsable) {
             println("[ModemWatchdog] channel listing unavailable/incomplete — " +
-                "alerting still active, automatic restarts/reloads suspended this pass")
+                "alerting still active, automatic restarts/resync suspended this pass")
         }
-        // A chan_quectel reload re-inits ALL trunks and would drop any live GSM call, so the
-        // down-recovery ladder must never reload while any Quectel channel is up.
+        // A device resync rewrites + reloads chan_quectel, which restarts every trunk whose config
+        // changed and would drop a call on it, so the ladder never resyncs while any Quectel channel is up.
         val anyQuectelCall = !channelsUsable || channels!!.any { it.contains("Quectel/") }
 
         for ((trunk, rawState) in states) {
             val state = rawState.trim()
             when {
                 state.lowercase() in AmiClient.CALL_STATES -> {
-                    clearDownState(trunk)
+                    downLadder.onHealthy(trunk)
                     if (!channelsUsable) { orphanStreak.remove(trunk); continue }
                     if (channels!!.any { it.contains("Quectel/$trunk-") }) { orphanStreak.remove(trunk); continue }
                     handleOrphan(trunk, state)
                 }
                 state.equals("Free", ignoreCase = true) -> {
-                    orphanStreak.remove(trunk); clearDownState(trunk)
+                    orphanStreak.remove(trunk); downLadder.onHealthy(trunk)
                 }
                 else -> {  // not Free, not in a call → modem down / unusable
                     orphanStreak.remove(trunk)
-                    handleDown(trunk, state, anyQuectelCall, channelsUsable)
+                    downLadder.onDown(trunk, state, anyQuectelCall, channelsUsable)
                 }
             }
         }
-    }
-
-    /** Reset all down/recovery bookkeeping for a trunk that is healthy (Free) or on a call. */
-    private fun clearDownState(trunk: String) {
-        downStreak.remove(trunk)
-        downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk)
-        ladderExhaustedAt.remove(trunk); lastNagAt.remove(trunk); resyncedThisPass.remove(trunk)
-        reloadBudget.reset(trunk)
     }
 
     private fun handleOrphan(trunk: String, state: String) {
@@ -163,127 +136,43 @@ class ModemStuckWatchdog(
         )
     }
 
-    /**
-     * A modem that is neither Free nor on a call (e.g. "Not initialized" / "Not connected") means GSM
-     * calls to that shop are dead. Some of those states ARE restart-recoverable (observed 2026-08-26:
-     * shop2 sat "Not initialized" and a `quectel restart` + chan_quectel reload brought it back; and
-     * 2026-09-02: shop5 recovered on a single restart ~33 h after the ladder first gave up), so we run
-     * a bounded recovery ladder, alert with a diagnosis, and then KEEP RETRYING rather than giving up:
-     *   1. up to [MAX_DOWN_RESTARTS] `quectel restart now {trunk}`, spaced by [RESTART_COOLDOWN_MS];
-     *   2. still down → ONE `module reload chan_quectel.so` per down-episode, and globally at most one
-     *      per [CHAN_RELOAD_COOLDOWN_MS] (skipped while any GSM call is live, since a reload drops all
-     *      trunks). Later ladder passes in the same episode keep the per-trunk restarts but do not
-     *      reload again — the reload already failed, and repeating it only widens the outage;
-     *   3. still down after that → record `modem_down` + admin SMS (diagnosed: init-failure vs
-     *      SIM/signal), then re-run the whole ladder every [DOWN_RETRY_LADDER_MS] and re-nag admin
-     *      every [RENAG_INTERVAL_MS] until the modem is usable again.
-     */
-    private fun handleDown(trunk: String, state: String, anyQuectelCall: Boolean, channelsUsable: Boolean = true) {
-        val streak = (downStreak[trunk] ?: 0) + 1
-        downStreak[trunk] = streak
-        if (streak < DOWN_CHECKS) return          // debounce: ride out normal init/teardown first
-        val now = System.currentTimeMillis()
-
-        if (downAutoRecover && channelsUsable) {
-            // If a previous ladder pass gave up, retry the WHOLE ladder after a cooldown instead of
-            // giving up forever — the modem may have become restart-recoverable in the meantime.
-            ladderExhaustedAt[trunk]?.let {
-                if (now - it >= DOWN_RETRY_LADDER_MS) {
-                    downRestartAttempts.remove(trunk); lastDownRestartAt.remove(trunk)
-                    ladderExhaustedAt.remove(trunk); resyncedThisPass.remove(trunk)
-                }
-            }
-
-            if (ladderExhaustedAt[trunk] == null) {
-                // Stage 1 — bounded per-trunk restarts.
-                val attempts = downRestartAttempts[trunk] ?: 0
-                if (attempts < MAX_DOWN_RESTARTS) {
-                    if (now - (lastDownRestartAt[trunk] ?: 0L) < RESTART_COOLDOWN_MS) return
-                    lastDownRestartAt[trunk] = now
-                    downRestartAttempts[trunk] = attempts + 1
-                    RecoveryAudit.fired(
-                        action = "quectel restart now (down-recover ${attempts + 1}/$MAX_DOWN_RESTARTS)",
-                        target = trunk,
-                        evidence = "state='$state' not Free and no call for $DOWN_CHECKS checks",
-                        strength = RecoveryAudit.Evidence.WEAK,
-                        blast = RecoveryAudit.Blast.TRUNK,
-                        ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
-                    )
-                    val out = amiClient.command("quectel restart now $trunk").joinToString(" ").trim()
-                    println("[ModemWatchdog] down-recover restart $trunk (attempt ${attempts + 1}/$MAX_DOWN_RESTARTS) -> ${out.ifBlank { "scheduled" }}")
-                    alerter.record(
-                        "warn", "modem_restart", shopIdOf(trunk),
-                        "Modem '$trunk' was down (state '$state') — auto-restarted (attempt ${attempts + 1}/$MAX_DOWN_RESTARTS)",
-                        alertAdmin = false,   // don't SMS on each recovery attempt; only the give-up + re-nags alert
-                    )
-                    return
-                }
-                // Stage 2 — restarts didn't help: one global chan_quectel reload (never during a live call).
-                val reloadSpent = !reloadBudget.available(trunk, now)
-                if (!anyQuectelCall && !reloadSpent && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
-                    lastChanReloadAt = now
-                    reloadBudget.spend(trunk, now)
-                    // PBX-wide: re-inits every trunk. anyQuectelCall comes from a channel listing we
-                    // cannot prove we received, so this is exactly where an independent check earns
-                    // its keep — RecoveryAudit answers UNKNOWN rather than assuming idle.
-                    RecoveryAudit.fired(
-                        action = "module reload chan_quectel.so",
-                        target = "PBX (triggered by $trunk)",
-                        evidence = "$trunk still down after $MAX_DOWN_RESTARTS restarts; anyQuectelCall=false",
-                        strength = RecoveryAudit.Evidence.WEAK,
-                        blast = RecoveryAudit.Blast.PBX,
-                        ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
-                    )
-                    runCatching { amiClient.reloadChanQuectel() }
-                        .onFailure { println("[ModemWatchdog] chan_quectel reload failed: ${it.message}") }
-                    println("[ModemWatchdog] reloaded chan_quectel after $MAX_DOWN_RESTARTS failed restarts of $trunk")
-                    alerter.record(
-                        "warn", "chan_reload", shopIdOf(trunk),
-                        "Modem '$trunk' still down after $MAX_DOWN_RESTARTS restarts — reloaded chan_quectel",
-                        alertAdmin = false,
-                    )
-                    return
-                }
-                if (anyQuectelCall) return   // defer the reload until no call is live; re-evaluate next tick
-                // Speak only when the budget is what is blocking the reload (the global cooldown has
-                // elapsed), i.e. once per later ladder pass — not on the grace ticks right after a reload.
-                if (reloadSpent && now - lastChanReloadAt >= CHAN_RELOAD_COOLDOWN_MS) {
-                    println("[Recovery] SUPPRESSED module reload chan_quectel.so target=PBX (triggered by $trunk) " +
-                        "reason=already reloaded for this down-episode without effect; repeating only takes the " +
-                        "healthy trunks down too bound=1/episode rearm_in=${reloadBudget.msUntilRearm(trunk, now) / 60_000}min")
-                }
-                // Reload fired but the modem hasn't come back yet — give it time to re-init before alerting.
-                if (now - lastChanReloadAt < RELOAD_GRACE_MS) return
-                // Stage 2.5 — restarts + reload didn't help → the device path is probably stale after a
-                // USB re-enumeration. Re-scan modems by IMSI and rewrite the trunk config (once per pass).
-                // No live call can be up here (we returned above if one was), so the reload is safe.
-                val resync = resyncDevices
-                if (resync != null && trunk !in resyncedThisPass) {
-                    resyncedThisPass.add(trunk)
-                    val changed = runCatching { runBlocking { resync() } }
-                        .onFailure { println("[ModemWatchdog] device resync failed: ${it.message}") }
-                        .getOrDefault(false)
-                    println("[ModemWatchdog] resynced device paths after failed restarts of $trunk (changed=$changed)")
-                    if (changed) {
-                        alerter.record(
-                            "warn", "modem_resync", shopIdOf(trunk),
-                            "Modem '$trunk' was down after restarts+reload — re-scanned modems and rewrote the " +
-                                "trunk config (stale device path, likely a USB re-enumeration)",
-                            alertAdmin = false,
-                        )
-                        return   // give the rewrite+reload time to re-init before judging it exhausted
-                    }
-                }
-                ladderExhaustedAt[trunk] = now   // pass done; retried after DOWN_RETRY_LADDER_MS (never permanent)
-            }
+    /** What the down ladder does in production: AMI + audit + reliability events. */
+    private inner class AsteriskLadderActions : DownLadderActions {
+        override fun restartTrunk(trunk: String, attempt: Int, of: Int, state: String) {
+            RecoveryAudit.fired(
+                action = "quectel restart now (down-recover $attempt/$of)",
+                target = trunk,
+                evidence = "state='$state' not Free and no call for ${DownRecoveryLadder.DOWN_CHECKS} checks",
+                strength = RecoveryAudit.Evidence.WEAK,
+                blast = RecoveryAudit.Blast.TRUNK,
+                ami = amiClient, alerter = alerter, shopId = shopIdOf(trunk),
+            )
+            val out = amiClient.command("quectel restart now $trunk").joinToString(" ").trim()
+            println("[ModemWatchdog] down-recover restart $trunk (attempt $attempt/$of) -> ${out.ifBlank { "scheduled" }}")
+            alerter.record(
+                "warn", "modem_restart", shopIdOf(trunk),
+                "Modem '$trunk' was down (state '$state') — auto-restarted (attempt $attempt/$of)",
+                alertAdmin = false,   // don't SMS on each recovery attempt; only the pass-done alert + re-nags
+            )
         }
 
-        // Ladder exhausted (or auto-recovery disabled): alert admin, then re-nag on a slow cadence
-        // while it stays down. Never permanently silent — the ladder above keeps retrying in parallel.
-        val lastNag = lastNagAt[trunk]
-        if (lastNag != null && now - lastNag < RENAG_INTERVAL_MS) return
-        lastNagAt[trunk] = now
-        alerter.record("error", "modem_down", shopIdOf(trunk), diagnoseDown(trunk, state), alertAdmin = true)
+        override suspend fun resync(trunk: String, downShopIds: Set<Int>): Boolean? {
+            val resync = resyncDevices ?: return null
+            val changed = resync(downShopIds)
+            if (changed) {
+                alerter.record(
+                    "warn", "modem_resync", shopIdOf(trunk),
+                    "Modem '$trunk' was down after restarts — re-scanned modems and moved the down trunk(s) " +
+                        "$downShopIds to their current device paths (stale path, likely a USB re-enumeration)",
+                    alertAdmin = false,
+                )
+            }
+            return changed
+        }
+
+        override fun alertDown(trunk: String, state: String) {
+            alerter.record("error", "modem_down", shopIdOf(trunk), diagnoseDown(trunk, state), alertAdmin = true)
+        }
     }
 
     /**

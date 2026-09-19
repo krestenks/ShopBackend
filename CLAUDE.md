@@ -60,7 +60,8 @@ state, distinct from "no", and it must fail closed.
 ## RULE 2 — ask before anything that can drop live calls
 
 Confirm with Kresten first, every time:
-- `module reload chan_quectel.so` — re-inits **all trunks, every shop**
+- `module reload chan_quectel.so` — restarts **every trunk whose config changed** (a no-op for a
+  device when nothing changed, and it never loads new code — see below)
 - restarting Asterisk, or the backend (its startup re-provision reloads chan_quectel)
 - `quectel restart|reset|remove`, or writing `quectel_shops.conf`
 - anything touching `/etc/asterisk`, astdb, or registrar contacts

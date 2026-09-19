@@ -147,10 +147,10 @@ object ShopBackend {
         // "Dialing" → all calls fail until restarted), and flag down modems. See [ModemStuckWatchdog].
         ModemStuckWatchdog(
             amiClient, reliabilityAlerter,
-            // When the restart/reload ladder can't recover a down modem, re-scan by IMSI and
-            // rewrite the trunk config — self-heals a stale device path after a USB re-enumeration
-            // (the 2026-09-05 outage) instead of churning restarts against the wrong ttyUSB.
-            resyncDevices = { provisioner.resyncModemDevices() },
+            // When restarts can't recover a down modem, re-scan by IMSI and move ONLY the confirmed-
+            // down trunk(s) — self-heals a stale device path after a USB re-enumeration (2026-09-05)
+            // without ever rewriting a working trunk on the strength of a scan (2026-09-12).
+            resyncDevices = { downShops -> provisioner.resyncModemDevices(downShops) },
         ).start()
 
         // Detect one-way audio on an answered manager call — the phone's mic uplink goes dead so the

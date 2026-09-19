@@ -87,6 +87,25 @@ class AsteriskProvisioner(
             )
         }
 
+        // Same rule for a shop left with NO device (its SIM is in no modem the scan could see, or the
+        // move it needed was dropped because it would clash with another trunk): no trunk was written.
+        val resolved = db.getShopTelephonyConfig(shopId)
+        if (resolved.modemDataDevice.isNullOrBlank()) {
+            db.recordReliabilityEvent(
+                severity = "error",
+                category = "provision_no_device",
+                shopId = shopId,
+                message = "Shop $shopId could not be provisioned: no modem device resolved for its SIM " +
+                    "(IMSI ${resolved.imsi}) - the SIM was not found in any modem, or its modem's devices " +
+                    "are assigned to another shop.",
+            )
+            throw ModemNotUsableException(
+                "Shop $shopId's SIM was not found in any modem, or that modem's devices are already " +
+                    "assigned to another shop, so no GSM trunk could be written. Check the SIM is seated " +
+                    "and every modem is up, rescan, then provision again."
+            )
+        }
+
         db.markShopTelephonyProvisioned(shopId)
         val after = db.getShopTelephonyConfig(shopId)
         println("[Asterisk] Provisioned shop $shopId (trunk=${config.trunkName(shopId)}, imsi=${after.imsi}, device=${after.modemDataDevice})")
@@ -226,24 +245,32 @@ class AsteriskProvisioner(
      * that IMSI and caches its device paths in the DB. This is what makes a SIM moved
      * to a different modem automatically follow its shop.
      */
-    private fun resolveDevicesForAllShops() {
+    /**
+     * Re-scan modems by IMSI and persist the device-path changes [DevicePathPlanner] allows. The
+     * planner refuses any rewrite that would give one device to two trunks, and only moves shops
+     * [movable] accepts. Returns the shops actually rewritten.
+     */
+    private fun applyDevicePlan(context: String, movable: (ShopTelephonyConfig) -> Boolean): List<ShopTelephonyConfig> {
         val detected = runCatching { modemScanner.scan() }.getOrDefault(emptyList())
-        if (detected.isEmpty()) return
-        for (shop in db.getAllConfiguredShopTelephonyConfigs()) {
-            val imsi = shop.imsi ?: continue
-            val modem = detected.firstOrNull { it.imsi == imsi }
-            if (modem == null) {
-                println("[Asterisk] WARN shop ${shop.shopId}: no modem currently reports IMSI $imsi")
-                continue
-            }
-            if (modem.atDevice != shop.modemDataDevice || modem.alsaDevice != shop.modemAlsaDevice) {
-                db.upsertShopTelephonyConfig(shop.copy(
-                    modemDataDevice = modem.atDevice,
-                    modemAlsaDevice = modem.alsaDevice,
-                ))
-            }
+        if (detected.isEmpty()) return emptyList()
+        val plan = DevicePathPlanner.plan(db.getAllConfiguredShopTelephonyConfigs(), detected, movable)
+        plan.notes.forEach { println("[Asterisk] WARN $it") }
+        plan.refused?.let {
+            println("[Recovery] SUPPRESSED device-path rewrite target=$context reason=$it (inconsistent scan - those moves dropped) bound=every scan")
+            db.recordReliabilityEvent(
+                severity = "warn", category = "device_rewrite_refused", shopId = null,
+                message = "Modem re-scan ($context) proposed device paths that would give one device to two " +
+                    "trunks, so those changes were NOT applied: $it. Usually one modem was hung or " +
+                    "re-enumerating during the scan. If a SIM was deliberately moved, re-provision once all " +
+                    "modems are up.",
+            )
         }
+        plan.moves.forEach { db.upsertShopTelephonyConfig(it) }
+        return plan.moves
     }
+
+    /** Provisioning (startup, admin Save & Provision): any shop may move, under the collision guard. */
+    private fun resolveDevicesForAllShops() { applyDevicePlan("provisioning") { true } }
 
     /**
      * Re-renders one shop's TTS prompts from its voice-config texts. Called on
@@ -272,17 +299,18 @@ class AsteriskProvisioner(
      * modem. Reloads chan_quectel when it rewrites, so callers must ensure no GSM call is live.
      * Returns true if any shop's device path changed (i.e. a re-scan actually fixed something).
      */
-    suspend fun resyncModemDevices(): Boolean {
-        val before = db.getAllConfiguredShopTelephonyConfigs()
-            .associate { it.shopId to (it.modemDataDevice to it.modemAlsaDevice) }
-        resolveDevicesForAllShops()   // re-scan by IMSI + persist any device-path change
+    /**
+     * Watchdog recovery: re-scan and move ONLY the shops in [downShopIds] (trunks the watchdog has
+     * confirmed down). A working trunk is never rewritten on the strength of a scan — see
+     * [DevicePathPlanner]. Returns true if a device path actually changed.
+     */
+    suspend fun resyncModemDevices(downShopIds: Set<Int>): Boolean {
+        val moves = applyDevicePlan("watchdog resync of shop(s) ${downShopIds.sorted().joinToString(",")}") { it.shopId in downShopIds }
+        if (moves.isEmpty()) return false
         val after = db.getAllConfiguredShopTelephonyConfigs()
-        val changed = after.any { before[it.shopId] != (it.modemDataDevice to it.modemAlsaDevice) }
-        if (changed) {
-            quectelConfigWriter.regenerate(after.filter { !it.modemDataDevice.isNullOrBlank() })  // writes + reloads
-            println("[Asterisk] resyncModemDevices: device paths changed — rewrote + reloaded chan_quectel trunks")
-        }
-        return changed
+        quectelConfigWriter.regenerate(after.filter { !it.modemDataDevice.isNullOrBlank() })  // writes + reloads (call-guarded)
+        println("[Asterisk] resyncModemDevices: moved shop(s) ${moves.joinToString(",") { it.shopId.toString() }} — rewrote + reloaded chan_quectel trunks")
+        return true
     }
 
     /**
