@@ -64,6 +64,8 @@ class ConfigWritersTest {
         assertTrue(text.contains("/api/internal/telephony/call/dial-targets,secret=SECRET&shopId=7"))
         assertTrue(text.contains("Set(TARGETS=PJSIP/shop7-manager)"))
         assertTrue(text.contains("Dial($" + "{TARGETS},30)"))
+        // A manager already on a call answers 486: the caller must hear busy (cause 17), not a plain hangup.
+        assertTrue(text.contains("ExecIf($" + "[\"$" + "{DIALSTATUS}\" = \"BUSY\"]?Hangup(17))"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/operator-unavailable)"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/sms-sent)"))
         assertTrue(text.contains("Playback(/usr/share/asterisk/sounds/shopbackend/menu-invalid-goodbye)"))
