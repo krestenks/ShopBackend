@@ -34,9 +34,70 @@ There was never evidence of a fleet-wide drop.
 via the Headscale DERP relay. Restoring *any* uplink at the edge restores that path, provided the
 handset's own site is up (it was — the phone recovered the instant the edge did).
 
-**Where it would NOT help:** a dead switch or AP at the edge site, the handset's own internet failing,
-or Headscale (`t6.warpfactor.dk`) being down. Those are different outages and LTE at the edge changes
-nothing for them.
+**Where it would NOT help:** a dead switch or AP at the edge site, or the handset's own internet
+failing. And — see §1b, which supersedes the optimistic reading above — **not today's outage either,
+as the system is currently built.**
+
+---
+
+## 1b. The relay and the control plane are on the same LAN — this breaks the naive LTE plan
+
+Kresten asked whether this is a problem. It is, and it is the larger of the two problems.
+
+**Facts (verified read-only, 2026-09-20):**
+
+| Check | Result |
+|---|---|
+| `getent hosts headscale.warpfactor.dk` | `86.52.31.162` — the **site's own public IP** |
+| `ip route get 86.52.31.162` | `via 192.168.0.1 dev enp0s25` — out through the **same router** |
+| `ping 192.168.0.2` (server8) | 0.25–0.37 ms — **same LAN** as the edge (192.168.0.192) |
+| `tailscale debug derp-map` | **one** region (999), `headscale.warpfactor.dk`, DERP 443 / STUN 3479 |
+| Headscale `config.yaml` | `derp.urls: []`, `derp.paths: []`, embedded server only, `verify_clients: true` |
+| Headscale `node.expiry` | `0` — node keys never expire (good: nodes tolerate control being down) |
+
+**Consequence 1 — the whole tailnet shares one failure domain.** The edge, the DERP relay, the STUN
+server and the Headscale control plane all sit behind `192.168.0.1`. When that uplink died at 14:51,
+a remote handset had no path to *any* of them. That is exactly what we saw.
+
+**Consequence 2 — the edge loses its own control plane even though it is 0.3 ms away.** The edge
+reaches Headscale by its **public** name, so the traffic hairpins out to the router and back. With the
+WAN down there is no hairpin, and `tailscaled` logged
+`control: lite map update error … context canceled` at 14:54 while the server it was talking to was
+sitting on the same switch.
+
+**Consequence 3 — LTE fallback alone would NOT have restored service today.** On LTE the edge is
+behind CGNAT: outbound-only, which is fine for reaching a relay. But the only relay in the map is at
+the site whose uplink just died. The edge would come up on LTE, find its relay unreachable, and the
+manager's phone would still have no path in. **The naive version of this plan does not work.**
+
+**What does work:** a relay that lives outside the site. Then the path during an edge-uplink outage is
+`phone (cellular) → offsite DERP → edge (LTE, outbound through CGNAT)` — both sides dial out, so
+CGNAT on either end is not an obstacle. Control-plane downtime is survivable meanwhile, because
+`node.expiry: 0` and clients run on a cached netmap; what they cannot do is onboard a new device or
+pick up ACL changes until it returns.
+
+**Therefore an offsite relay is a prerequisite for the LTE plan, not an alternative to it.** They fix
+different halves of the same path: the relay makes the edge *findable*, LTE makes it *connected*.
+Neither alone restores a remote handset.
+
+### 1b.1 Options for an offsite relay, cheapest first
+
+1. **Add public DERP regions to the Headscale DERP map** (`derp.urls:
+   ["https://controlplane.tailscale.com/derpmap/default"]`). Zero cost, config-only, no hardware.
+   **Uncertainty, flagged honestly:** Tailscale's public DERP servers are operated for Tailscale's
+   own control plane and may refuse or rate-limit clients from a self-hosted Headscale. This is
+   widely done in the Headscale community but it is not a guarantee we control, and relying on
+   someone else's free infrastructure for our fallback path is exactly the kind of dependency that
+   fails silently. **Test before trusting it.**
+2. **Run our own `derper` on a small VPS** (~5 €/month, offsite). Fully under our control, and the
+   honest choice for something a shop's phone line depends on. Note `verify_clients: true` requires
+   the derper to reach Headscale to validate nodes; either join that VPS to the tailnet or relax
+   verification on that region.
+3. **Move Headscale itself to the VPS** (control plane *and* relay offsite). The complete fix: the
+   coordination server stops sharing a failure domain with the thing it coordinates, and onboarding
+   keeps working during a site outage. Most work of the three, and the one I would aim at eventually.
+
+None of these needs a SIM, a modem, or any new recovery code.
 
 ---
 
@@ -199,7 +260,7 @@ tailnet broken. Cheaper to build. Two important findings:
 
 ## 6. Recommendation
 
-**Do them in this order:**
+**Revised after the §1b finding. Do them in this order:**
 
 1. **Uplink-down SMS alert (this week, tiny, near-zero risk).** Today's outage ran 114 minutes
    before anyone knew. Detection is most of the value, and it is a probe plus an SMS.
@@ -207,7 +268,11 @@ tailnet broken. Cheaper to build. Two important findings:
    does, network-side forward-on-no-reply is the single highest-value resilience we can buy: no
    hardware, no data, works even if the edge is dead. If it does not, fall back to 5.2's second-modem
    divert, which shares the SIM purchase with the LTE plan.
-3. **Then LTE uplink fallback**, as designed above, in alert-only mode first.
+3. **Get a relay off the site (§1b.1).** Config-only or a 5 €/month VPS, no hardware, and it removes
+   the single failure domain that currently contains the edge, the relay, the STUN server and the
+   control plane. **This is a prerequisite for step 4 doing anything useful.**
+4. **Then LTE uplink fallback**, as designed above, in alert-only mode first — and only once step 3
+   is proven, because without an offsite relay the edge can come up on LTE and still be unreachable.
 
 **Which gives more resilience per unit of effort:** the divert/forwarding path, clearly — it covers
 more failure modes for less code and less risk, and it protects the thing that actually costs money
@@ -224,6 +289,9 @@ voice *and* data.
 ## 7. Open questions to settle before building
 
 1. Does Lebara provision call forwarding (`CCFC`) on these prepaid SIMs? — decides the cheapest option.
+1b. Do Tailscale's public DERP servers actually accept our Headscale clients? — decides whether the
+   offsite relay is free (config) or costs a VPS. Test with a throwaway `derp.urls` entry on a quiet
+   evening and watch `tailscale netcheck` list a second region with sane latency.
 2. What does the site's router/ISP actually do? Today's outage lasted ~114 min with no link-down on
    our NIC. Is this the first occurrence, or has it happened before unnoticed? Worth checking the
    router's own logs — the fix might simply be a better router or a second ISP.
