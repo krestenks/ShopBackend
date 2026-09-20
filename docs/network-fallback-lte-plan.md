@@ -99,6 +99,43 @@ Neither alone restores a remote handset.
 
 None of these needs a SIM, a modem, or any new recovery code.
 
+### 1b.2 Where to host it — measured, 2026-09-20
+
+Latency matters: the relay sits in the voice path. Measured with `ping` **from the edge**:
+
+| Candidate region | RTT from edge |
+|---|---|
+| **Hetzner Nuremberg (NBG1)** | **17 ms** |
+| OVHcloud France | 22 ms |
+| Hetzner Helsinki (HEL1) | 24 ms |
+| Scaleway Paris | 28 ms |
+
+For reference the current in-house relay adds ~2 ms, and calls already run 100-200 ms round trip to
+the S26, so anything under ~25 ms is comfortable.
+
+**Pick:** Hetzner **CX23** (2 vCPU Intel / 4 GB) or **CAX11** (2 vCPU ARM / 4 GB), ~EUR 4-5/month
+including IPv4, in **NBG1** (or FSN1, equivalent). 20 TB traffic included versus well under 1 GB/month
+actually needed. Both derper and headscale are Go; ARM is fine and usually cheapest.
+- cheapest line: https://www.hetzner.com/cloud/cost-optimized/
+- standard line (CPX12+): https://www.hetzner.com/cloud/regular-performance/
+- prefilled order: `https://console.hetzner.com/create/server?type=cx23&useIPv4=true&useIPv6=true&location=nbg1`
+
+Prices/stock did not render in the browser when checked (script-loaded; several plans showed
+"currently unavailable") - **verify on the page before ordering.**
+
+**Alternatives:** OVHcloud (~EUR 5-6, includes DDoS protection - the natural *second* provider),
+UpCloud (FI) or Scaleway (FR/NL); GleSYS (SE) or a Danish host (Curanet/Hostnordic) for Nordic
+jurisdiction and the lowest latency at ~3x the price. Avoid the bargain tier (Contabo et al) for
+something in the call path. **Proton has no compute product** - mail/VPN/Drive/Pass only - so it is
+not an option; privacy branding buys little here anyway, since relayed traffic is end-to-end
+encrypted and the host sees only ciphertext plus metadata.
+
+**Requirements when ordering:** dedicated public IPv4 (not shared/CGNAT), and the ability to open
+TCP 443 (DERP) plus UDP 3478/3479 (STUN).
+
+**End state worth aiming at:** two relay regions at *different* providers (e.g. Hetzner + OVH) - the
+DERP map supports several, which removes the single-relay weak point entirely for another ~EUR 5.
+
 ---
 
 ## 2. Feasibility on this hardware
