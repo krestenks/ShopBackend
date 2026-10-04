@@ -76,6 +76,34 @@ data class Customer(
     val callappName: String? = null,
 )
 
+/**
+ * Days a customer stays flagged for deletion before being removed. The flag is visible in
+ * WebAdmin throughout, and any activity during the window clears it outright.
+ */
+const val CUSTOMER_DELETION_GRACE_DAYS: Int = 30
+
+/** Masks a phone number for logs: "+4551941736" → "+45XXXX36". */
+fun maskPhone(phone: String?): String {
+    val p = phone?.trim().orEmpty()
+    if (p.length < 6) return "+XXXX"
+    return p.take(3) + "XXXX" + p.takeLast(2)
+}
+
+/** A customer currently flagged for deletion, for the WebAdmin review list. */
+data class FlaggedCustomer(
+    val id: Int,
+    val phone: String,
+    val name: String,
+    /** Null means no activity was ever recorded — such customers are never flagged, so this is informational. */
+    val lastActivityAt: Long?,
+    val flaggedAt: Long,
+) {
+    /** Epoch-ms at which this customer becomes eligible for deletion. */
+    fun deleteAfter(graceDays: Int = CUSTOMER_DELETION_GRACE_DAYS): Long =
+        flaggedAt + graceDays * 24L * 60 * 60 * 1000
+}
+
+
 data class BookingTokenInfo(val shopId: Int, val customerId: Int, val token: String)
 data class Appointment(
     val id: Int,
@@ -182,8 +210,15 @@ data class ShopVoiceConfig(
     val phoneOverride: String? = null,
     /** Days to keep SMS + call-log history before auto-deletion.  Default 5. */
     val communicationRetentionDays: Int = 5,
-    /** Days to keep a customer profile after their last booking/contact.  Default 90 (≈3 months). */
-    val customerRetentionDays: Int = 90,
+    /**
+     * Days of **no activity** after which a customer profile is flagged for deletion.
+     * Default 730 (two years). Flagging is not deletion: a flagged customer is listed in
+     * WebAdmin and only removed after [CUSTOMER_DELETION_GRACE_DAYS] more days, and any
+     * activity in the meantime clears the flag.
+     *
+     * This is no longer bounded by [communicationRetentionDays] — see `customers.last_activity_at`.
+     */
+    val customerRetentionDays: Int = 730,
     /**
      * Optional text appended after the generated price list SMS when the manager taps
      * "Send price list" in the messaging interface. Null/blank = no footer appended.
@@ -867,6 +902,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE managers ADD COLUMN sip_password TEXT",
             // Per-manager opt-in: allow opening the web backend (admin UI) inside the app. Default off.
             "ALTER TABLE managers ADD COLUMN web_admin_access INTEGER NOT NULL DEFAULT 0",
+            // ── Customer retention: durable activity stamp + two-stage deletion ──
+            // Activity used to be inferred from sms_message/voice_call rows, but those are deleted
+            // by communication retention FIRST, so a customer looked inactive as soon as their
+            // history aged out — capping effective customer retention at the comms window. These
+            // two columns decouple them. NULL last_activity_at means "unknown", which never
+            // authorises deletion.
+            "ALTER TABLE customers ADD COLUMN last_activity_at INTEGER",
+            "ALTER TABLE customers ADD COLUMN deletion_flagged_at INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -1056,6 +1099,17 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_provider_sid ON sms_message(provider_message_sid) WHERE provider_message_sid IS NOT NULL",
             // Active-calls poll: WHERE shop_id=? AND is_active=1 ORDER BY started_at DESC.
             "CREATE INDEX IF NOT EXISTS idx_voice_call_shop_active_started ON voice_call(shop_id, is_active, started_at)",
+            // Customer-retention lookups are by phone/customer alone, so the compound indexes above
+            // (both led by shop_id) cannot serve them. Measured on the live DB (1372 customers,
+            // 11379 SMS, 1034 calls): the eligibility predicate took 5.6s of full table scans
+            // without these and 22ms with them. It runs hourly on the single serialized SQLite
+            // connection, so 5.6s is 5.6s of blocked SMS and call logging.
+            "CREATE INDEX IF NOT EXISTS idx_sms_counterparty ON sms_message(counterparty_phone)",
+            "CREATE INDEX IF NOT EXISTS idx_sms_customer ON sms_message(customer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_voice_call_from_phone ON voice_call(from_phone)",
+            "CREATE INDEX IF NOT EXISTS idx_voice_call_customer ON voice_call(customer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_appointments_customer ON appointments(customer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_blacklist_phone_active ON phone_blacklist(phone_e164, active)",
         ).forEach { sql ->
             try {
                 connection.createStatement().use { it.execute(sql) }
@@ -1092,7 +1146,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     businessName = rs.getString("business_name"),
                     phoneOverride = rs.getString("phone_override"),
                     communicationRetentionDays = try { rs.getInt("communication_retention_days").takeIf { !rs.wasNull() } ?: 5 } catch (_: Exception) { 5 },
-                    customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 90 } catch (_: Exception) { 90 },
+                    customerRetentionDays = try { rs.getInt("customer_retention_days").takeIf { !rs.wasNull() } ?: 730 } catch (_: Exception) { 730 },
                     smsPriceListFooter = try { rs.getString("sms_price_list_footer")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
                     smsTranslateLang = try { rs.getString("sms_translate_lang")?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null },
                     rejectWithheldCallers = try { rs.getInt("reject_withheld_callers") != 0 } catch (_: Exception) { false },
@@ -1430,6 +1484,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setLong(5, System.currentTimeMillis())
             stmt.executeUpdate()
         }
+        // An inbound call is activity for the caller (see insertSmsMessage for why it is hooked here).
+        touchCustomerActivityByPhone(fromPhone)
         connection.createStatement().use { s ->
             val rs = s.executeQuery("SELECT last_insert_rowid()")
             return if (rs.next()) rs.getInt(1) else -1
@@ -2247,6 +2303,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         stmt.setDouble(6, 0.0)
         stmt.executeUpdate()
         stmt.close()
+
+        // A booking is activity, even one entered on the customer's behalf.
+        touchCustomerActivity(customerId)
 
 // Retrieve last inserted row id
         val query = connection.prepareStatement("SELECT last_insert_rowid() AS id")
@@ -4080,6 +4139,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setLong(11, System.currentTimeMillis())
             stmt.executeUpdate()
         }
+        // Durable activity stamp. Hooked here rather than in the route handlers so no SMS path can
+        // forget it; the customer row is what retention reads, long after this message is deleted.
+        touchCustomerActivityByPhone(counterpartyPhone)
         connection.createStatement().use { s ->
             val rs = s.executeQuery("SELECT last_insert_rowid()")
             return if (rs.next()) rs.getInt(1) else -1
@@ -4142,6 +4204,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.executeUpdate()
         }
         if (inserted == 0) return null
+        // A real inbound message (not a suppressed duplicate) is activity for the sender.
+        touchCustomerActivityByPhone(phone, now)
         return connection.createStatement().use { s ->
             val rs = s.executeQuery("SELECT last_insert_rowid()")
             if (rs.next()) rs.getInt(1) else -1
@@ -4200,6 +4264,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.executeUpdate()
         }
         if (inserted > 0) {
+            // Us messaging a customer counts as contact, so it keeps their profile alive.
+            touchCustomerActivityByPhone(phone, now)
             val id = connection.createStatement().use { s ->
                 val rs = s.executeQuery("SELECT last_insert_rowid()")
                 if (rs.next()) rs.getInt(1) else -1
@@ -5141,56 +5207,371 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
-     * Deletes customer profiles with no booking, SMS, or call activity within
-     * the maximum [ShopVoiceConfig.customerRetentionDays] across all shops.
+     * Records that a customer was active, keyed by phone number.
      *
-     * Safety rules:
-     * - Future appointments always protect a customer.
-     * - The most lenient shop window is used so customers are not removed while
-     *   another shop still considers them active.
-     * Returns count of deleted profiles.
+     * Matching is by phone, not customer id, because `sms_message.customer_id` stays NULL until a
+     * booking is confirmed — most inbound traffic only ever carries `counterparty_phone`.
+     *
+     * Any activity also **clears a pending deletion flag**: a customer who gets back in touch is
+     * active by definition, so the two-year clock restarts and the grace window is cancelled. This
+     * is the self-healing property that makes a wrong flag harmless as long as the customer calls.
+     *
+     * Monotonic — never moves [atMs] backwards, so an out-of-order or replayed write cannot make a
+     * customer look staler than they are.
      */
-    fun deleteExpiredCustomers(): Int {
-        val shops = getAllShops()
-        if (shops.isEmpty()) return 0
-
-        val now = System.currentTimeMillis()
-        val maxRetentionMs = shops.mapNotNull { runCatching { getShopVoiceConfig(it.id).customerRetentionDays }.getOrNull() }
-            .maxOrNull()?.let { it * 24L * 60 * 60 * 1000 } ?: return 0
-        val cutoff = now - maxRetentionMs
-
+    fun touchCustomerActivityByPhone(phone: String, atMs: Long = System.currentTimeMillis()) {
+        val p = phone.trim()
+        if (p.isBlank()) return
         val sql = """
-            SELECT c.id FROM customers c
-            WHERE NOT EXISTS (
-                SELECT 1 FROM appointments a
-                WHERE a.customer_id = c.id AND a.date_time > ?
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM sms_message s
-                WHERE (s.customer_id = c.id OR s.counterparty_phone = c.phone)
-                  AND s.created_at > ?
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM voice_call v
-                WHERE (v.customer_id = c.id OR v.from_phone = c.phone)
-                  AND v.started_at > ?
-            )
+            UPDATE customers
+               SET last_activity_at = ?, deletion_flagged_at = NULL
+             WHERE phone = ?
+               AND (last_activity_at IS NULL OR last_activity_at < ?)
         """.trimIndent()
+        runCatching {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setLong(1, atMs)
+                stmt.setString(2, p)
+                stmt.setLong(3, atMs)
+                stmt.executeUpdate()
+            }
+        }
+    }
 
-        val expiredIds = mutableListOf<Int>()
+    /** As [touchCustomerActivityByPhone] but by customer id — used where the id is known (bookings). */
+    fun touchCustomerActivity(customerId: Int, atMs: Long = System.currentTimeMillis()) {
+        val sql = """
+            UPDATE customers
+               SET last_activity_at = ?, deletion_flagged_at = NULL
+             WHERE id = ?
+               AND (last_activity_at IS NULL OR last_activity_at < ?)
+        """.trimIndent()
+        runCatching {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setLong(1, atMs)
+                stmt.setInt(2, customerId)
+                stmt.setLong(3, atMs)
+                stmt.executeUpdate()
+            }
+        }
+    }
+
+    /**
+     * One-time backfill of [last_activity_at] from whatever evidence still exists.
+     *
+     * Communication retention only ever deletes rows **older** than its window, so for a customer
+     * with any surviving SMS/call/appointment, the newest surviving row *is* their most recent
+     * activity — this is an exact reconstruction, not a guess.
+     *
+     * Known bound: shops may have different `communication_retention_days`, so a customer whose
+     * most recent contact was with a short-retention shop and whose only surviving row is older
+     * (from a long-retention shop) is backfilled too early, making them look staler than they are.
+     * Today both test shops (the only ones at 5 days) have zero SMS and zero calls, so this cannot
+     * bite; the 30-day grace window and the WebAdmin review list are the backstop if it ever does.
+     *
+     * Customers with **no** surviving evidence are left NULL — unknown, which never authorises
+     * deletion. Idempotent: only fills NULLs, so it is safe to run on every boot.
+     *
+     * @return the total number of customers that now have a stamp (not just the newly filled).
+     */
+    fun backfillCustomerActivity(): Int {
+        val sql = """
+            UPDATE customers
+               SET last_activity_at = (
+                   SELECT MAX(t) FROM (
+                       SELECT MAX(s.created_at) AS t FROM sms_message s
+                        WHERE s.customer_id = customers.id OR s.counterparty_phone = customers.phone
+                       UNION ALL
+                       SELECT MAX(v.started_at) AS t FROM voice_call v
+                        WHERE v.customer_id = customers.id OR v.from_phone = customers.phone
+                       UNION ALL
+                       SELECT MAX(a.date_time) AS t FROM appointments a
+                        WHERE a.customer_id = customers.id
+                   )
+               )
+             WHERE last_activity_at IS NULL
+        """.trimIndent()
         connection.prepareStatement(sql).use { stmt ->
-            stmt.setLong(1, now)   // no future appointments
-            stmt.setLong(2, cutoff)
-            stmt.setLong(3, cutoff)
+            stmt.executeUpdate()
+        }
+        // The subquery yields NULL where no evidence survives, so those rows stay unknown.
+        // Count only the ones that actually got a value.
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM customers WHERE last_activity_at IS NOT NULL"
+        ).use { stmt ->
             val rs = stmt.executeQuery()
-            while (rs.next()) expiredIds += rs.getInt("id")
+            return if (rs.next()) rs.getInt(1) else 0
+        }
+    }
+
+    /**
+     * The eligibility predicate for deletion, shared by flagging, unflagging and deleting so the
+     * three can never disagree. Bound parameters, in order: cutoff, now, cutoff, cutoff.
+     *
+     * Everything here is a positive assertion of inactivity. Note `last_activity_at IS NOT NULL`:
+     * an unknown last-activity is a third state and must not be read as "inactive".
+     */
+    private val customerInactivePredicate = """
+            c.last_activity_at IS NOT NULL
+        AND c.last_activity_at < ?
+        AND NOT EXISTS (
+            SELECT 1 FROM appointments a WHERE a.customer_id = c.id AND a.date_time > ?
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM sms_message s
+             WHERE (s.customer_id = c.id OR s.counterparty_phone = c.phone) AND s.created_at > ?
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM voice_call v
+             WHERE (v.customer_id = c.id OR v.from_phone = c.phone) AND v.started_at > ?
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM phone_blacklist b WHERE b.phone_e164 = c.phone AND b.active = 1
+        )
+    """.trimIndent()
+
+    data class CustomerRetentionSummary(
+        val flagged: Int = 0,
+        val unflagged: Int = 0,
+        val deleted: Int = 0,
+        /** Customers past the window whose last activity is unknown, so deliberately left alone. */
+        val skippedUnknown: Int = 0,
+        val inactivityDays: Int = 0,
+        val graceDays: Int = 0,
+    )
+
+    /**
+     * Two-stage customer retention: flag long-inactive profiles, then delete them after a grace
+     * period during which they are visible in WebAdmin and can be kept.
+     *
+     * ```
+     * TRIGGER:  customers.last_activity_at older than max(customer_retention_days) across shops
+     *           (default 730 days), evaluated hourly by the cleanup scheduler.
+     * EVIDENCE: STRONG. last_activity_at is written at the moment of each call/SMS/booking and is
+     *           never inferred from rows that another retention job may already have deleted.
+     *           A NULL stamp is "unknown", excluded by the predicate, and never deleted.
+     * BLAST:    one customer profile row per firing (plus deactivating their blacklist entries via
+     *           deleteCustomer). Communications are not touched. No effect on calls, trunks or
+     *           config; nothing here can interrupt a call in progress.
+     * GUARD:    four independent protections, re-evaluated every sweep and required again before
+     *           the DELETE (not merely at flag time): a future appointment, any SMS or call inside
+     *           the window, an active blacklist entry, and an unknown activity stamp. Plus the
+     *           30-day grace, which any activity cancels outright by clearing the flag.
+     *           A live call needs no separate guard: an in-progress call or SMS has a row dated
+     *           now, which is inside the window, so that customer is never eligible.
+     * IF WRONG: a customer profile (name, phone, language, CallApp name) is lost. Their booking
+     *           history and message history survive. The next time they call or text they are
+     *           re-created as a new "New/NoName" customer, so the shop can still serve them — the
+     *           loss is their recognised name, not their ability to get through.
+     * ```
+     *
+     * The window is the **most lenient** across shops, so one shop with a short setting can never
+     * delete a customer another shop still considers active.
+     */
+    fun runCustomerRetention(
+        graceDays: Int = CUSTOMER_DELETION_GRACE_DAYS,
+        /** Injectable clock. Tests advance it instead of back-dating rows behind the API. */
+        now: Long = System.currentTimeMillis(),
+    ): CustomerRetentionSummary {
+        val shops = getAllShops()
+        if (shops.isEmpty()) return CustomerRetentionSummary()
+
+        val inactivityDays = shops
+            .mapNotNull { runCatching { getShopVoiceConfig(it.id).customerRetentionDays }.getOrNull() }
+            .maxOrNull()
+            ?: return CustomerRetentionSummary()   // could not read any config → do nothing
+
+        val cutoff = now - inactivityDays * 24L * 60 * 60 * 1000
+        val graceMs = graceDays * 24L * 60 * 60 * 1000
+
+        // ── Evaluate eligibility ONCE, for all three stages ──────────────────
+        // One evaluation per sweep, not three: measured at 5.6s of full table scans on the live
+        // DB before the supporting indexes existed, and this runs on the single serialized SQLite
+        // connection that also handles inbound SMS and call logging. Evaluating once also means
+        // the three stages act on one consistent snapshot and cannot disagree with each other.
+        //
+        // The flag is still re-verified against this fresh snapshot before any DELETE — a flag can
+        // be up to 30 days old, and that is the gap that matters, not the microseconds within a
+        // sweep.
+        val eligible = mutableSetOf<Int>()
+        connection.prepareStatement(
+            "SELECT c.id FROM customers c WHERE $customerInactivePredicate"
+        ).use { stmt ->
+            stmt.setLong(1, cutoff)   // last_activity_at <
+            stmt.setLong(2, now)      // no future appointment
+            stmt.setLong(3, cutoff)   // no SMS inside window
+            stmt.setLong(4, cutoff)   // no call inside window
+            val rs = stmt.executeQuery()
+            while (rs.next()) eligible += rs.getInt("id")
+        }
+
+        // ── Stage 0: un-flag anyone who no longer qualifies ──────────────────
+        // A flag is a statement about the present, so it has to be withdrawn when it stops being
+        // true — otherwise a customer who became active during the grace window would still be
+        // deleted. touchCustomerActivity* already clears the flag on contact; this covers the
+        // other routes back to active (a booking made on their behalf, a blacklist entry added,
+        // an admin raising the retention window).
+        var unflagged = 0
+        connection.prepareStatement(
+            "SELECT id FROM customers WHERE deletion_flagged_at IS NOT NULL"
+        ).use { stmt ->
+            val rs = stmt.executeQuery()
+            val toClear = mutableListOf<Int>()
+            while (rs.next()) {
+                val id = rs.getInt("id")
+                if (id !in eligible) toClear += id
+            }
+            for (id in toClear) {
+                connection.prepareStatement(
+                    "UPDATE customers SET deletion_flagged_at = NULL WHERE id = ?"
+                ).use { u -> u.setInt(1, id); unflagged += u.executeUpdate() }
+            }
+        }
+
+        // ── Stage 1: flag newly-inactive customers ───────────────────────────
+        var flagged = 0
+        for (id in eligible) {
+            connection.prepareStatement(
+                "UPDATE customers SET deletion_flagged_at = ? WHERE id = ? AND deletion_flagged_at IS NULL"
+            ).use { stmt ->
+                stmt.setLong(1, now)
+                stmt.setInt(2, id)
+                flagged += stmt.executeUpdate()
+            }
+        }
+
+        // ── Stage 2: delete those whose grace has elapsed ────────────────────
+        // Only ids in `eligible`, so a customer who became active since being flagged is excluded
+        // even though their flag is still set (stage 0 clears it in the same sweep).
+        val dueIds = mutableListOf<Int>()
+        connection.prepareStatement(
+            """
+            SELECT id FROM customers
+             WHERE deletion_flagged_at IS NOT NULL AND deletion_flagged_at <= ?
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setLong(1, now - graceMs)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val id = rs.getInt("id")
+                if (id in eligible) dueIds += id
+            }
         }
 
         var deleted = 0
-        expiredIds.forEach { id -> if (deleteCustomer(id)) deleted++ }
-        if (deleted > 0) {
+        for (id in dueIds) {
+            // Read the evidence BEFORE destroying the row — reading it afterwards always returned
+            // "unknown", which would have made the audit line useless exactly when it is needed.
+            val phone = getCustomerById(id)?.phone
+            val last = getCustomerLastActivity(id)
+            if (deleteCustomer(id)) {
+                deleted++
+                // §7: every destructive action announces itself, with the evidence it acted on.
+                // No callLive field: a call or SMS in progress writes a voice_call/sms_message row
+                // dated now, which is inside the window, so an active customer cannot be eligible.
+                println("[Retention] DELETED customer id=$id phone=${maskPhone(phone)} " +
+                        "evidence=lastActivity=${last?.let { java.time.Instant.ofEpochMilli(it) } ?: "unknown"} " +
+                        "inactiveDays=$inactivityDays graceDays=$graceDays")
+            }
         }
-        return deleted
+
+        // Visibility for the deliberate non-action: customers old enough to qualify but with no
+        // activity stamp at all. A guard that suppresses silently is indistinguishable from one
+        // that never fires.
+        val skippedUnknown = connection.prepareStatement(
+            "SELECT COUNT(*) FROM customers WHERE last_activity_at IS NULL"
+        ).use { stmt ->
+            val rs = stmt.executeQuery()
+            if (rs.next()) rs.getInt(1) else 0
+        }
+
+        return CustomerRetentionSummary(
+            flagged = flagged,
+            unflagged = unflagged,
+            deleted = deleted,
+            skippedUnknown = skippedUnknown,
+            inactivityDays = inactivityDays,
+            graceDays = graceDays,
+        )
+    }
+
+    /**
+     * One-time raise of every shop's customer window up to [targetDays] (two years).
+     *
+     * Existing shops carry an explicit `customer_retention_days` (365 for the live shops, 90 for
+     * the test ones), so changing the Kotlin/DDL default alone would not reach any of them.
+     *
+     * Only ever raises, never lowers: a longer window keeps data for longer and deletes strictly
+     * less, so this cannot destroy anything. A shop already above [targetDays] is left alone.
+     *
+     * Guarded by an `app_setting` marker so it runs exactly once — if the retention period is
+     * later lowered deliberately from the web admin, this must not keep overriding that choice.
+     *
+     * @return the number of shops raised, or -1 if the migration had already run.
+     */
+    fun raiseCustomerRetentionToTwoYearsOnce(targetDays: Int = 730): Int {
+        val marker = "migration_customer_retention_730"
+        if (getSetting(marker) != null) return -1
+
+        var raised = 0
+        for (shop in getAllShops()) {
+            val cfg = runCatching { getShopVoiceConfig(shop.id) }.getOrNull() ?: continue
+            if (cfg.customerRetentionDays < targetDays) {
+                upsertShopVoiceConfig(cfg.copy(customerRetentionDays = targetDays))
+                raised++
+            }
+        }
+        setSetting(marker, System.currentTimeMillis().toString())
+        return raised
+    }
+
+    /** Raw `last_activity_at` for one customer, or null if never recorded. */
+    fun getCustomerLastActivity(customerId: Int): Long? =
+        connection.prepareStatement("SELECT last_activity_at FROM customers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, customerId)
+            val rs = stmt.executeQuery()
+            if (rs.next()) rs.getLong(1).takeIf { !rs.wasNull() } else null
+        }
+
+    /** Customers currently flagged for deletion, newest flag first, for the WebAdmin review list. */
+    fun getCustomersFlaggedForDeletion(): List<FlaggedCustomer> {
+        val sql = """
+            SELECT id, phone, name, last_activity_at, deletion_flagged_at
+              FROM customers
+             WHERE deletion_flagged_at IS NOT NULL
+             ORDER BY deletion_flagged_at ASC, id ASC
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<FlaggedCustomer>()
+            while (rs.next()) {
+                out += FlaggedCustomer(
+                    id = rs.getInt("id"),
+                    phone = rs.getString("phone") ?: "",
+                    name = rs.getString("name") ?: "",
+                    lastActivityAt = rs.getLong("last_activity_at").takeIf { !rs.wasNull() },
+                    flaggedAt = rs.getLong("deletion_flagged_at"),
+                )
+            }
+            return out
+        }
+    }
+
+    /**
+     * Admin "Keep this customer": clears the deletion flag and restarts the inactivity clock by
+     * stamping activity now, so the customer is not immediately re-flagged on the next sweep.
+     */
+    fun keepCustomer(customerId: Int): Boolean {
+        val sql = """
+            UPDATE customers
+               SET deletion_flagged_at = NULL, last_activity_at = ?
+             WHERE id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, System.currentTimeMillis())
+            stmt.setInt(2, customerId)
+            return stmt.executeUpdate() > 0
+        }
     }
 
     // =========================================================================

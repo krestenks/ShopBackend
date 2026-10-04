@@ -1174,25 +1174,36 @@ class WebAdmin(
 
                             h3 { +"Data retention (per shop)" }
                             p("hint") {
-                                +"Communication history (SMS + calls) and customer profiles are automatically deleted after the configured number of days when there is no new activity."
+                                +("Communication history (SMS + calls) is deleted outright once it is older than its window. "
+                                  + "Customer profiles are handled separately and more carefully: after the configured period "
+                                  + "with no activity they are only FLAGGED, listed for review, and deleted "
+                                  + "$CUSTOMER_DELETION_GRACE_DAYS days later. Any call, SMS or booking in the meantime clears "
+                                  + "the flag. The two windows are independent — keeping customers for years no longer "
+                                  + "requires keeping every message.")
                             }
                             label { +"Communication history — keep for (days)" }
                             br()
                             numberInput {
                                 name = "communication_retention_days"
                                 value = voiceConfig.communicationRetentionDays.toString()
-                                min = "1"; max = "365"; step = "1"
+                                min = "1"; max = "36500"; step = "1"
                             }
                             p("hint") { +"Default: 5 days. SMS messages and ended calls older than this are deleted from the database." }
                             br()
-                            label { +"Customer profile — keep for (days without booking/contact)" }
+                            label { +"Customer profile — flag after (days without activity)" }
                             br()
                             numberInput {
                                 name = "customer_retention_days"
                                 value = voiceConfig.customerRetentionDays.toString()
-                                min = "1"; max = "3650"; step = "1"
+                                min = "1"; max = "36500"; step = "1"
                             }
-                            p("hint") { +"Default: 90 days (≈3 months). Customer records with no appointment, SMS or call within this window are deleted." }
+                            p("hint") {
+                                +("Default: 730 days (two years). The most lenient setting across all shops applies, so "
+                                  + "one shop cannot delete a customer another shop still considers active. Customers whose "
+                                  + "last activity is unknown are never flagged.")
+                            }
+                            br()
+                            a(href = "/customers/flagged") { +"Review customers flagged for deletion →" }
 
                             hr()
                             h3 { +"Opening hours" }
@@ -1732,8 +1743,8 @@ class WebAdmin(
                             .ifBlank { ShopVoiceConfig(id).temporaryOperatorClosedMessage },
                         welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
-                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
-                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
+                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceIn(1, 36500) ?: 5,
+                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceIn(1, 36500) ?: 730,
                         smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
                         // Preserve the existing value when this form doesn't render the selector.
                         smsTranslateLang = if (params.contains("sms_translate_lang"))
@@ -2881,6 +2892,81 @@ class WebAdmin(
             }
 
             // GET confirm-delete (from list "Delete" button with onclick confirm)
+            // ── Flagged-for-deletion review list ───────────────────────────────
+            // The grace window only means something if the flags are actually visible, so this
+            // page is the other half of the two-stage retention design.
+            get("/customers/flagged") {
+                // Same zone + pattern the other admin pages use for timestamps.
+                fun fmtDate(ms: Long): String = java.time.Instant.ofEpochMilli(ms)
+                    .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                    .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+
+                val flagged = db.getCustomersFlaggedForDeletion()
+                val windowDays = db.getAllShops()
+                    .mapNotNull { runCatching { db.getShopVoiceConfig(it.id).customerRetentionDays }.getOrNull() }
+                    .maxOrNull()
+
+                call.respondAdminPage(
+                    titleText = "Customers flagged for deletion",
+                    subtitle = "Profiles with no call, SMS or booking for " +
+                        "${windowDays ?: "?"} days. They are deleted $CUSTOMER_DELETION_GRACE_DAYS days " +
+                        "after being flagged. Any activity clears the flag automatically — " +
+                        "press Keep to clear it manually and restart the clock.",
+                    activePath = "/customers",
+                ) {
+                    div("panel") {
+                        if (flagged.isEmpty()) {
+                            p("hint") { +"Nothing is flagged for deletion." }
+                        } else {
+                            p("hint") { +"${flagged.size} customer(s) flagged. Soonest deletion first." }
+                            table {
+                                thead {
+                                    tr {
+                                        th { +"ID" }; th { +"Name" }; th { +"Phone" }
+                                        th { +"Last activity" }; th { +"Flagged" }
+                                        th { +"Deletes on" }; th { +"Actions" }
+                                    }
+                                }
+                                tbody {
+                                    val now = System.currentTimeMillis()
+                                    for (f in flagged) {
+                                        val deleteAt = f.deleteAfter()
+                                        val daysLeft = ((deleteAt - now) / (24L * 60 * 60 * 1000)).toInt()
+                                        tr {
+                                            td { +f.id.toString() }
+                                            td { +(f.name.takeIf { it.isNotBlank() && it != "NoName" } ?: "—") }
+                                            td { +(f.phone.takeIf { it.isNotBlank() } ?: "—") }
+                                            td { +(f.lastActivityAt?.let { fmtDate(it) } ?: "unknown") }
+                                            td { +fmtDate(f.flaggedAt) }
+                                            td {
+                                                if (daysLeft <= 7) span("badge warn") { +"${fmtDate(deleteAt)} ($daysLeft d)" }
+                                                else +"${fmtDate(deleteAt)} ($daysLeft d)"
+                                            }
+                                            td {
+                                                form(action = "/customers/keep", method = FormMethod.post) {
+                                                    hiddenInput { name = "id"; value = f.id.toString() }
+                                                    submitInput(classes = "btn") { value = "Keep" }
+                                                }
+                                                a(href = "/customers/edit?id=${f.id}", classes = "btn") { +"View" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clear the deletion flag and restart the inactivity clock.
+            post("/customers/keep") {
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers/flagged")
+                db.keepCustomer(id)
+                call.respondRedirect("/customers/flagged")
+            }
+
             get("/customers/delete") {
                 val id = call.request.queryParameters["id"]?.toIntOrNull()
                     ?: return@get call.respondRedirect("/customers")
@@ -3381,11 +3467,15 @@ class WebAdmin(
                             hr()
                             h3 { +"Data retention" }
                             label { +"Communication history — keep for (days)" }; br()
-                            numberInput { name = "communication_retention_days"; value = voiceConfig.communicationRetentionDays.toString(); min = "1"; max = "365"; step = "1" }
+                            numberInput { name = "communication_retention_days"; value = voiceConfig.communicationRetentionDays.toString(); min = "1"; max = "36500"; step = "1" }
                             p("hint") { +"Default: 5 days." }; br()
-                            label { +"Customer profile — keep for (days without activity)" }; br()
-                            numberInput { name = "customer_retention_days"; value = voiceConfig.customerRetentionDays.toString(); min = "1"; max = "3650"; step = "1" }
-                            p("hint") { +"Default: 90 days." }
+                            label { +"Customer profile — flag after (days without activity)" }; br()
+                            numberInput { name = "customer_retention_days"; value = voiceConfig.customerRetentionDays.toString(); min = "1"; max = "36500"; step = "1" }
+                            p("hint") {
+                                +("Default: 730 days (two years). Flagged customers are listed for review and deleted "
+                                  + "$CUSTOMER_DELETION_GRACE_DAYS days later; any activity clears the flag.")
+                            }; br()
+                            a(href = "/customers/flagged") { +"Review customers flagged for deletion →" }
 
                             hr()
                             h3 { +"Opening hours" }
@@ -3522,8 +3612,8 @@ class WebAdmin(
                         temporaryOperatorClosedMessage = ShopVoiceConfig(id).temporaryOperatorClosedMessage,
                         welcomeOpenMessage = params["welcome_open_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeOpenMessage },
                         welcomeClosedMessage = params["welcome_closed_message"]?.trim().orEmpty().ifBlank { ShopVoiceConfig(id).welcomeClosedMessage },
-                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 5,
-                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceAtLeast(1) ?: 90,
+                        communicationRetentionDays = params["communication_retention_days"]?.toIntOrNull()?.coerceIn(1, 36500) ?: 5,
+                        customerRetentionDays = params["customer_retention_days"]?.toIntOrNull()?.coerceIn(1, 36500) ?: 730,
                         smsPriceListFooter = params["sms_price_list_footer"]?.trim()?.takeIf { it.isNotBlank() },
                         smsTranslateLang = if (params.contains("sms_translate_lang"))
                             params["sms_translate_lang"]?.trim()?.takeIf { it.isNotBlank() }

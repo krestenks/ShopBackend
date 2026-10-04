@@ -172,6 +172,22 @@ object ShopBackend {
         val customerApi = CustomerApi(db, telephonyService)
         val mobileApi = MobileApi(db, telephonyService, asteriskAdmin)
 
+        // Customer retention needs a durable last-activity stamp, because communication retention
+        // deletes the SMS/call rows it used to be inferred from. Reconstruct it once from whatever
+        // evidence survives; customers with none stay NULL and are never deleted.
+        run {
+            val stamped = db.backfillCustomerActivity()
+            println("[Retention] $stamped customers have a last-activity stamp; " +
+                    "those without one are never flagged for deletion.")
+            // Raise every shop to the two-year window, once. Raising only, so it cannot delete
+            // anything that the previous setting would have kept.
+            val raised = db.raiseCustomerRetentionToTwoYearsOnce()
+            when {
+                raised > 0 -> println("[Retention] Raised customer retention to 730 days on $raised shop(s).")
+                raised == 0 -> println("[Retention] All shops already at or above 730 days.")
+            }
+        }
+
         // Background cleanup
         startCleanupScheduler(db)
         startDeferredReloadDrain(quectelConfigWriter)
@@ -392,11 +408,19 @@ object ShopBackend {
                 )
                 if (terminated > 0) println("Cleanup: terminated $terminated stale active calls")
 
-                // Data-retention: delete old SMS + call logs, then prune dead customer profiles.
+                // Data-retention: delete old SMS + call logs, then run the two-stage customer
+                // retention (flag long-inactive profiles, delete after the grace period).
                 val commsDeleted = db.deleteExpiredCommunications()
-                val customersDeleted = db.deleteExpiredCustomers()
-                if (commsDeleted + customersDeleted > 0) {
-                    println("[DataRetention] Cleanup cycle: $commsDeleted communications, $customersDeleted customer profiles deleted.")
+                val retention = db.runCustomerRetention()
+                if (commsDeleted > 0) {
+                    println("[DataRetention] Deleted $commsDeleted communications.")
+                }
+                if (retention.flagged + retention.unflagged + retention.deleted > 0) {
+                    println("[Retention] Customers: ${retention.flagged} newly flagged, " +
+                            "${retention.unflagged} un-flagged (active again), " +
+                            "${retention.deleted} deleted after ${retention.graceDays}d grace " +
+                            "(inactivity window ${retention.inactivityDays}d, " +
+                            "${retention.skippedUnknown} skipped with unknown last activity).")
                 }
 
                 // The screening cache has no FK cascade, so pruned customers leave rows behind.
