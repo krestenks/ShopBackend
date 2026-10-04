@@ -4883,16 +4883,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Returns customers that need a CallApp lookup:
      * - Never screened (no row).
-     * - Previously found (found=1) row older than [maxAgeMs] (default 30 days) — name unlikely to change.
-     * - Previously not-found (found=0, no error) row older than [notFoundMaxAgeMs] (default 3 days) —
-     *   retry aggressively because the person may have recently added themselves to CallApp.
+     * - Previously found (found=1) row older than [maxAgeMs] (default 365 days) — a name for a
+     *   given number essentially never changes, and the refresh is billed per request: at the old
+     *   30-day default, refreshing 1370 customers cost ~1370 requests/month on a 1500/month plan.
+     * - Previously not-found (found=0, no error) row older than [notFoundMaxAgeMs] (default
+     *   30 days) — the person may since have added themselves to CallApp, but retrying every
+     *   3 days (the old default) cost 10 requests/month each.
      * - Failed row whose [next_retry_at] has passed (exponential backoff).
      *
      * Ordered ASC so oldest customers are processed first.
      */
     fun getCustomersNeedingCallAppScreening(
-        maxAgeMs: Long        = 30L * 24 * 60 * 60 * 1000,   // 30 days for found=1 entries
-        notFoundMaxAgeMs: Long =  3L * 24 * 60 * 60 * 1000,  //  3 days for found=0 entries
+        maxAgeMs: Long         = 365L * 24 * 60 * 60 * 1000, // 365 days for found=1 entries
+        notFoundMaxAgeMs: Long =  30L * 24 * 60 * 60 * 1000, //  30 days for found=0 entries
         limit: Int = 50,
     ): List<Customer> {
         val now              = System.currentTimeMillis()
@@ -4930,6 +4933,52 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 )
             }
             return result
+        }
+    }
+
+    /**
+     * One-time repair for the 2026-10-04 quota incident.
+     *
+     * Before the fix, a non-2xx HTTP response was cached through the *success* path, which stored
+     * `found = 0, error = NULL` and overwrote `name` with NULL. Those rows are not answers — the
+     * request was rejected, never served — so they are deleted outright, which makes the customer
+     * look never-screened and earns a fresh lookup instead of a 30-day wait behind wrong data.
+     *
+     * They are identified exactly: `api_message` is the synthetic `"HTTP <code>: …"` string that
+     * only that code path ever wrote. A genuine answer carries `"Success"` or the API's own
+     * `"Invalid phone number or data not found."`, so neither can be caught here.
+     *
+     * Idempotent, and after the fix no new such rows can be created, so this returns 0 forever
+     * after the first run.
+     *
+     * @return the number of mis-filed rejection rows removed.
+     */
+    fun deleteMisfiledHttpErrorScreenings(): Int {
+        val sql = """
+            DELETE FROM customer_callapp_screening
+            WHERE error IS NULL AND found = 0 AND api_message LIKE 'HTTP %'
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            return stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Deletes screening rows whose customer no longer exists.
+     *
+     * The table has no FK cascade, so deleting a customer (data retention) leaves the row behind.
+     * Harmless, but they accumulate and make the cache row count disagree with the customer count,
+     * which is confusing when auditing quota use.
+     *
+     * @return the number of orphan rows removed.
+     */
+    fun deleteOrphanCallAppScreeningRows(): Int {
+        val sql = """
+            DELETE FROM customer_callapp_screening
+            WHERE customer_id NOT IN (SELECT id FROM customers)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            return stmt.executeUpdate()
         }
     }
 

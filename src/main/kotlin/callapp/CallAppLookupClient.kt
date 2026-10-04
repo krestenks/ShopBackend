@@ -18,6 +18,27 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class InvalidPhoneNumberException(message: String) : Exception(message)
 
+/**
+ * The plan's request quota is exhausted (HTTP 429).
+ *
+ * This is **certain knowledge that no further request can succeed** until the quota window
+ * resets, so it is a distinct type from every other failure: callers must stop issuing requests
+ * rather than retry. It must never be confused with a not-found result — doing so overwrote 397
+ * cached names with NULL and put the whole customer base on the 3-day retry cycle (see
+ * docs/callapp-quota-2026-10-04.md).
+ */
+class CallAppQuotaExceededException(
+    val httpStatus: Int,
+    val body: String?,
+) : Exception("CallApp quota exhausted (HTTP $httpStatus): ${body?.take(200)}")
+
+/** Any other non-2xx HTTP response. Transient as far as we know — retried with backoff. */
+class CallAppHttpException(
+    val httpStatus: Int,
+    val description: String,
+    val body: String?,
+) : Exception("CallApp HTTP $httpStatus $description: ${body?.take(200)}")
+
 // ─── Public result / config types ────────────────────────────────────────────
 
 data class CallAppLookupResult(
@@ -49,7 +70,13 @@ interface CallAppLookupClient {
      * @param phoneNumber any E.164 format: "+4551941736", "+66812345678", "+966512345678", etc.
      * @throws InvalidPhoneNumberException if the number cannot be parsed into a recognized
      *   country-code + national-number pair.
+     * @throws CallAppQuotaExceededException on HTTP 429 — stop, do not retry, do not cache.
+     * @throws CallAppHttpException on any other non-2xx response.
      * @throws Exception for network / timeout failures — callers decide fail-open or fail-closed.
+     *
+     * A returned [CallAppLookupResult] therefore always represents an answer *from the API*:
+     * either a hit (`found = true`) or a genuine not-found. It never represents a transport or
+     * quota failure, so callers may cache it unconditionally.
      */
     suspend fun lookup(phoneNumber: String): CallAppLookupResult
 }
@@ -360,16 +387,14 @@ class CallAppRapidApiClient(
         val rawBody = response.bodyAsText(Charsets.UTF_8)
         val httpStatus = response.status.value
 
+        // A non-2xx response is a FAILURE, never an answer. Returning it as a result (which this
+        // used to do) made the caller file it via the success path, which clears `error`, resets
+        // failure_count and overwrites the cached name with NULL — so a quota rejection erased
+        // good data and dropped the row onto the fast retry cycle. Throw, and let the caller's
+        // backoff / circuit breaker do their job.
         if (!response.status.isSuccess()) {
-            return CallAppLookupResult(
-                found    = false,
-                name     = null,
-                priority = null,
-                status   = false,
-                message  = "HTTP $httpStatus: ${response.status.description}",
-                timestamp = null,
-                rawJson  = rawBody,
-            )
+            if (httpStatus == 429) throw CallAppQuotaExceededException(httpStatus, rawBody)
+            throw CallAppHttpException(httpStatus, response.status.description, rawBody)
         }
 
         // Parse JSON — let malformed JSON exceptions bubble up so callers decide

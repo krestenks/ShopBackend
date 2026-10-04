@@ -181,6 +181,14 @@ object ShopBackend {
         val callAppScreening: CallAppScreeningService? = if (!callAppApiKey.isNullOrBlank()) {
             val callAppConfig = CallAppRapidApiConfig(apiKey = callAppApiKey)
             val callAppClient = CallAppRapidApiClient(callAppConfig)
+            // Repair for the 2026-10-04 incident: drop rows where a rejected request (HTTP 429 /
+            // other non-2xx) was cached as a not-found, wiping the customer's name. Costs one
+            // fresh lookup each, which is the only way to get the destroyed names back.
+            val misfiled = db.deleteMisfiledHttpErrorScreenings()
+            if (misfiled > 0) {
+                println("[CallApp] Repaired $misfiled screening rows that had cached an HTTP " +
+                        "error as a not-found; they will be re-screened (1 request each).")
+            }
             CallAppScreeningService(db = db, client = callAppClient).also { svc ->
                 startCallAppScreeningScheduler(svc)
                 println("[CallApp] Screening enabled. host=${callAppConfig.host} timeout=${callAppConfig.timeoutMs}ms — scheduler: first run in 30s, then every 6h.")
@@ -389,6 +397,12 @@ object ShopBackend {
                 val customersDeleted = db.deleteExpiredCustomers()
                 if (commsDeleted + customersDeleted > 0) {
                     println("[DataRetention] Cleanup cycle: $commsDeleted communications, $customersDeleted customer profiles deleted.")
+                }
+
+                // The screening cache has no FK cascade, so pruned customers leave rows behind.
+                val orphanScreenings = db.deleteOrphanCallAppScreeningRows()
+                if (orphanScreenings > 0) {
+                    println("[CallApp] Pruned $orphanScreenings orphan screening rows.")
                 }
             } catch (e: Exception) {
                 println("Error during cleanup: ${e.message}")
