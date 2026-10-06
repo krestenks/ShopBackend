@@ -99,6 +99,21 @@ data class CallRecordingRule(
         active && (expiresAt == null || expiresAt > now)
 }
 
+/** A stored call recording. The `path` is opaque; the phone number is never in the filename. */
+data class CallRecording(
+    val id: Int,
+    val callId: Int?,
+    val phone: String,
+    val shopId: Int,
+    val direction: String,
+    val path: String,
+    val startedAt: Long,
+    val durationMs: Long?,
+    val sizeBytes: Long?,
+    val sha256: String?,
+    val preserved: Boolean,
+)
+
 /** One entry in the call-recording chain of custody. */
 data class CallRecordingAccess(
     val id: Int,
@@ -3637,6 +3652,52 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
         }.getOrNull()
     }
+
+    /** All recordings, newest first, for the admin list. */
+    fun listCallRecordings(limit: Int = 500): List<CallRecording> {
+        val sql = """
+            SELECT id, call_id, phone_e164, shop_id, direction, path, started_at,
+                   duration_ms, size_bytes, sha256, preserved, deleted_at
+              FROM call_recording
+             WHERE deleted_at IS NULL
+             ORDER BY started_at DESC, id DESC LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecording>()
+            while (rs.next()) out += readCallRecording(rs)
+            return out
+        }
+    }
+
+    /** One recording by id, or null. */
+    fun getCallRecording(id: Int): CallRecording? {
+        val sql = """
+            SELECT id, call_id, phone_e164, shop_id, direction, path, started_at,
+                   duration_ms, size_bytes, sha256, preserved, deleted_at
+              FROM call_recording WHERE id = ? AND deleted_at IS NULL
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, id)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) readCallRecording(rs) else null
+        }
+    }
+
+    private fun readCallRecording(rs: java.sql.ResultSet) = CallRecording(
+        id = rs.getInt("id"),
+        callId = rs.getInt("call_id").takeIf { !rs.wasNull() },
+        phone = rs.getString("phone_e164") ?: "",
+        shopId = rs.getInt("shop_id"),
+        direction = rs.getString("direction") ?: "inbound",
+        path = rs.getString("path") ?: "",
+        startedAt = rs.getLong("started_at"),
+        durationMs = rs.getLong("duration_ms").takeIf { !rs.wasNull() },
+        sizeBytes = rs.getLong("size_bytes").takeIf { !rs.wasNull() },
+        sha256 = rs.getString("sha256"),
+        preserved = rs.getInt("preserved") != 0,
+    )
 
     fun logCallRecordingAccess(recordingId: Int?, action: String, actor: String, note: String? = null) {
         runCatching {

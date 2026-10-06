@@ -1,3 +1,4 @@
+import io.ktor.http.*
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
@@ -2903,6 +2904,188 @@ class WebAdmin(
             }
 
             // GET confirm-delete (from list "Delete" button with onclick confirm)
+            // =================================================================
+            // Call recordings — ADMIN ONLY
+            //
+            // The requirement is that shop managers and owners can never reach this through the
+            // web backend. Three independent things have to hold, and relying on any one alone
+            // would be thin:
+            //
+            //  1. The global `intercept` gate already demands an AdminSession for every path that
+            //     is not in `isPublic` and does not start with `/owner`. These routes are under
+            //     /recordings, so neither applies.
+            //  2. Every handler below ALSO checks AdminSession itself and refuses an OwnerSession
+            //     explicitly. A future edit to the isPublic list, or a new owner-portal prefix,
+            //     cannot silently open these up.
+            //  3. Nothing in MobileApi or the JWT surface reads any call_recording table, so the
+            //     manager app has no path to them at all. RecordingAccessIsolationTest pins all
+            //     three so a later refactor cannot quietly undo it.
+            //
+            // Refusals answer 404, not 403: whether a given number is being covertly recorded is
+            // itself the sensitive fact, and 403 would confirm the page exists.
+            // =================================================================
+
+            /** Timestamps on the recording pages, same zone and pattern as the other admin pages. */
+            fun fmtTs(ms: Long): String = java.time.Instant.ofEpochMilli(ms)
+                .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+                .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+
+            /**
+             * Returns the admin's username, or null (having already answered 404) if the caller is
+             * anything else — including a logged-in shop owner.
+             */
+            suspend fun ApplicationCall.requireAdminForRecordings(): String? {
+                val admin = sessions.get<AdminSession>()
+                if (admin == null) {
+                    val owner = sessions.get<OwnerSession>()
+                    println("[Recording] DENIED access to ${request.path()} " +
+                            (if (owner != null) "by owner '${owner.ownerName}' (ownerId=${owner.ownerId})"
+                             else "by an unauthenticated caller"))
+                    respond(HttpStatusCode.NotFound, "Not found")
+                    return null
+                }
+                return admin.username
+            }
+
+            get("/recordings") {
+                val actor = call.requireAdminForRecordings() ?: return@get
+                val rules = db.listCallRecordingRules()
+                val recordings = db.listCallRecordings()
+
+                call.respondAdminPage(
+                    titleText = "Call recordings",
+                    subtitle = "Admin only. Recording is per number and expires unless renewed. " +
+                        "Managers and owners cannot reach this page.",
+                    activePath = "/recordings",
+                ) {
+                    div("panel") {
+                        h3 { +"Numbers being recorded" }
+                        form(action = "/recordings/rules/add", method = FormMethod.post) {
+                            div("actions") {
+                                textInput { name = "phone"; placeholder = "+45…"; required = true; style = "min-width:160px" }
+                                textInput { name = "reason"; placeholder = "Why (required, kept for the record)"; required = true; style = "min-width:320px" }
+                                submitInput(classes = "btn") { value = "Start recording" }
+                            }
+                        }
+                        p("hint") {
+                            +("The number must match exactly what the modem reports as the caller ID, "
+                              + "the same format the blacklist uses. Rules expire after "
+                              + "90 days unless renewed.")
+                        }
+                        if (rules.isEmpty()) {
+                            p("hint") { +"No recording rules." }
+                        } else {
+                            table {
+                                thead { tr { th { +"Phone" }; th { +"Reason" }; th { +"Since" }; th { +"Expires" }; th { +"State" }; th { +"" } } }
+                                tbody {
+                                    for (r in rules) {
+                                        tr {
+                                            td { +r.phone }
+                                            td { +r.reason }
+                                            td { +fmtTs(r.createdAt) }
+                                            td { +(r.expiresAt?.let { fmtTs(it) } ?: "never") }
+                                            td {
+                                                if (r.isLive()) span("badge warn") { +"recording" }
+                                                else span("badge") { +if (r.active) "expired" else "stopped" }
+                                            }
+                                            td {
+                                                if (r.isLive()) {
+                                                    form(action = "/recordings/rules/stop", method = FormMethod.post) {
+                                                        hiddenInput { name = "id"; value = r.id.toString() }
+                                                        submitInput(classes = "btn") { value = "Stop" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div("panel") {
+                        h3 { +"Recordings" }
+                        if (recordings.isEmpty()) {
+                            p("hint") { +"Nothing recorded yet." }
+                        } else {
+                            table {
+                                thead { tr { th { +"When" }; th { +"Phone" }; th { +"Shop" }; th { +"Dir" }; th { +"Audio" }; th { +"" } } }
+                                tbody {
+                                    for (rec in recordings) {
+                                        val f = java.io.File(rec.path)
+                                        val haveAudio = f.isFile && f.length() > 0
+                                        tr {
+                                            td { +fmtTs(rec.startedAt) }
+                                            td { +rec.phone }
+                                            td { +rec.shopId.toString() }
+                                            td { +rec.direction }
+                                            td {
+                                                if (haveAudio) +"${f.length() / 1024} kB"
+                                                else span("badge") { +"no audio — call not answered" }
+                                            }
+                                            td {
+                                                if (haveAudio) {
+                                                    a(href = "/recordings/audio?id=${rec.id}", classes = "btn") { +"Play" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            p("hint") {
+                                +("\"No audio\" is normal: recording only captures the bridged "
+                                  + "conversation, so a call nobody answered has nothing in it.")
+                            }
+                        }
+                    }
+                }
+            }
+
+            post("/recordings/rules/add") {
+                val actor = call.requireAdminForRecordings() ?: return@post
+                val params = call.receiveParameters()
+                val phone = params["phone"]?.trim().orEmpty()
+                val reason = params["reason"]?.trim().orEmpty()
+                if (phone.isNotBlank() && reason.isNotBlank()) {
+                    db.addCallRecordingRule(phone, reason, actor)
+                }
+                call.respondRedirect("/recordings")
+            }
+
+            post("/recordings/rules/stop") {
+                val actor = call.requireAdminForRecordings() ?: return@post
+                val id = call.receiveParameters()["id"]?.toIntOrNull()
+                if (id != null) db.deactivateCallRecordingRule(id, actor)
+                call.respondRedirect("/recordings")
+            }
+
+            // Streams the audio. Never a static route and never a guessable path: the id is looked
+            // up in the DB and the resolved file must sit inside the configured recordings
+            // directory, so a tampered `path` column cannot be used to read arbitrary files.
+            get("/recordings/audio") {
+                val actor = call.requireAdminForRecordings() ?: return@get
+                val id = call.request.queryParameters["id"]?.toIntOrNull()
+                    ?: return@get call.respond(HttpStatusCode.NotFound, "Not found")
+                val rec = db.getCallRecording(id)
+                    ?: return@get call.respond(HttpStatusCode.NotFound, "Not found")
+
+                val file = java.io.File(rec.path).canonicalFile
+                val root = java.io.File(asterisk.CallRecordingPaths.directory).canonicalFile
+                if (!file.path.startsWith(root.path + java.io.File.separator) || !file.isFile) {
+                    println("[Recording] REFUSED to serve id=$id: resolved path is outside " +
+                            "${root.path} or missing")
+                    return@get call.respond(HttpStatusCode.NotFound, "Not found")
+                }
+
+                db.logCallRecordingAccess(id, "play", actor,
+                    "phone=${util.maskPhone(rec.phone)} bytes=${file.length()}")
+                call.response.header(
+                    HttpHeaders.ContentDisposition,
+                    "inline; filename=\"recording-$id.wav\"",
+                )
+                call.respondFile(file)
+            }
+
             // ── Flagged-for-deletion review list ───────────────────────────────
             // The grace window only means something if the flags are actually visible, so this
             // page is the other half of the two-stage retention design.

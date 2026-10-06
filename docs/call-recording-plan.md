@@ -459,6 +459,62 @@ Writing the dialplan and reloading touches `/etc/asterisk`, so **Rule 2 applies*
 re-init trunks, so it does not drop calls. Still to be done at an idle moment, and verified on
 Testshop 1 first - it has a generated dialplan and no real traffic.
 
+## 11. Stage 4 as built — admin-only playback (2026-10-06)
+
+Scope set by Kresten: he is the only person with shell on the edge box, so the LAN-exposure and
+shared-secret items in section 0.3 and the review follow-ups are **accepted risk, not being
+fixed**. The guarantee that matters is narrower and now enforced in code:
+
+> recordings must not be available for playback to shop managers or owners through the web backend.
+
+Three independent barriers, because relying on any one would be thin:
+
+1. **The global gate.** `WebAdmin`'s `intercept` already requires an `AdminSession` for every path
+   not in `isPublic` and not starting with `/owner`. All routes live under `/recordings`.
+2. **Each handler re-checks.** Every route calls `requireAdminForRecordings()`, which demands an
+   `AdminSession` and explicitly notices and logs an `OwnerSession` attempt. A later edit to the
+   allowlist, or a new owner prefix, cannot silently open these up.
+3. **The app has no surface at all.** Nothing in `MobileApi.kt` references any recording table or
+   accessor, so the JWT-authenticated manager app has no path to them.
+
+Refusals answer **404, not 403**: whether a particular number is under covert recording is itself
+the sensitive fact, and a 403 would confirm the page exists.
+
+### The audio stream
+
+`/recordings/audio?id=N` looks the id up in the DB, canonicalises the resulting path, and refuses
+unless it sits inside the configured recordings directory — so a tampered `path` column cannot be
+turned into an arbitrary file read. Never a static route, never a guessable URL (the filename is
+opaque hex). Every playback writes a `play` entry to the chain of custody with the admin's
+username.
+
+### Pinned by tests, not by good intentions
+
+`RecordingAccessIsolationTest` (10 tests) asserts the structure rather than the behaviour of one
+running server, because the risk is a future edit rather than today's handlers:
+
+- no `/recordings` entry in the public allowlist
+- no recording route under the owner-gated `/owner` prefix
+- every recording route sits under `/recordings` and calls the guard exactly once
+- the guard requires `AdminSession`, considers `OwnerSession`, and answers 404 not 403
+- the audio route canonicalises, confines to the recordings directory, and audits
+- no static mapping over the recordings path
+- the shared-secret dialplan endpoint answers text, never a file, and cannot enumerate recordings
+- `MobileApi.kt` contains none of the recording tables or accessors
+
+Verified to have teeth: adding `/recordings` to the allowlist, and removing the guard from the
+audio handler, each turn tests red. The guard-count assertion was itself fixed after it failed to
+catch the missing guard — it had been counting the helper's own declaration alongside its call
+sites, so one unguarded handler still satisfied it.
+
+### Deliberately not built
+
+- **No second password prompt** before the recordings page. He is the only admin; the friction
+  would buy little.
+- **No `preserved` / export bundle / retention sweep yet** — stage 5. Note again that the reaper
+  should exist before a rule has been running for months, given the 2026-09-07 SQLITE_FULL outage
+  on this same filesystem.
+
 ## 7. What I need from you
 
 1. **Do the threats happen on the phone at all?** If they are purely in person, stages 1–5 are the
