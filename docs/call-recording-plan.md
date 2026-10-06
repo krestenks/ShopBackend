@@ -330,6 +330,135 @@ recordings and incident-log entries, as one labelled package.
 
 This is the fastest evidence you can have, and it exists today.
 
+## 10. Stage 3 as built (2026-10-06)
+
+The dialplan hook, committed but **not deployed**. Two lines added before `Dial`, at both dial
+sites (the main ring path and the menu's `operator` extension, which is reached by `Goto` and so
+never executes the main path's lines):
+
+```
+ same => n,Set(REC=${CURL(<base>/api/internal/telephony/call/record-decision,secret=<secret>&shopId=1&from=${URIENCODE(${CALLERID(num)})}&uniqueid=${UNIQUEID})})
+ same => n,ExecIf($["${REC:0:1}" = "/"]?MixMonitor(${REC},b))
+```
+
+### Why a separate endpoint
+
+`/call/inbound`'s verdict drives exact-match `GotoIf` branches for reject and menu routing - it is
+the most load-bearing string in the call path. Smuggling a second value into it (a delimiter plus
+`CUT`) would put **routing** at risk in order to add a **recording**. One extra localhost round
+trip is the cheaper trade, and it leaves the proven verdict parsing untouched.
+
+### Verified against the running Asterisk, not assumed
+
+| Claim | How |
+|---|---|
+| `!=` / `=` are valid in `$[]` | Asterisk's own shipped configs on the box use `$["${isnresult}" != ""]` |
+| `b` = record only while bridged | `core show application MixMonitor` on the live box: "Only save audio to the file while the channel is bridged" - the conversation, not the ringing |
+| Both processes can share the directory | `asterisk`'s primary group is `asterisk`; `phone` is a member, so a `2770 phone:asterisk` dir is writable by Asterisk and readable by the backend. No manual deploy step. |
+
+### Two problems found in review and fixed
+
+1. **An error body would have become a filename.** A bare `"${REC}" != ""` guard lets anything
+   non-empty through - and if the shared secret were ever stale, `authorizedParams()` answers
+   `403 "invalid secret"`, so *every* call would have called `MixMonitor(invalid secret,b)`. The
+   guard now requires the value to start with `/`, which rejects an empty body, an error string
+   and an HTML error page alike.
+2. **The path is interpolated into a dialplan argument.** A comma would truncate the MixMonitor
+   argument and a paren would end the application call. The generated filename is hex-only, but
+   `CALL_RECORDING_DIR` is not, so `isDialplanSafe()` refuses to record rather than emit a path
+   that cannot be safely quoted. Seven tests cover it.
+
+Also fixed: an ordering assertion that was **vacuous**. It used `indexOf("MixMonitor")`, which
+matched the word inside the explanatory comment above the line, so it passed even with MixMonitor
+moved after `Dial`. It now matches the verb `?MixMonitor(`, and was re-verified by deliberately
+swapping the order - two tests go red.
+
+### Known behaviour, not a bug
+
+With option `b`, an unanswered call produces **no audio** (nothing was ever bridged) while the
+`call_recording` row still exists. Playback should show "no audio - call not answered" rather than
+erroring, and the stage 5 retention sweep should reconcile rows with no file.
+
+### Review findings (two parallel reviews, 2026-10-06) — fixed
+
+**F1 (critical, was my bug): the directory was unreachable by Asterisk.** The default was under
+`/home/phone`, which is `drwxr-x--- phone phone`; `asterisk` is not in group `phone`, so it could
+not traverse it. Confirmed on the box with `sudo -u asterisk test -x /home/phone` -> DENIED.
+MixMonitor would have failed EACCES on **every** call while the backend logged "RECORDING" and
+wrote a chain-of-custody entry — a false evidence trail, the worst failure for this feature.
+I had verified group membership but not the parent directories. Fixed: the default is now
+`/var/spool/asterisk/monitor`, which Asterisk owns and writes, the backend reads through group
+`asterisk`, and mode 0750 keeps out of world-readable. No permission changes needed.
+
+**F1b: the guard tested the wrong principal.** `dir.canWrite()` asks whether *the backend* can
+write — true for a backend-owned directory Asterisk cannot even enter. Now checks readability
+(what we actually need, for playback) and leaves write failures to MixMonitor, which reports its
+own.
+
+**The audit trail claimed recordings that might not exist.** The access entry was written at
+decision time as `"record"`, before MixMonitor had opened anything — and with option `b` an
+unanswered call produces no audio at all. Now `"record-requested"`, with confirmation left to a
+separate file-backed event. A chain of custody that overstates is worse than none.
+
+**The decision is now idempotent per call.** Each hit previously inserted a `call_recording` row
+*and* an access row, with no dedupe and no rate limit — so anyone holding the shared secret could
+flood the very log this feature exists to produce. It now returns the path already issued for that
+call.
+
+**Secret prefixes are no longer logged.** `printEnvDiagnostics` wrote the first 4 characters and
+the exact length of `ADMIN_PASSWORD`, the AMI/ARI secrets, the internal secret and the CallApp key
+into the journal on every restart. Now just `set` / `missing`.
+
+Also corrected: the endpoint's own `GUARD:` comment claimed "returns empty on ANY failure", which
+was untrue for the 403 path. The comment now names that exception and why the `/`-prefix dialplan
+guard is what closes it.
+
+### Known and accepted, with reasons
+
+- **F2 — the priority shift.** Adding two lines moves `Dial` from priority 11 to 13. A channel
+  parked inside `Dial` when `dialplan reload` lands can resume at the *new* numbering and re-dial
+  the manager after the conversation ended (a ghost re-ring, not a drop). No code fix; this is
+  exactly what Rule 2's "reload at idle" exists for. **Do the first reload with
+  `core show channels` at 0.**
+- **F4 — `ExecIf` propagates its inner application's return value**, and MixMonitor returns -1 on
+  an empty filename, which would hang the caller up *before* `Dial`. The `${REC:0:1}" = "/"` guard
+  makes an empty filename unreachable, so the trigger is closed. The reviewed alternative — nesting
+  `TryExec(MixMonitor(${REC}\,b))` — needs comma escaping inside `ExecIf` and is itself a syntax
+  risk on a live dialplan, so the guard is the lower-risk choice.
+- **F5 — a third blocking CURL before `Dial`, and no curl timeout anywhere** (`func_curl`'s default
+  is ~180 s). Confirmed: no `CURLOPT` or `curltimeout` in the tree or in `/etc/asterisk`. I have
+  **not** set one, because recovery-code-rules section 6 says to calibrate against measurement, not
+  intuition, and the right value depends on how long `/call/inbound` actually takes. Worth doing as
+  its own change, after measuring. Noted that this adds a third instance of a pre-existing exposure.
+- **F6 — no retention or free-space guard for recordings.** Stage 5. The agent is right that it
+  should exist *before* the first long-lived rule, given the 2026-09-07 SQLITE_FULL outage on this
+  same filesystem.
+
+### Still open, pre-existing, and worth fixing separately
+
+**The internal secret is world-readable on the edge.** `makeWorldReadable` forces every generated
+config to `rw-r--r--`, and `/etc/asterisk/extensions_shops.conf` embeds the secret 32 times —
+verified: `-rw-r--r-- phone phone`. Any local account can read it and then reach every
+`/api/internal/*` endpoint, including `/provision`, which can reload chan_quectel and drop calls
+fleet-wide. `0640` + group `asterisk` satisfies the original reason for 0644 (a failed `#include`
+segfaults chan_quectel), but it must be done so that a failed `chgrp` leaves the file readable
+rather than breaking Asterisk — its own change, not a footnote to this one.
+
+**No rate limit or lockout on `/login`.** Unlimited attempts, no delay, no counter. This outranks
+the constant-time comparison by a wide margin: an attacker brute-forces, they do not time.
+
+**The admin UI binds `0.0.0.0`,** not just the tailnet, so it is reachable on the shop LAN at
+`192.168.0.192:8080` over plain HTTP. Cookie signing stops forgery, not capture and replay; and
+`AdminSession` has no issuedAt, no nonce and no server-side store, so a captured cookie is valid
+until the signing key is rotated.
+
+### Deploying it
+
+Writing the dialplan and reloading touches `/etc/asterisk`, so **Rule 2 applies**. Note that
+`dialplan reload` is not `module reload chan_quectel.so`: it re-reads extensions only and does not
+re-init trunks, so it does not drop calls. Still to be done at an idle moment, and verified on
+Testshop 1 first - it has a generated dialplan and no real traffic.
+
 ## 7. What I need from you
 
 1. **Do the threats happen on the phone at all?** If they are purely in person, stages 1–5 are the

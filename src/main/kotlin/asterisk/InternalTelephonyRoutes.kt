@@ -1,5 +1,6 @@
 package asterisk
 
+import util.maskPhone
 import DataBase
 import VoiceCallOutcome
 import VoiceCallState
@@ -295,6 +296,114 @@ fun Routing.internalTelephonyRoutes(
 
         println("[Asterisk/dial-targets] shop=$shopId targets=${targets.ifBlank { "(none → legacy fallback)" }}")
         call.respondText(targets)
+    }
+
+    /**
+     * Per-caller recording decision for the dialplan.
+     *
+     * Returns an absolute file path when this number is to be recorded, or an **empty body**
+     * when it is not. The dialplan wraps `MixMonitor` in an `ExecIf` on that value, so empty
+     * means the line is a no-op and the call proceeds exactly as it did before this existed.
+     *
+     * ```
+     * TRIGGER:  an inbound (or outbound) call whose counterparty has an active, unexpired
+     *           call_recording_rule. Evaluated once per call, at call setup.
+     * EVIDENCE: STRONG. A row that an admin created, with a stated reason and an expiry. Nothing
+     *           is inferred.
+     * BLAST:    one audio file. This endpoint cannot hang up, reject or reroute a call — it only
+     *           returns a filename, and the only dialplan verb it feeds is MixMonitor.
+     * GUARD:    returns empty on every failure it can reach (bad params, DB error, missing or
+     *           unreadable directory, unsafe path). The asymmetry is deliberate: failing to
+     *           record is a missed opportunity, recording someone we should not is not undoable.
+     *           Note the one path that does NOT return empty: authorizedParams() answers
+     *           403 "invalid secret" and returns, so a stale secret makes the body "invalid
+     *           secret" on every call. That is why the dialplan guard requires the value to
+     *           START WITH "/" rather than merely be non-empty — without that, MixMonitor would
+     *           have recorded every caller to a relative path under Asterisk's spool.
+     *           Separately, the existing /call/inbound verdict contract is untouched, so routing
+     *           cannot be affected by a bug here.
+     * IF WRONG: two ways. (a) We fail to record a call we meant to — the admin sees no file and
+     *           can check the rule. (b) We return a path for the wrong number, and a call is
+     *           recorded that should not have been; mitigated by exact-match on the number and
+     *           by the access log, which shows every rule that was ever active.
+     *           Neither outcome can drop or misroute a customer's call.
+     * ```
+     *
+     * Why a separate endpoint rather than extending /call/inbound's response: that verdict drives
+     * exact-match GotoIf branches for reject/menu routing and is the most load-bearing string in
+     * the call path. Re-parsing it (CUT on a delimiter) to smuggle a second value would put
+     * routing at risk to add a recording. One extra localhost round trip is the cheaper trade.
+     */
+    post("/api/internal/telephony/call/record-decision") {
+        // Any failure below must end in an empty body, never a 4xx/5xx with a body the dialplan
+        // might capture as a filename.
+        val decision = runCatching {
+            val params = call.authorizedParams() ?: return@post
+            val shopId = params["shopId"]?.toIntOrNull() ?: return@runCatching ""
+            val phone = params["from"]?.trim().orEmpty()
+            val uniqueId = params["uniqueid"]?.trim().orEmpty()
+            val direction = params["direction"]?.trim()?.takeIf { it == "outbound" } ?: "inbound"
+            if (phone.isBlank()) return@runCatching ""
+
+            val rule = db.getActiveCallRecordingRule(phone) ?: return@runCatching ""
+
+            if (!CallRecordingPaths.directoryIsDialplanSafe()) {
+                println("[Asterisk/record] CANNOT RECORD phone=${maskPhone(phone)} " +
+                        "reason=recording-dir-unsafe-for-dialplan — call proceeds unrecorded")
+                return@runCatching ""
+            }
+            // Readability, not writability: Asterisk writes these files, not us, so testing our
+            // own canWrite() would test the wrong principal — and would wrongly PASS for a
+            // backend-owned directory Asterisk cannot even traverse. We check what we need
+            // (reading it back for playback) and let MixMonitor report its own write failures.
+            val dir = java.io.File(CallRecordingPaths.directory)
+            if (!dir.isDirectory || !dir.canRead()) {
+                println("[Asterisk/record] CANNOT RECORD shop=$shopId phone=${maskPhone(phone)} " +
+                        "reason=directory-missing-or-unreadable path=${dir.path} — call proceeds unrecorded")
+                return@runCatching ""
+            }
+
+            val callRow = uniqueId.takeIf { it.isNotBlank() }?.let { db.getCallByProviderCallId(it) }
+
+            // Idempotent per call: a retried CURL, a re-entered extension, or anyone holding the
+            // shared secret must not be able to flood the chain-of-custody log with rows. Hand
+            // back the path already issued for this call instead of minting a second one.
+            callRow?.id?.let { cid ->
+                db.findCallRecordingByCallId(cid)?.let { (existingId, existingPath) ->
+                    if (existingPath.isNotBlank()) {
+                        println("[Asterisk/record] already issued for this call recId=$existingId " +
+                                "phone=${maskPhone(phone)} — returning the same path, no new row")
+                        return@runCatching existingPath
+                    }
+                }
+            }
+
+            // Opaque filename: never the phone number, so the path itself leaks nothing if the
+            // directory is ever listed by someone who should not see it.
+            val token = java.util.UUID.randomUUID().toString().replace("-", "")
+            val path = java.io.File(dir, "$token.wav").absolutePath
+            val recId = db.createCallRecording(
+                phone = phone,
+                shopId = shopId,
+                direction = direction,
+                path = path,
+                callId = callRow?.id,
+            )
+            // "requested", not "record": at this point nothing has been captured. MixMonitor may
+            // still fail to open the file, and with option `b` a call that is never answered
+            // produces no audio at all. A chain of custody that asserts recordings which do not
+            // exist is worse than useless for a handover, so confirmation is a separate,
+            // file-backed event (see docs/call-recording-plan.md stage 4).
+            db.logCallRecordingAccess(recId, "record-requested", "system",
+                "shop=$shopId phone=${maskPhone(phone)} dir=$direction ruleId=${rule.id}")
+            println("[Asterisk/record] RECORD REQUESTED shop=$shopId phone=${maskPhone(phone)} " +
+                    "dir=$direction ruleId=${rule.id} recId=$recId (audio unconfirmed until the file exists)")
+            path
+        }.getOrElse { e ->
+            println("[Asterisk/record] decision failed, proceeding UNRECORDED: ${e.message}")
+            ""
+        }
+        call.respondText(decision)
     }
 
     // Digit 1 in the menu: create a booking token and text the link via the shop's SIM.

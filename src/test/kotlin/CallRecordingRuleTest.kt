@@ -174,6 +174,33 @@ class CallRecordingRuleTest {
     // ─── Recording rows ─────────────────────────────────────────────────────
 
     @Test
+    fun `the default recording directory is Asterisk's own spool, which both processes can reach`() {
+        // Regression: the original default was under /home/phone, which asterisk cannot traverse
+        // (drwxr-x--- phone phone, and asterisk is not in group phone) - so MixMonitor failed
+        // EACCES on every call while the audit log claimed a recording existed.
+        assertEquals("/var/spool/asterisk/monitor", asterisk.CallRecordingPaths.DEFAULT_DIRECTORY)
+        assertFalse(asterisk.CallRecordingPaths.DEFAULT_DIRECTORY.startsWith("/home/"),
+            "a backend-owned home directory is not traversable by the asterisk user")
+    }
+
+    @Test
+    fun `the audit trail does not claim a recording before one exists`() {
+        val db = freshDb()
+        db.addCallRecordingRule("+4551941736", "threats to staff", "admin")
+        val recId = db.createCallRecording(
+            phone = "+4551941736", shopId = 1, direction = "inbound",
+            path = "/var/spool/asterisk/monitor/abc123.wav",
+        )
+        db.logCallRecordingAccess(recId, "record-requested", "system", "ruleId=1")
+
+        val actions = db.listCallRecordingAccess().map { it.action }
+
+        assertTrue(actions.contains("record-requested"))
+        assertFalse(actions.contains("record"),
+            "a bare \"record\" entry would assert audio that MixMonitor may never have written")
+    }
+
+    @Test
     fun `a registered recording starts un-preserved and un-deleted`() {
         val db = freshDb()
         val recId = db.createCallRecording(

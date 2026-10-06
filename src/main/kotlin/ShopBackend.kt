@@ -188,6 +188,14 @@ object ShopBackend {
             }
         }
 
+        // Call-recording directory. Not fatal if it cannot be prepared: a recording that cannot
+        // be written is a missing file, never a failed call.
+        if (asterisk.CallRecordingPaths.ensureDirectory()) {
+            val active = db.listCallRecordingRules().count { it.isLive() }
+            println("[Recording] Directory ready at ${asterisk.CallRecordingPaths.directory}; " +
+                    "$active number(s) currently being recorded.")
+        }
+
         // Background cleanup
         startCleanupScheduler(db)
         startDeferredReloadDrain(quectelConfigWriter)
@@ -346,8 +354,10 @@ object ShopBackend {
             val value = System.getenv(name)
             val display = when {
                 value.isNullOrBlank() -> "missing"
-                value.length <= 4     -> "set (${value.length} chars)"
-                else                  -> "set ${value.take(4)}… (${value.length} chars)"
+                // Neither the prefix nor the exact length: both narrow a brute force, and this
+                // line went into the journal on every restart for ADMIN_PASSWORD, the AMI and ARI
+                // secrets, the internal secret and the CallApp key.
+                else                  -> "set"
             }
             println("  $name = $display")
         }

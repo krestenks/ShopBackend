@@ -1,3 +1,4 @@
+import util.maskPhone
 import kotlinx.html.currentTimeMillis
 import org.mindrot.jbcrypt.BCrypt
 import java.io.File
@@ -81,13 +82,6 @@ data class Customer(
  * WebAdmin throughout, and any activity during the window clears it outright.
  */
 const val CUSTOMER_DELETION_GRACE_DAYS: Int = 30
-
-/** Masks a phone number for logs: "+4551941736" → "+45XXXX36". */
-fun maskPhone(phone: String?): String {
-    val p = phone?.trim().orEmpty()
-    if (p.length < 6) return "+XXXX"
-    return p.take(3) + "XXXX" + p.takeLast(2)
-}
 
 /** A per-number call-recording rule. Admin-only; see docs/call-recording-plan.md. */
 data class CallRecordingRule(
@@ -3621,6 +3615,29 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /**
+     * An existing, undeleted recording row for this call, if one was already handed out.
+     *
+     * The dialplan calls the decision endpoint once per call, but nothing stops it being called
+     * again (a retried CURL, a re-entered extension, or anyone holding the shared secret). Each
+     * call creating a fresh row would flood `call_recording_access` — which is the chain of
+     * custody this feature exists to produce — so the decision is idempotent per call instead.
+     */
+    fun findCallRecordingByCallId(callId: Int): Pair<Int, String>? {
+        val sql = """
+            SELECT id, path FROM call_recording
+             WHERE call_id = ? AND deleted_at IS NULL
+             ORDER BY id DESC LIMIT 1
+        """.trimIndent()
+        return runCatching {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setInt(1, callId)
+                val rs = stmt.executeQuery()
+                if (rs.next()) rs.getInt("id") to (rs.getString("path") ?: "") else null
+            }
+        }.getOrNull()
+    }
+
     fun logCallRecordingAccess(recordingId: Int?, action: String, actor: String, note: String? = null) {
         runCatching {
             connection.prepareStatement(
@@ -3652,7 +3669,21 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      * 32 bytes from [java.security.SecureRandom], hex-encoded.
      */
     fun getOrCreateSessionSigningKey(): String {
-        getSetting("session_signing_key")?.trim()?.takeIf { it.length >= 32 }?.let { return it }
+        // Must be exactly 64 hex characters (32 bytes). A stored value that is merely "long
+        // enough" could be a 16-byte key, and one containing a non-hex character would make
+        // Ktor's hex() decoder throw inside install(Sessions) — which would stop the process
+        // booting at all. The dialplan CURLs this process on every inbound call, so failing to
+        // start is a far worse outcome than a rotated key: on anything unparseable we discard it
+        // and generate a fresh one, which only costs everyone a re-login.
+        val stored = getSetting("session_signing_key")?.trim()
+        if (stored != null && stored.length == 64 && stored.all { it in "0123456789abcdefABCDEF" }) {
+            return stored
+        }
+        if (stored != null) {
+            println("[Auth] Stored session signing key is unusable (length=${stored.length}, " +
+                    "hex=${stored.all { it in "0123456789abcdefABCDEF" }}) — regenerating rather " +
+                    "than failing to start.")
+        }
         val bytes = ByteArray(32)
         java.security.SecureRandom().nextBytes(bytes)
         val hex = bytes.joinToString("") { "%02x".format(it) }

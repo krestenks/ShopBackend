@@ -78,6 +78,81 @@ class ConfigWritersTest {
         assertFalse(text.contains("${'$'}d{"))
     }
 
+    // ─── Call recording (admin-only, per number) ─────────────────────────────
+
+    @Test
+    fun `recording hook sits immediately before Dial and is ExecIf-guarded`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(listOf(shop), reload = false)
+        val text = java.nio.file.Path.of(dir, "extensions_shops.conf").readText()
+
+        // The decision call, with the caller's number URI-encoded like the other endpoints.
+        assertTrue(
+            text.contains("Set(REC=\${CURL(http://127.0.0.1:8080/api/internal/telephony/call/record-decision," +
+                    "secret=SECRET&shopId=7&from=\${URIENCODE(\${CALLERID(num)})}&uniqueid=\${UNIQUEID})})"),
+            "recording decision must be fetched per caller",
+        )
+
+        // The guard: MixMonitor only runs when the backend returned a path. This is what keeps
+        // every non-recorded call on exactly the old code path.
+        // The guard requires the decision to look like an absolute path. A bare non-empty check
+        // would let an error body through: a stale shared secret makes the endpoint answer
+        // 403 "invalid secret", and that body would otherwise become the MixMonitor filename on
+        // EVERY call.
+        assertTrue(
+            text.contains("""ExecIf($["${'$'}{REC:0:1}" = "/"]?MixMonitor(${'$'}{REC},b))"""),
+            "MixMonitor must be guarded on the decision looking like an absolute path",
+        )
+
+        // Ordering matters: MixMonitor after Dial would miss the conversation entirely.
+        // Match the dialplan VERB ("?MixMonitor("), not the bare word - the explanatory comment
+        // above it also contains "MixMonitor", which made an earlier version of this assertion
+        // vacuous.
+        val recLine = text.indexOf("?MixMonitor(")
+        val dialLine = text.indexOf("n,Dial(\${TARGETS},30)")
+        assertTrue(recLine > 0, "the MixMonitor verb must be present")
+        assertTrue(dialLine > 0, "the Dial line must be present")
+        assertTrue(recLine < dialLine, "MixMonitor must precede Dial, got rec=$recLine dial=$dialLine")
+    }
+
+    @Test
+    fun `recording never introduces a Hangup or changes the routing verdict branches`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(listOf(shop), reload = false)
+        val text = java.nio.file.Path.of(dir, "extensions_shops.conf").readText()
+
+        // The four verdict branches are the load-bearing routing decision; recording must not
+        // have perturbed them.
+        for (verdict in listOf("reject", "menu_open", "menu_closed", "menu_temp")) {
+            assertTrue(
+                text.contains("""GotoIf($["${'$'}{VERDICT}" = "$verdict"]?"""),
+                "verdict branch '$verdict' must be intact",
+            )
+        }
+        // Recording must not add any hangup of its own.
+        val recSection = text.substringAfter("record-decision").substringBefore("Dial(")
+        assertFalse(recSection.contains("Hangup"), "the recording hook must never hang up a call")
+    }
+
+    @Test
+    fun `the menu operator path records too`() {
+        val dir = Files.createTempDirectory("astconf").toString()
+        val config = testConfig(dir)
+        DialplanWriter(config, AmiClient(config)).regenerate(listOf(shop), reload = false)
+        val text = java.nio.file.Path.of(dir, "extensions_shops.conf").readText()
+
+        // `operator` is reached by Goto from the menu, so the main path's REC lines never ran.
+        // Dead code while the voice menu is off, but it must not silently skip recording if the
+        // menu is ever re-enabled.
+        val operatorSection = text.substringAfter("exten => operator,1")
+        assertTrue(operatorSection.contains("record-decision"),
+            "the operator extension bypasses the main path, so it needs its own hook")
+        assertTrue(operatorSection.indexOf("?MixMonitor(") < operatorSection.indexOf("n,Dial("),
+            "MixMonitor must precede Dial on the operator path as well")
+    }
+
     @Test
     fun `internal intercom contexts generated per manager group`() {
         val dir = Files.createTempDirectory("astconf").toString()
