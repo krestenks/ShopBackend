@@ -347,6 +347,15 @@ fun Routing.internalTelephonyRoutes(
 
             val rule = db.getActiveCallRecordingRule(phone) ?: return@runCatching ""
 
+            // Low disk stops NEW recordings rather than deleting existing ones: the recordings
+            // are the evidence, and the disk filling is what took SMS and the DB down in
+            // September. Refusing here protects both, and reverses by itself once space is free.
+            if (!CallRecordingReaper.hasSpaceToRecord()) {
+                println("[Asterisk/record] CANNOT RECORD phone=${maskPhone(phone)} " +
+                        "reason=insufficient-disk — call proceeds unrecorded")
+                return@runCatching ""
+            }
+
             if (!CallRecordingPaths.directoryIsDialplanSafe()) {
                 println("[Asterisk/record] CANNOT RECORD phone=${maskPhone(phone)} " +
                         "reason=recording-dir-unsafe-for-dialplan — call proceeds unrecorded")

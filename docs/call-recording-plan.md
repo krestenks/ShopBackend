@@ -515,6 +515,66 @@ sites, so one unguarded handler still satisfied it.
   should exist before a rule has been running for months, given the 2026-09-07 SQLITE_FULL outage
   on this same filesystem.
 
+## 12. Stage 5 as built — the reaper (2026-10-06)
+
+### The decision that shaped it
+
+The obvious design is "when the disk gets low, delete the oldest recordings". **This does not do
+that, on purpose.** These recordings are evidence being gathered for a handover to police or
+social services. Deleting them to reclaim space would destroy the thing the feature exists to
+produce, in order to protect a disk with 174 GB free — recovery code destroying the working state
+it was meant to protect, which is the failure this codebase keeps relearning.
+
+So the two concerns are strictly separate:
+
+| Concern | Response |
+|---|---|
+| Disk running low | **Stop starting new recordings.** Never delete. Reverses by itself once space is free. |
+| A recording getting old | Delete it, **age-based only**, after 365 days, **unless marked as evidence**. |
+
+Thresholds: 365-day retention (deliberately far past the 90-day rule window and any handover), and
+a 5 GB free-space floor — far above anything SQLite needs, because the point is protecting the
+database and the phone system, not using the last byte for audio. At ~1 MB/min, 5 GB is still
+~80 hours of conversation in hand.
+
+### What the sweep does hourly
+
+1. **Finalise.** Once a file has settled (5 min), record its size and **SHA-256**, and log
+   `record-confirmed`. The hash is what makes a handed-over recording hard to dispute, and it has
+   to be taken before anything else touches the file. A file still being written is skipped —
+   hashing a partial file would store a wrong hash.
+2. **No-audio.** A row whose file never appeared is recorded as size 0 and logged `no-audio`, so
+   it stops being re-examined every hour. This is the normal outcome of an unanswered call under
+   MixMonitor's `b`.
+3. **Delete aged.** `preserved = 0 AND started_at < cutoff`, excluded **in SQL** rather than in
+   Kotlin so no code path can forget it. Each deletion prints the evidence it acted on. The row is
+   kept with `deleted_at` set, so the record that a recording existed — and who accessed it —
+   outlives the audio.
+
+An undeletable file leaves its row alone so the next sweep retries; losing track of a file is
+worse than trying again in an hour.
+
+One deliberate fail-**open**: if free space cannot be determined (`usableSpace` answers 0 for an
+unqueryable path), recording is allowed, because treating "could not tell" as "stop" would
+silently disable the feature on an odd filesystem. MixMonitor's own write failure is the backstop,
+and it says so in the log. This is the one place where failing open is the lesser evil.
+
+### Tests
+
+`CallRecordingReaperTest`, 14 tests. Verified to have teeth: replacing the age-and-preserved
+query with "all recordings" turns **six** red, including `a preserved recording is never deleted,
+at any age` and `the reaper never deletes anything because of disk pressure`.
+
+Also covers: in-progress files not hashed, no-audio recorded once rather than hourly, the row
+surviving deletion, preserve/unpreserve both audited, and the retention default being long enough
+to outlast an evidence-gathering period.
+
+### UI
+
+The recordings list gains an Evidence column with **Keep as evidence** / **Release**, and states
+the retention rule plainly, including that low disk stops new recordings rather than deleting
+existing ones.
+
 ## 7. What I need from you
 
 1. **Do the threats happen on the phone at all?** If they are purely in person, stages 1–5 are the

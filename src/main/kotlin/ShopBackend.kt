@@ -449,6 +449,17 @@ object ShopBackend {
                             "${retention.skippedUnknown} skipped with unknown last activity).")
                 }
 
+                // Call recordings: finalise finished files (size + SHA-256), and delete the ones
+                // past their age window. Deletion is age-based only and never touches a preserved
+                // recording; low disk stops NEW recordings instead of deleting evidence.
+                val rec = asterisk.CallRecordingReaper.run(db)
+                if (rec.isInteresting()) {
+                    println("[Recording] Sweep: ${rec.finalised} finalised, ${rec.noAudio} with no " +
+                            "audio, ${rec.deleted} deleted (${rec.freedBytes / (1024 * 1024)} MB " +
+                            "freed), ${rec.preservedKept} preserved and kept, " +
+                            "${rec.deleteFailed} could not be deleted.")
+                }
+
                 // The screening cache has no FK cascade, so pruned customers leave rows behind.
                 val orphanScreenings = db.deleteOrphanCallAppScreeningRows()
                 if (orphanScreenings > 0) {

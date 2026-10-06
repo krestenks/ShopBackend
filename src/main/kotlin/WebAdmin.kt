@@ -3009,7 +3009,7 @@ class WebAdmin(
                             p("hint") { +"Nothing recorded yet." }
                         } else {
                             table {
-                                thead { tr { th { +"When" }; th { +"Phone" }; th { +"Shop" }; th { +"Dir" }; th { +"Audio" }; th { +"" } } }
+                                thead { tr { th { +"When" }; th { +"Phone" }; th { +"Shop" }; th { +"Dir" }; th { +"Audio" }; th { +"Evidence" }; th { +"" } } }
                                 tbody {
                                     for (rec in recordings) {
                                         val f = java.io.File(rec.path)
@@ -3024,8 +3024,19 @@ class WebAdmin(
                                                 else span("badge") { +"no audio — call not answered" }
                                             }
                                             td {
+                                                if (rec.preserved) span("badge ok") { +"kept as evidence" }
+                                                else +"—"
+                                            }
+                                            td {
                                                 if (haveAudio) {
                                                     a(href = "/recordings/audio?id=${rec.id}", classes = "btn") { +"Play" }
+                                                }
+                                                form(action = "/recordings/preserve", method = FormMethod.post) {
+                                                    hiddenInput { name = "id"; value = rec.id.toString() }
+                                                    hiddenInput { name = "on"; value = if (rec.preserved) "0" else "1" }
+                                                    submitInput(classes = "btn") {
+                                                        value = if (rec.preserved) "Release" else "Keep as evidence"
+                                                    }
                                                 }
                                             }
                                         }
@@ -3034,7 +3045,11 @@ class WebAdmin(
                             }
                             p("hint") {
                                 +("\"No audio\" is normal: recording only captures the bridged "
-                                  + "conversation, so a call nobody answered has nothing in it.")
+                                  + "conversation, so a call nobody answered has nothing in it. "
+                                  + "Recordings are deleted after "
+                                  + "${asterisk.CallRecordingReaper.RECORDING_RETENTION_DAYS} days "
+                                  + "unless marked as evidence. If the disk runs low, new recordings "
+                                  + "stop — existing ones are never deleted to make room.")
                             }
                         }
                     }
@@ -3056,6 +3071,17 @@ class WebAdmin(
                 val actor = call.requireAdminForRecordings() ?: return@post
                 val id = call.receiveParameters()["id"]?.toIntOrNull()
                 if (id != null) db.deactivateCallRecordingRule(id, actor)
+                call.respondRedirect("/recordings")
+            }
+
+            // Marks a recording as evidence, exempting it from the age-based reaper.
+            post("/recordings/preserve") {
+                val actor = call.requireAdminForRecordings() ?: return@post
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                if (id != null) {
+                    db.setCallRecordingPreserved(id, params["on"] == "1", actor)
+                }
                 call.respondRedirect("/recordings")
             }
 

@@ -3699,6 +3699,90 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         preserved = rs.getInt("preserved") != 0,
     )
 
+    /** Recordings that have not yet had their size and hash computed. */
+    fun listUnfinalisedCallRecordings(limit: Int = 200): List<CallRecording> {
+        val sql = """
+            SELECT id, call_id, phone_e164, shop_id, direction, path, started_at,
+                   duration_ms, size_bytes, sha256, preserved, deleted_at
+              FROM call_recording
+             WHERE deleted_at IS NULL AND size_bytes IS NULL
+             ORDER BY started_at ASC LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecording>()
+            while (rs.next()) out += readCallRecording(rs)
+            return out
+        }
+    }
+
+    /** Recordings older than [cutoff] that are NOT preserved. Preserved rows are never returned. */
+    fun listDeletableCallRecordings(cutoff: Long, limit: Int = 500): List<CallRecording> {
+        val sql = """
+            SELECT id, call_id, phone_e164, shop_id, direction, path, started_at,
+                   duration_ms, size_bytes, sha256, preserved, deleted_at
+              FROM call_recording
+             WHERE deleted_at IS NULL AND preserved = 0 AND started_at < ?
+             ORDER BY started_at ASC LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, cutoff)
+            stmt.setInt(2, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecording>()
+            while (rs.next()) out += readCallRecording(rs)
+            return out
+        }
+    }
+
+    /** How many preserved recordings are past [cutoff] and therefore deliberately kept. */
+    fun countPreservedPastCutoff(cutoff: Long): Int =
+        connection.prepareStatement(
+            "SELECT COUNT(*) FROM call_recording WHERE deleted_at IS NULL AND preserved = 1 AND started_at < ?"
+        ).use { stmt ->
+            stmt.setLong(1, cutoff)
+            val rs = stmt.executeQuery()
+            if (rs.next()) rs.getInt(1) else 0
+        }
+
+    /** Records the finished file's size and hash. `size = 0` means "no audio was ever written". */
+    fun finaliseCallRecording(id: Int, sizeBytes: Long, sha256: String?, durationMs: Long?) {
+        val sql = """
+            UPDATE call_recording SET size_bytes = ?, sha256 = ?, duration_ms = ? WHERE id = ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, sizeBytes)
+            stmt.setString(2, sha256)
+            if (durationMs != null) stmt.setLong(3, durationMs) else stmt.setNull(3, java.sql.Types.INTEGER)
+            stmt.setInt(4, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * Marks a recording deleted. The row is KEPT — only `deleted_at` is set — so the record that
+     * the recording once existed, and who had accessed it, survives the audio itself.
+     */
+    fun markCallRecordingDeleted(id: Int, now: Long = System.currentTimeMillis()) {
+        connection.prepareStatement("UPDATE call_recording SET deleted_at = ? WHERE id = ?").use { stmt ->
+            stmt.setLong(1, now)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Marks a recording as evidence, exempting it from age-based deletion. Audited. */
+    fun setCallRecordingPreserved(id: Int, preserved: Boolean, actor: String): Boolean {
+        connection.prepareStatement("UPDATE call_recording SET preserved = ? WHERE id = ?").use { stmt ->
+            stmt.setInt(1, if (preserved) 1 else 0)
+            stmt.setInt(2, id)
+            val n = stmt.executeUpdate()
+            if (n > 0) logCallRecordingAccess(id, if (preserved) "preserve" else "unpreserve", actor)
+            return n > 0
+        }
+    }
+
     fun logCallRecordingAccess(recordingId: Int?, action: String, actor: String, note: String? = null) {
         runCatching {
             connection.prepareStatement(
