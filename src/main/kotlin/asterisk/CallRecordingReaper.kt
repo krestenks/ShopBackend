@@ -171,6 +171,53 @@ object CallRecordingReaper {
         return Summary(finalised, noAudio, deleted, freed, preservedKept, failed)
     }
 
+    /**
+     * Deletes one recording on explicit admin instruction.
+     *
+     * Distinct from the age-based sweep in two ways. It ignores `preserved`, because an admin
+     * pressing delete on a specific recording is a deliberate act, not a policy sweep — the
+     * confirmation prompt is where that gets questioned, not here. And it is audited as
+     * `delete-manual` with the admin's name, so the chain of custody distinguishes "aged out" from
+     * "someone removed this".
+     *
+     * The resolved file must sit inside the recordings directory. The `path` column is written by
+     * the backend itself, but confining the delete means a tampered or mis-migrated row can never
+     * turn this into an arbitrary file removal — the same containment the playback route uses.
+     *
+     * The row is kept with `deleted_at` set, so the record that the recording existed, and who
+     * had listened to it, outlives the audio.
+     *
+     * @return true if the row was marked deleted.
+     */
+    fun deleteOne(db: DataBase, id: Int, actor: String): Boolean {
+        val rec = db.getCallRecording(id) ?: return false
+        val root = File(CallRecordingPaths.directory).canonicalFile
+        val file = runCatching { File(rec.path).canonicalFile }.getOrNull()
+
+        // Containment is checked WITHOUT regard to whether the file happens to exist. An earlier
+        // version only refused when it existed, so a path outside the directory that was merely
+        // absent still had its row marked deleted and reported success — treating an untrustworthy
+        // row as if it had been handled. If the path is not ours, the row is not to be touched.
+        val inside = file != null && file.path.startsWith(root.path + File.separator)
+        if (!inside) {
+            println("[Recording] REFUSED manual delete of id=$id: ${file?.path ?: rec.path} is " +
+                    "outside ${root.path} — the row is left alone for inspection")
+            return false
+        }
+        if (file!!.exists() && !runCatching { file.delete() }.getOrDefault(false)) {
+            println("[Recording] Manual delete of id=$id failed to remove ${file.path}")
+            return false
+        }
+
+        db.markCallRecordingDeleted(id)
+        db.logCallRecordingAccess(id, "delete-manual", actor,
+            "phone=${util.maskPhone(rec.phone)} preserved=${rec.preserved} " +
+                "bytes=${rec.sizeBytes ?: 0}")
+        println("[Recording] DELETED (manual) id=$id by $actor " +
+                "phone=${util.maskPhone(rec.phone)} preserved=${rec.preserved}")
+        return true
+    }
+
     private fun sha256(f: File): String {
         val md = MessageDigest.getInstance("SHA-256")
         f.inputStream().use { ins ->

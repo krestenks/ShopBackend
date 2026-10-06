@@ -258,6 +258,12 @@ object ShopBackend {
                 // sip-report path, which forced field-smuggling hacks app-side.
                 json(Json { prettyPrint = false; ignoreUnknownKeys = true })
             }
+            // Range requests, so an <audio> player can seek within a recording instead of only
+            // streaming it from the start. Also makes the APK downloads resumable, which is a
+            // side benefit rather than the reason.
+            install(io.ktor.server.plugins.partialcontent.PartialContent)
+            install(io.ktor.server.plugins.autohead.AutoHeadResponse)
+
             install(Sessions) {
                 // Sign every session cookie. An unsigned `cookie<T>(name)` is plaintext and
                 // unauthenticated, so an ADMIN_SESSION cookie could simply be hand-written by

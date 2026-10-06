@@ -2736,9 +2736,23 @@ class WebAdmin(
                                                     }
                                                     td {
                                                         if (haveAudio) {
-                                                            // Playback goes through the one guarded
-                                                            // streaming route; this is only a link.
-                                                            a(href = "/recordings/audio?id=${rec.id}", classes = "btn") { +"▶ Play" }
+                                                            // Plays in place. Still goes through
+                                                            // the one guarded streaming route — the
+                                                            // element only points at it.
+                                                            //
+                                                            // preload="none" matters: with metadata
+                                                            // or auto, merely opening this page
+                                                            // would fetch every recording and write
+                                                            // a "play" entry for each, which would
+                                                            // make the chain of custody worthless.
+                                                            // The request now happens only when the
+                                                            // admin presses play.
+                                                            audio {
+                                                                attributes["controls"] = "controls"
+                                                                attributes["preload"] = "none"
+                                                                attributes["src"] = "/recordings/audio?id=${rec.id}"
+                                                                attributes["style"] = "height:32px;max-width:240px"
+                                                            }
                                                         }
                                                     }
                                                     td {
@@ -2748,6 +2762,17 @@ class WebAdmin(
                                                             hiddenInput { name = "back"; value = "/customers/edit?id=${customer.id}" }
                                                             submitInput(classes = "btn") {
                                                                 value = if (rec.preserved) "Release" else "Keep"
+                                                            }
+                                                        }
+                                                        form(action = "/recordings/delete", method = FormMethod.post) {
+                                                            hiddenInput { name = "id"; value = rec.id.toString() }
+                                                            hiddenInput { name = "back"; value = "/customers/edit?id=${customer.id}" }
+                                                            submitInput(classes = "btn danger") {
+                                                                value = "Delete"
+                                                                onClick = "return confirm('Delete the recording from " +
+                                                                    fmtTs(rec.startedAt) + " permanently? " +
+                                                                    (if (rec.preserved) "It is marked as evidence. " else "") +
+                                                                    "The audio cannot be recovered.')"
                                                             }
                                                         }
                                                     }
@@ -3126,13 +3151,26 @@ class WebAdmin(
                                             }
                                             td {
                                                 if (haveAudio) {
-                                                    a(href = "/recordings/audio?id=${rec.id}", classes = "btn") { +"Play" }
+                                                    audio {
+                                                        attributes["controls"] = "controls"
+                                                        attributes["preload"] = "none"
+                                                        attributes["src"] = "/recordings/audio?id=${rec.id}"
+                                                        attributes["style"] = "height:32px;max-width:240px"
+                                                    }
                                                 }
                                                 form(action = "/recordings/preserve", method = FormMethod.post) {
                                                     hiddenInput { name = "id"; value = rec.id.toString() }
                                                     hiddenInput { name = "on"; value = if (rec.preserved) "0" else "1" }
                                                     submitInput(classes = "btn") {
                                                         value = if (rec.preserved) "Release" else "Keep as evidence"
+                                                    }
+                                                }
+                                                form(action = "/recordings/delete", method = FormMethod.post) {
+                                                    hiddenInput { name = "id"; value = rec.id.toString() }
+                                                    submitInput(classes = "btn danger") {
+                                                        value = "Delete"
+                                                        onClick = "return confirm('Delete this recording permanently? " +
+                                                            "The audio cannot be recovered.')"
                                                     }
                                                 }
                                             }
@@ -3243,11 +3281,26 @@ class WebAdmin(
 
                 db.logCallRecordingAccess(id, "play", actor,
                     "phone=${util.maskPhone(rec.phone)} bytes=${file.length()}")
+                // `inline` plus an explicit audio/wav: Ktor infers audio/x-wav from the
+                // extension, which several browsers download rather than play. MixMonitor writes
+                // plain RIFF/PCM 16-bit mono 8 kHz, which every current browser plays natively.
                 call.response.header(
                     HttpHeaders.ContentDisposition,
                     "inline; filename=\"recording-$id.wav\"",
                 )
+                call.response.header(HttpHeaders.ContentType, "audio/wav")
                 call.respondFile(file)
+            }
+
+            // Deletes one recording on explicit admin instruction. Audited as delete-manual, so
+            // the chain of custody tells "aged out" apart from "someone removed this".
+            post("/recordings/delete") {
+                val actor = call.requireAdminForRecordings() ?: return@post
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                if (id != null) asterisk.CallRecordingReaper.deleteOne(db, id, actor)
+                val back = params["back"]?.takeIf { it.startsWith("/") && !it.startsWith("//") }
+                call.respondRedirect(back ?: "/recordings")
             }
 
             // ── Flagged-for-deletion review list ───────────────────────────────
