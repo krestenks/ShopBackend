@@ -208,22 +208,33 @@ class WebAdmin(
                 val username = params["username"] ?: ""
                 val password = params["password"] ?: ""
 
-                // Allow credentials to be overridden via environment variables so the password
-                // can be changed on the server (backend.env) without a code rebuild.
-                // Fallback: hardcoded admin / 1234 (BCrypt hash).
+                // Credentials come from backend.env so the password can change without a rebuild.
+                //
+                // There used to be a fallback to a hardcoded BCrypt hash of "1234" whenever
+                // ADMIN_PASSWORD was unset. That is removed: a deploy that lost the env var would
+                // silently accept a password that is public knowledge, on a backend that gates
+                // customer data and (soon) call recordings.
+                //
+                // With no password configured, login now refuses everyone. Deliberately we fail
+                // closed on LOGIN rather than refusing to start: the dialplan CURLs this process on
+                // every inbound call, so exiting would be a far worse failure than a locked admin
+                // UI. Calls keep working; only the web admin is unavailable, and it says why.
                 val envUser = System.getenv("ADMIN_USERNAME")?.trim()?.takeIf { it.isNotBlank() }
                 val envPass = System.getenv("ADMIN_PASSWORD")?.trim()?.takeIf { it.isNotBlank() }
 
                 val allowedAdminUsername = envUser ?: "admin"
-                val expectedHash = "$2a$12\$bRyq/lqNzQbmYGAzS2V2qexIOd3es/8.URdwPmcamFTBGieqsodpW" // Hash of "1234"
 
-                // If ADMIN_PASSWORD env var is set, compare directly (plain text).
-                // Otherwise fall back to BCrypt check against the hardcoded hash.
-                val passwordOk = if (envPass != null) {
-                    password == envPass
-                } else {
-                    org.mindrot.jbcrypt.BCrypt.checkpw(password, expectedHash)
+                if (envPass == null) {
+                    println("[WebAdmin/login] REFUSED: ADMIN_PASSWORD is not set, so no password " +
+                            "can be accepted. Set it in backend.env and restart. Calls are unaffected.")
                 }
+
+                // Constant-time compare so a wrong password cannot be narrowed down by timing.
+                val passwordOk = envPass != null &&
+                        java.security.MessageDigest.isEqual(
+                            password.toByteArray(Charsets.UTF_8),
+                            envPass.toByteArray(Charsets.UTF_8),
+                        )
 
                 println("[WebAdmin/login] attempt username='$username' " +
                         "envUser=${envUser ?: "(none)"} envPassSet=${envPass != null} " +

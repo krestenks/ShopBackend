@@ -89,6 +89,33 @@ fun maskPhone(phone: String?): String {
     return p.take(3) + "XXXX" + p.takeLast(2)
 }
 
+/** A per-number call-recording rule. Admin-only; see docs/call-recording-plan.md. */
+data class CallRecordingRule(
+    val id: Int,
+    val phone: String,
+    val active: Boolean,
+    /** Why this number is recorded. Required — the documented purpose. */
+    val reason: String,
+    val createdAt: Long,
+    val createdBy: String,
+    /** Epoch-ms after which the rule stops applying; null = no expiry. */
+    val expiresAt: Long?,
+) {
+    fun isLive(now: Long = System.currentTimeMillis()): Boolean =
+        active && (expiresAt == null || expiresAt > now)
+}
+
+/** One entry in the call-recording chain of custody. */
+data class CallRecordingAccess(
+    val id: Int,
+    val recordingId: Int?,
+    /** enable | disable | play | download | preserve | delete */
+    val action: String,
+    val actor: String,
+    val at: Long,
+    val note: String?,
+)
+
 /** A customer currently flagged for deletion, for the WebAdmin review list. */
 data class FlaggedCustomer(
     val id: Int,
@@ -574,6 +601,63 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             CREATE TABLE IF NOT EXISTS app_setting (
                 key   TEXT PRIMARY KEY,
                 value TEXT
+            );
+            ""","""
+            -- ── Call recording (admin-only) ──────────────────────────────────
+            -- Which numbers are recorded. Per-number by design, not blanket: recording every
+            -- customer to document one person's threats is disproportionate, and the inbound
+            -- dialplan already makes a per-caller decision, so this needs no new mechanism.
+            -- `reason` is NOT NULL on purpose: if the purpose cannot be stated, do not record.
+            CREATE TABLE IF NOT EXISTS call_recording_rule (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_e164  TEXT NOT NULL,
+                active      INTEGER NOT NULL DEFAULT 1,
+                reason      TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                created_by  TEXT NOT NULL,
+                expires_at  INTEGER
+            );
+            ""","""
+            CREATE TABLE IF NOT EXISTS call_recording (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id       INTEGER,
+                phone_e164    TEXT NOT NULL,
+                shop_id       INTEGER NOT NULL,
+                direction     TEXT NOT NULL DEFAULT 'inbound',
+                path          TEXT NOT NULL,
+                started_at    INTEGER NOT NULL,
+                duration_ms   INTEGER,
+                size_bytes    INTEGER,
+                sha256        TEXT,
+                preserved     INTEGER NOT NULL DEFAULT 0,
+                deleted_at    INTEGER
+            );
+            ""","""
+            -- Chain of custody. Every enable, playback, download, preserve and delete.
+            CREATE TABLE IF NOT EXISTS call_recording_access (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                recording_id  INTEGER,
+                action        TEXT NOT NULL,
+                actor         TEXT NOT NULL,
+                at            INTEGER NOT NULL,
+                note          TEXT
+            );
+            ""","""
+            -- ── Incident log ─────────────────────────────────────────────────
+            -- For what the phone system cannot capture: threats made in person. A
+            -- contemporaneous written account is what police and social services work from,
+            -- and it gives the recorded calls and SMS the context audio alone lacks.
+            CREATE TABLE IF NOT EXISTS incident_report (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id       INTEGER,
+                customer_id   INTEGER,
+                phone_e164    TEXT,
+                occurred_at   INTEGER NOT NULL,
+                channel       TEXT NOT NULL,   -- in_person | phone | sms | other
+                witnesses     TEXT,
+                account       TEXT NOT NULL,   -- what was said and done
+                reported_by   TEXT NOT NULL,
+                created_at    INTEGER NOT NULL
             );
             """,
             """
@@ -3373,6 +3457,208 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         connection.prepareStatement("INSERT OR REPLACE INTO app_setting(key, value) VALUES(?, ?)").use { st ->
             st.setString(1, key); st.setString(2, value); st.executeUpdate()
         }
+    }
+
+    // =========================================================================
+    // Call recording (admin-only)
+    // =========================================================================
+
+    /**
+     * Whether calls with [phone] are currently recorded, and the reason if so.
+     *
+     * Requires an **active, unexpired** rule. Rules expire by default (see
+     * [addCallRecordingRule]) because recording is a response to a specific situation, not a
+     * permanent change in how the shop treats someone — an expiry that has to be renewed is
+     * what stops this quietly becoming forever.
+     *
+     * Returns null when not recording, including on any error: a failure to read the rule must
+     * never cause recording, which is the fail-safe direction for a covert capability.
+     */
+    fun getActiveCallRecordingRule(phone: String, now: Long = System.currentTimeMillis()): CallRecordingRule? {
+        val p = phone.trim()
+        if (p.isBlank()) return null
+        val sql = """
+            SELECT id, phone_e164, active, reason, created_at, created_by, expires_at
+              FROM call_recording_rule
+             WHERE phone_e164 = ? AND active = 1
+               AND (expires_at IS NULL OR expires_at > ?)
+             ORDER BY id DESC LIMIT 1
+        """.trimIndent()
+        return runCatching {
+            connection.prepareStatement(sql).use { stmt ->
+                stmt.setString(1, p)
+                stmt.setLong(2, now)
+                val rs = stmt.executeQuery()
+                if (!rs.next()) null else CallRecordingRule(
+                    id = rs.getInt("id"),
+                    phone = rs.getString("phone_e164") ?: "",
+                    active = rs.getInt("active") != 0,
+                    reason = rs.getString("reason") ?: "",
+                    createdAt = rs.getLong("created_at"),
+                    createdBy = rs.getString("created_by") ?: "",
+                    expiresAt = rs.getLong("expires_at").takeIf { !rs.wasNull() },
+                )
+            }
+        }.getOrNull()
+    }
+
+    /** Adds a recording rule. [expiresAt] defaults to 90 days out; pass null for no expiry. */
+    fun addCallRecordingRule(
+        phone: String,
+        reason: String,
+        createdBy: String,
+        expiresAt: Long? = System.currentTimeMillis() + 90L * 24 * 60 * 60 * 1000,
+    ): Int {
+        val sql = """
+            INSERT INTO call_recording_rule (phone_e164, active, reason, created_at, created_by, expires_at)
+            VALUES (?, 1, ?, ?, ?, ?)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, phone.trim())
+            stmt.setString(2, reason.trim())
+            stmt.setLong(3, System.currentTimeMillis())
+            stmt.setString(4, createdBy)
+            if (expiresAt != null) stmt.setLong(5, expiresAt) else stmt.setNull(5, java.sql.Types.INTEGER)
+            stmt.executeUpdate()
+        }
+        val id = connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+        logCallRecordingAccess(null, "enable", createdBy, "phone=${maskPhone(phone)} reason=${reason.take(120)}")
+        return id
+    }
+
+    fun deactivateCallRecordingRule(id: Int, actor: String): Boolean {
+        connection.prepareStatement("UPDATE call_recording_rule SET active = 0 WHERE id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            val n = stmt.executeUpdate()
+            if (n > 0) logCallRecordingAccess(null, "disable", actor, "ruleId=$id")
+            return n > 0
+        }
+    }
+
+    fun listCallRecordingRules(): List<CallRecordingRule> {
+        val sql = """
+            SELECT id, phone_e164, active, reason, created_at, created_by, expires_at
+              FROM call_recording_rule ORDER BY active DESC, id DESC
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecordingRule>()
+            while (rs.next()) {
+                out += CallRecordingRule(
+                    id = rs.getInt("id"),
+                    phone = rs.getString("phone_e164") ?: "",
+                    active = rs.getInt("active") != 0,
+                    reason = rs.getString("reason") ?: "",
+                    createdAt = rs.getLong("created_at"),
+                    createdBy = rs.getString("created_by") ?: "",
+                    expiresAt = rs.getLong("expires_at").takeIf { !rs.wasNull() },
+                )
+            }
+            return out
+        }
+    }
+
+    /** Registers a recording the dialplan is about to create, returning its row id. */
+    fun createCallRecording(
+        phone: String,
+        shopId: Int,
+        direction: String,
+        path: String,
+        callId: Int? = null,
+        startedAt: Long = System.currentTimeMillis(),
+    ): Int {
+        val sql = """
+            INSERT INTO call_recording (call_id, phone_e164, shop_id, direction, path, started_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            if (callId != null) stmt.setInt(1, callId) else stmt.setNull(1, java.sql.Types.INTEGER)
+            stmt.setString(2, phone.trim())
+            stmt.setInt(3, shopId)
+            stmt.setString(4, direction)
+            stmt.setString(5, path)
+            stmt.setLong(6, startedAt)
+            stmt.executeUpdate()
+        }
+        return connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            if (rs.next()) rs.getInt(1) else -1
+        }
+    }
+
+    /**
+     * The access log, newest first. With [recordingId] null, returns the whole log including the
+     * enable/disable events that are not tied to a specific recording.
+     *
+     * This is the chain of custody: what was handed over, and who had looked at it first.
+     */
+    fun listCallRecordingAccess(recordingId: Int? = null, limit: Int = 500): List<CallRecordingAccess> {
+        val sql = buildString {
+            append("SELECT id, recording_id, action, actor, at, note FROM call_recording_access")
+            if (recordingId != null) append(" WHERE recording_id = ?")
+            append(" ORDER BY at DESC, id DESC LIMIT ?")
+        }
+        connection.prepareStatement(sql).use { stmt ->
+            var i = 1
+            if (recordingId != null) stmt.setInt(i++, recordingId)
+            stmt.setInt(i, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecordingAccess>()
+            while (rs.next()) {
+                out += CallRecordingAccess(
+                    id = rs.getInt("id"),
+                    recordingId = rs.getInt("recording_id").takeIf { !rs.wasNull() },
+                    action = rs.getString("action") ?: "",
+                    actor = rs.getString("actor") ?: "",
+                    at = rs.getLong("at"),
+                    note = rs.getString("note"),
+                )
+            }
+            return out
+        }
+    }
+
+    fun logCallRecordingAccess(recordingId: Int?, action: String, actor: String, note: String? = null) {
+        runCatching {
+            connection.prepareStatement(
+                "INSERT INTO call_recording_access (recording_id, action, actor, at, note) VALUES (?, ?, ?, ?, ?)"
+            ).use { stmt ->
+                if (recordingId != null) stmt.setInt(1, recordingId) else stmt.setNull(1, java.sql.Types.INTEGER)
+                stmt.setString(2, action)
+                stmt.setString(3, actor)
+                stmt.setLong(4, System.currentTimeMillis())
+                stmt.setString(5, note?.take(500))
+                stmt.executeUpdate()
+            }
+        }
+    }
+
+    /**
+     * The HMAC key used to sign admin/owner session cookies, generated once and persisted.
+     *
+     * Without a signing key, Ktor's `cookie<T>(name)` serialises a session as plaintext and does
+     * not authenticate it — so anyone who can reach the port can hand-write an `ADMIN_SESSION`
+     * cookie and be the admin. That is tolerable for a tailnet-only booking admin and not
+     * tolerable once the same session gates recordings of a vulnerable person.
+     *
+     * Kept in `app_setting` rather than an env var so there is nothing to configure and nothing
+     * to forget on a redeploy; it is no more exposed than ADMIN_PASSWORD in backend.env, since
+     * both are readable by the backend's own user. Rotating it is simply deleting the row, which
+     * invalidates every existing session.
+     *
+     * 32 bytes from [java.security.SecureRandom], hex-encoded.
+     */
+    fun getOrCreateSessionSigningKey(): String {
+        getSetting("session_signing_key")?.trim()?.takeIf { it.length >= 32 }?.let { return it }
+        val bytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(bytes)
+        val hex = bytes.joinToString("") { "%02x".format(it) }
+        setSetting("session_signing_key", hex)
+        println("[Auth] Generated a new session signing key; existing admin/owner sessions are now invalid.")
+        return hex
     }
 
     /** Admin phone that always receives SIP-reachability alerts (set in the web admin; null = none). */

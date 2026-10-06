@@ -1,9 +1,34 @@
 # Call recording for evidence — plan
 
-**Status: plan only. Nothing built, nothing deployed, no config changed.**
+**Status: decisions made 2026-10-06, implementation in progress. Nothing deployed yet.**
 
 Goal: let the admin record calls from a specific threatening customer, and let only the admin play
 them back.
+
+## Decisions (Kresten, 2026-10-06)
+
+| Question | Decision |
+|---|---|
+| Which channels | **All three** — phone, in person, and SMS |
+| Announce the recording | **No.** Covert. |
+| Inbound / outbound calls | **Both** ("I want it all recorded") |
+| Purpose | **Handover to police or social services so he gets help.** Not litigation. |
+
+Consequences of those decisions, which this document now follows:
+
+- **Covert recording is lawful here**, so the decision does not undermine the goal. Penal Code
+  § 263 criminalises recording conversations you are *not* a party to; the shop is a party to its
+  own calls. The residual issue is GDPR transparency (Art 13) — a compliance matter, not a
+  criminal one — and "documenting threats against staff, handed to the authorities" is a strong
+  legitimate interest. Raise it once with whoever handles data protection; it is not re-litigated
+  below.
+- **No notice playback.** §1's dialplan hook drops the `Playback(rec-notice)` line. The
+  announcement WAV is not generated.
+- **The purpose is handover, not court.** That lowers the bar on chain-of-custody formality but
+  *raises* the value of §4's export bundle: a social worker or officer wants a clear, labelled
+  package, not a folder of WAVs. Keep the hashing — it is nearly free and makes the package
+  credible.
+- **"In person" cannot be captured by the phone system.** Covered by §8 below, which is new.
 
 ---
 
@@ -37,7 +62,7 @@ Suggested order:
 I am not a lawyer and this is not legal advice — § 266 and the GDPR points below are the
 constraints that shape the design, and they should be confirmed with one.
 
-### 0.2 Recording is legal here, but it has to be announced
+### 0.2 Recording is legal here — the announcement question is settled (no notice)
 
 As I understand it, recording a conversation **you are a party to** is not the offence in Denmark —
 Penal Code § 263 targets recording conversations you are *not* part of. The shop is a party to its
@@ -55,10 +80,10 @@ question may touch special-category data. So:
   important design consequence — see §1.
 - A **DPIA** is worth doing, and it is cheap when the scope is one number.
 
-**The tension you need to decide, not me:** an announcement tells him he is being recorded, which
-may stop the threats (good for staff, bad for evidence) or escalate them. The alternative —
-recording silently — is a GDPR breach and gives the defence something to attack. I would announce;
-but it is your risk and your lawyer's call.
+**Decided: no announcement.** Recorded here for the record — this was raised, considered, and
+settled by Kresten on 2026-10-06 on the grounds that the purpose is getting the person help via
+police/social services rather than suing him. Lawful under § 263 as a party to the call; the GDPR
+transparency point is the residual item for his data-protection advisor.
 
 ### 0.3 "Only the admin" is not currently enforceable — fix that first
 
@@ -118,14 +143,14 @@ The backend already receives the caller's number there and already returns a rou
    **before** `Dial`, so both legs are captured once bridged.
 
 ```
- same => n,ExecIf($["${REC}" = "1"]?Playback(/usr/share/asterisk/sounds/shopbackend/rec-notice))
  same => n,ExecIf($["${REC}" = "1"]?MixMonitor(${REC_FILE},b))
  same => n,Dial(${TARGETS},30)
 ```
 
-`app_mixmonitor.so` is loaded and core-supported. The notice WAV is generated the same way the
-existing `shopN-welcome-open.wav` prompts are (pico2wave), and played by absolute path exactly as
-they are.
+No notice playback: covert by decision. One line, not two, which also means the recorded call is
+not delayed and sounds identical to any other.
+
+`app_mixmonitor.so` is loaded and core-supported.
 
 ### Permissions, which happen to already work
 
@@ -134,8 +159,10 @@ the backend user `phone` is in group `asterisk` (137). So Asterisk can write and
 read, with no permission changes. Recordings should go in a **subdirectory** of that, not the shared
 spool root.
 
-Outbound calls (manager → customer) are a second, separate path and are **not** covered by this
-hook. Decide whether you need them; the threats are likely on inbound.
+**Outbound calls are in scope too** ("I want it all recorded"), and they are a *different* dialplan
+path — the manager dials out through the shop's trunk, so there is no `from-gsm-shopN` context and
+no inbound verdict call. That path needs its own `MixMonitor` hook keyed on the dialled number
+rather than the caller id. Treat it as a separate, smaller piece of stage 3.
 
 ---
 
@@ -258,6 +285,50 @@ caller but the one, so the default path is byte-for-byte unchanged in behaviour;
 first (it has a dialplan but no real traffic); and `MixMonitor` failing must not break the call —
 verify that a bad path or full disk degrades to "call proceeds, no recording", never "call drops".
 A test asserting the generated dialplan for a non-recorded shop is unchanged belongs here.
+
+## 8. The in-person channel
+
+The phone system cannot record what happens across the counter. Two ways to cover it, and they
+are not alternatives - the first is worth doing regardless.
+
+### 8.1 Incident log (backend, no app release)
+
+Staff record each incident: when, which shop, who was present, what was said and done, free text,
+optionally linked to the customer record. Timestamped at write time so it is contemporaneous.
+
+This is what police and social services actually work from, and it is the cheapest thing here -
+one table, one form, one export. It also gives the phone and SMS incidents context that audio
+alone lacks ("he said X, then hung up and came to the shop").
+
+### 8.2 Voice memo in the manager app (app repo - bigger)
+
+You said you want to hand over **the voice**. For in-person incidents that means the manager's
+handset recording it, since nothing else is in the room.
+
+A "record incident" button in ShopManager that captures audio on the phone and uploads it to the
+backend alongside the incident-log entry. Same lawfulness reasoning as the calls: the staff member
+is a party to the conversation. Caveats worth knowing:
+
+- It lives in the **app repo** (`C:\Users\krest\AndroidStudioProjects\ShopManager`), so it needs a
+  release and an OTA - a much longer loop than a backend change.
+- It needs `RECORD_AUDIO`, which the app already holds for calls.
+- A shop recording captures whoever else is nearby. Staff are party to their own conversation, but
+  unrelated customers in earshot are not - keep recordings short and incident-scoped rather than
+  leaving it running.
+- Upload must survive a bad tailnet link, so it needs a local queue and retry. That is the part
+  that makes it "bigger", not the recording itself.
+
+**Recommendation:** build 8.1 now with the rest; treat 8.2 as a follow-up once the backend side is
+proven.
+
+## 9. SMS - you already have this
+
+Every SMS body is stored in `sms_message`, and since 2026-10-04 retention is 730 days. Nothing
+needs building to *capture* it; what is missing is a way to get it out. Covered by the export
+bundle in section 4: for a given number, produce his full SMS history plus call log plus any
+recordings and incident-log entries, as one labelled package.
+
+This is the fastest evidence you can have, and it exists today.
 
 ## 7. What I need from you
 

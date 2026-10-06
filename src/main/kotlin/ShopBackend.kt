@@ -251,10 +251,26 @@ object ShopBackend {
                 json(Json { prettyPrint = false; ignoreUnknownKeys = true })
             }
             install(Sessions) {
-                cookie<WebAdmin.AdminSession>("ADMIN_SESSION")
-                cookie<WebAdmin.OwnerSession>("OWNER_SESSION")
-                cookie<WebAdmin.ImpersonationSession>("IMPERSONATION_SESSION")
-                cookie<SetupAppRoutes.SetupAppSession>("SETUP_APP_SESSION")
+                // Sign every session cookie. An unsigned `cookie<T>(name)` is plaintext and
+                // unauthenticated, so an ADMIN_SESSION cookie could simply be hand-written by
+                // anyone who can reach this port — which on the tailnet includes every manager
+                // handset. Signing is what makes "only the admin" an enforced statement rather
+                // than an aspirational one.
+                //
+                // No `cookie.secure = true`: the backend is served over plain HTTP inside the
+                // WireGuard tailnet, so requiring Secure would break every login. The transport
+                // is encrypted by the tailnet, not by TLS.
+                val signingKey = io.ktor.util.hex(db.getOrCreateSessionSigningKey())
+                fun <T : Any> CookieSessionBuilder<T>.harden() {
+                    cookie.path = "/"
+                    cookie.httpOnly = true
+                    cookie.extensions["SameSite"] = "Lax"
+                    transform(SessionTransportTransformerMessageAuthentication(signingKey))
+                }
+                cookie<WebAdmin.AdminSession>("ADMIN_SESSION") { harden() }
+                cookie<WebAdmin.OwnerSession>("OWNER_SESSION") { harden() }
+                cookie<WebAdmin.ImpersonationSession>("IMPERSONATION_SESSION") { harden() }
+                cookie<SetupAppRoutes.SetupAppSession>("SETUP_APP_SESSION") { harden() }
             }
             JwtConfig.install(this, db)
 
