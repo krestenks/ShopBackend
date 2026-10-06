@@ -173,6 +173,53 @@ class RecordingAccessIsolationTest {
             "it must not enumerate recordings")
     }
 
+    // ─── The control on the customer page ────────────────────────────────────
+
+    @Test
+    fun `the customer page recording block is gated on an AdminSession`() {
+        // The whole web backend already requires an AdminSession, but the block that switches
+        // covert recording on and off re-checks at the point of use, so it cannot leak if the
+        // global gate is ever changed.
+        val editPage = webAdmin
+            .substringAfter("""get("/customers/edit")""")
+            .substringBefore("""get("/customers/comms")""")
+
+        assertTrue(editPage.contains("Call recording"),
+            "sanity: the recording block should be on the customer page")
+        val block = editPage.substringAfter("// ── Call recording")
+        assertTrue(
+            editPage.substringBefore("// ── Call recording").length < editPage.length,
+            "sanity: block marker found",
+        )
+        assertTrue(block.contains("sessions.get<AdminSession>() != null"),
+            "the recording controls must be rendered only for an admin session")
+        // The audio link must point at the single guarded streaming route, not at a file path.
+        assertTrue(block.contains("/recordings/audio?id="),
+            "playback must go through the guarded streaming route")
+        assertFalse(Regex("""href\s*=\s*"[^"]*\.wav""").containsMatchIn(block),
+            "the page must never link straight to a .wav on disk")
+    }
+
+    @Test
+    fun `the toggle posts to a guarded route under the recordings prefix`() {
+        assertTrue(webAdmin.contains("""post("/recordings/toggle")"""),
+            "the customer-page checkbox must post to a /recordings route, so the single-prefix " +
+                "audit rule still answers 'is anything outside /recordings serving recordings?'")
+        assertFalse(webAdmin.contains("""post("/customers/recording")"""),
+            "a recording route outside /recordings defeats the prefix invariant")
+    }
+
+    @Test
+    fun `turning recording on requires a stated reason`() {
+        val toggle = webAdmin
+            .substringAfter("""post("/recordings/toggle")""")
+            .substringBefore("""get("/recordings/audio")""")
+
+        assertTrue(toggle.contains("reason.isBlank()"),
+            "enabling covert recording with no stated purpose must be refused, not silently allowed")
+        assertTrue(toggle.contains("requireAdminForRecordings()"))
+    }
+
     @Test
     fun `sanity - the files under test were actually read`() {
         assertTrue(webAdmin.length > 10_000)

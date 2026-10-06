@@ -3671,6 +3671,27 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /** Recordings for one number, newest first — for the customer page. */
+    fun listCallRecordingsForPhone(phone: String, limit: Int = 100): List<CallRecording> {
+        val p = phone.trim()
+        if (p.isBlank()) return emptyList()
+        val sql = """
+            SELECT id, call_id, phone_e164, shop_id, direction, path, started_at,
+                   duration_ms, size_bytes, sha256, preserved, deleted_at
+              FROM call_recording
+             WHERE phone_e164 = ? AND deleted_at IS NULL
+             ORDER BY started_at DESC, id DESC LIMIT ?
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, p)
+            stmt.setInt(2, limit)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<CallRecording>()
+            while (rs.next()) out += readCallRecording(rs)
+            return out
+        }
+    }
+
     /** One recording by id, or null. */
     fun getCallRecording(id: Int): CallRecording? {
         val sql = """

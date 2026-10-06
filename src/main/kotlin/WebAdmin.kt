@@ -84,6 +84,11 @@ class WebAdmin(
         }
     }
 
+    /** Timestamps in admin pages: Europe/Copenhagen, same pattern used throughout. */
+    private fun fmtTs(ms: Long): String = java.time.Instant.ofEpochMilli(ms)
+        .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+        .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
+
     private suspend fun ApplicationCall.respondAdminPage(
         titleText: String,
         subtitle: String? = null,
@@ -2661,6 +2666,103 @@ class WebAdmin(
                                 p("hint") { +"To remove from blacklist, go to the relevant shop's Blacklist page in the mobile app, or use the Blacklist API." }
                             }
 
+                            // ── Call recording — ADMIN ONLY ───────────────────
+                            // The whole web backend already requires an AdminSession (the global
+                            // intercept), so this page is admin-only by construction. The check is
+                            // repeated here anyway so the control cannot leak if the gate above
+                            // ever changes, and so the intent is visible at the point of use.
+                            if (call.sessions.get<AdminSession>() != null) {
+                                val recRule = db.getActiveCallRecordingRule(customer.phone)
+                                val recordings = db.listCallRecordingsForPhone(customer.phone)
+
+                                hr()
+                                h3 { +"🔴 Call recording" }
+                                form(action = "/recordings/toggle", method = FormMethod.post) {
+                                    hiddenInput { name = "id"; value = customer.id.toString() }
+                                    label {
+                                        checkBoxInput {
+                                            name = "enabled"
+                                            checked = recRule != null
+                                            onChange = "this.form.reason.required = this.checked"
+                                        }
+                                        +" Record calls with ${customer.phone}"
+                                    }
+                                    br()
+                                    label { +"Reason (required to turn on — kept on the record)" }
+                                    textInput {
+                                        name = "reason"
+                                        value = recRule?.reason ?: ""
+                                        placeholder = "e.g. threatening staff — documenting for police"
+                                        if (recRule == null) required = false
+                                    }
+                                    br()
+                                    submitInput(classes = "btn primary") { value = "Save recording setting" }
+                                }
+                                if (recRule != null) {
+                                    p {
+                                        span("badge warn") { +"Recording" }
+                                        +" since ${fmtTs(recRule.createdAt)}"
+                                        recRule.expiresAt?.let { +" · expires ${fmtTs(it)}" }
+                                    }
+                                    p("hint") {
+                                        +("Both inbound and outbound calls with this number are "
+                                          + "recorded, with no announcement. Expires unless renewed; "
+                                          + "un-tick to stop immediately.")
+                                    }
+                                } else {
+                                    p("hint") {
+                                        +("Off. Recording applies to this customer's registered "
+                                          + "number exactly as shown above — if the modem reports a "
+                                          + "different format, correct the phone field first.")
+                                    }
+                                }
+
+                                h4 { +"Recordings (${recordings.size})" }
+                                if (recordings.isEmpty()) {
+                                    p("hint") { +"None yet." }
+                                } else {
+                                    table {
+                                        thead { tr { th { +"When" }; th { +"Dir" }; th { +"Audio" }; th { +"" }; th { +"" } } }
+                                        tbody {
+                                            for (rec in recordings) {
+                                                val f = java.io.File(rec.path)
+                                                val haveAudio = f.isFile && f.length() > 0
+                                                tr {
+                                                    td { +fmtTs(rec.startedAt) }
+                                                    td { +rec.direction }
+                                                    td {
+                                                        if (haveAudio) +"${f.length() / 1024} kB"
+                                                        else span("badge") { +"no audio — not answered" }
+                                                    }
+                                                    td {
+                                                        if (haveAudio) {
+                                                            // Playback goes through the one guarded
+                                                            // streaming route; this is only a link.
+                                                            a(href = "/recordings/audio?id=${rec.id}", classes = "btn") { +"▶ Play" }
+                                                        }
+                                                    }
+                                                    td {
+                                                        form(action = "/recordings/preserve", method = FormMethod.post) {
+                                                            hiddenInput { name = "id"; value = rec.id.toString() }
+                                                            hiddenInput { name = "on"; value = if (rec.preserved) "0" else "1" }
+                                                            hiddenInput { name = "back"; value = "/customers/edit?id=${customer.id}" }
+                                                            submitInput(classes = "btn") {
+                                                                value = if (rec.preserved) "Release" else "Keep"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    p("hint") {
+                                        +("Kept recordings are never auto-deleted; the rest are "
+                                          + "removed after ${asterisk.CallRecordingReaper.RECORDING_RETENTION_DAYS} days. "
+                                          + "Every playback is logged.")
+                                    }
+                                }
+                            }
+
                             hr()
                             h3 { +"Danger zone" }
                             form(action = "/customers/delete", method = FormMethod.post) {
@@ -2925,11 +3027,6 @@ class WebAdmin(
             // itself the sensitive fact, and 403 would confirm the page exists.
             // =================================================================
 
-            /** Timestamps on the recording pages, same zone and pattern as the other admin pages. */
-            fun fmtTs(ms: Long): String = java.time.Instant.ofEpochMilli(ms)
-                .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
-                .format(DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
-
             /**
              * Returns the admin's username, or null (having already answered 404) if the caller is
              * anything else — including a logged-in shop owner.
@@ -3082,7 +3179,48 @@ class WebAdmin(
                 if (id != null) {
                     db.setCallRecordingPreserved(id, params["on"] == "1", actor)
                 }
-                call.respondRedirect("/recordings")
+                // Return to wherever the button was pressed. Only relative in-app paths, so a
+                // crafted `back` cannot bounce the admin to another site.
+                val back = params["back"]?.takeIf { it.startsWith("/") && !it.startsWith("//") }
+                call.respondRedirect(back ?: "/recordings")
+            }
+
+            // The checkbox rendered on the customer page posts here. The ROUTE deliberately lives
+            // under /recordings even though the control is shown elsewhere: keeping every
+            // recording route under one prefix is what makes "is anything outside here serving
+            // recordings?" a one-line check, and RecordingAccessIsolationTest enforces it.
+            // Same guard as the rest — this switches covert recording of a real person on and off.
+            post("/recordings/toggle") {
+                val actor = call.requireAdminForRecordings() ?: return@post
+                val params = call.receiveParameters()
+                val id = params["id"]?.toIntOrNull()
+                    ?: return@post call.respondRedirect("/customers")
+                val customer = db.getCustomerById(id)
+                    ?: return@post call.respondRedirect("/customers")
+
+                val wantOn = params["enabled"] == "on"
+                val reason = params["reason"]?.trim().orEmpty()
+                val existing = db.getActiveCallRecordingRule(customer.phone)
+
+                when {
+                    wantOn && existing == null -> {
+                        // A reason is mandatory to switch it on; without one, do nothing rather
+                        // than record someone with no stated purpose.
+                        if (reason.isBlank()) {
+                            println("[Recording] REFUSED to enable for customer $id: no reason given")
+                        } else {
+                            db.addCallRecordingRule(customer.phone, reason, actor)
+                        }
+                    }
+                    !wantOn && existing != null -> db.deactivateCallRecordingRule(existing.id, actor)
+                    wantOn && existing != null && reason.isNotBlank() && reason != existing.reason -> {
+                        // Reason edited while already on: supersede the rule so the change is a
+                        // new audited row rather than a silent rewrite of the old one.
+                        db.deactivateCallRecordingRule(existing.id, actor)
+                        db.addCallRecordingRule(customer.phone, reason, actor)
+                    }
+                }
+                call.respondRedirect("/customers/edit?id=$id")
             }
 
             // Streams the audio. Never a static route and never a guessable path: the id is looked
