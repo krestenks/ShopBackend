@@ -366,6 +366,8 @@ data class VoiceCallRecord(
     val endedAt: Long?,
     val linkedBookingId: Int?,
     val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
+    /** Name of [shopId]; lets the app label a call without a separate shop lookup. */
+    val shopName: String? = null,
 )
 
 @Serializable
@@ -437,6 +439,7 @@ data class SmsUnhandledNotification(
 data class SmsSearchHit(
     val messageId: Int,
     val shopId: Int,
+    val shopName: String? = null,
     val counterpartyPhone: String,
     val customerId: Int?,
     val customerName: String?,
@@ -452,6 +455,7 @@ data class SmsSearchHit(
 @Serializable
 data class SmsThreadHit(
     val shopId: Int,
+    val shopName: String? = null,
     val counterpartyPhone: String,
     val customerId: Int?,
     val customerName: String?,
@@ -1706,8 +1710,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                c.name  AS customer_name,
                cs.name AS callapp_name,
                vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
-               vc.linked_booking_id, vc.operator_phone
+               vc.linked_booking_id, vc.operator_phone,
+               sh.name AS shop_name
         FROM voice_call vc
+        LEFT JOIN shops sh        ON sh.id = vc.shop_id
         LEFT JOIN customers c     ON c.id  = vc.customer_id
         -- Join screening via explicit customer_id first; fall back to a phone match for unknown callers
         LEFT JOIN customers cph   ON cph.phone = vc.from_phone
@@ -1797,6 +1803,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 endedAt = rs.getLong("ended_at").takeIf { !rs.wasNull() },
                 linkedBookingId = rs.getInt("linked_booking_id").takeIf { !rs.wasNull() },
                 operatorPhone = rs.getString("operator_phone"),
+                shopName = rs.getString("shop_name")?.trim()?.takeIf { it.isNotBlank() },
             )
         }
         return result
@@ -5089,11 +5096,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val ph = shopIds.joinToString(",") { "?" }
         val like = "%$q%"
         val sql = """
-            SELECT m.id, m.shop_id, m.counterparty_phone, m.customer_id,
+            SELECT m.id, m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
                    m.direction, m.body, m.created_at,
                    (SELECT tr.translated_body FROM sms_translation tr WHERE tr.message_id = m.id LIMIT 1) AS translated_body
             FROM sms_message m
+            LEFT JOIN shops sh      ON sh.id = m.shop_id
             LEFT JOIN customers c   ON c.id = m.customer_id
             LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
             LEFT JOIN customer_callapp_screening cs
@@ -5116,6 +5124,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 out += SmsSearchHit(
                     messageId = rs.getInt("id"),
                     shopId = rs.getInt("shop_id"),
+                    shopName = rs.getString("shop_name")?.trim()?.takeIf { it.isNotBlank() },
                     counterpartyPhone = rs.getString("counterparty_phone"),
                     customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
                     customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
@@ -5137,10 +5146,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val like = "%$q%"
         val phoneLike = phoneMatchDigits(q)?.let { "%$it%" }
         val sql = """
-            SELECT m.shop_id, m.counterparty_phone, m.customer_id,
+            SELECT m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
                    m.body AS last_body, m.created_at AS last_at
             FROM sms_message m
+            LEFT JOIN shops sh      ON sh.id = m.shop_id
             LEFT JOIN customers c   ON c.id = m.customer_id
             LEFT JOIN customers cph ON cph.phone = m.counterparty_phone
             LEFT JOIN customer_callapp_screening cs
@@ -5166,6 +5176,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 out += SmsThreadHit(
                     shopId = rs.getInt("shop_id"),
+                    shopName = rs.getString("shop_name")?.trim()?.takeIf { it.isNotBlank() },
                     counterpartyPhone = rs.getString("counterparty_phone"),
                     customerId = rs.getInt("customer_id").takeIf { !rs.wasNull() },
                     customerName = rs.getString("customer_name")?.trim()?.takeIf { it.isNotBlank() },
