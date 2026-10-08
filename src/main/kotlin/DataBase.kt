@@ -2235,6 +2235,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /** Current star state for [phone]; false when the number has no customer row. */
+    fun isCustomerStarredByPhone(phone: String): Boolean {
+        connection.prepareStatement(
+            "SELECT 1 FROM customers WHERE phone = ? AND starred_at IS NOT NULL LIMIT 1"
+        ).use { stmt ->
+            stmt.setString(1, phone)
+            return stmt.executeQuery().next()
+        }
+    }
+
     /**
      * Stars or un-stars the customer with [phone], creating the customer row if the number has
      * none yet (a caller who never had a record). Returns the customer id.

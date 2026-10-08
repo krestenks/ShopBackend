@@ -37,8 +37,11 @@ class CustomerStarTest {
         val shop = db.addShopForOwner(1, "Alpha", null, null)
         db.sms(shop)
         assertNull(db.getCustomerIdByPhone(phone))
+        assertFalse(db.isCustomerStarredByPhone(phone), "an unknown number is simply not starred")
+        assertNull(db.getCustomerIdByPhone(phone), "reading the state must not create a customer")
 
         val id = db.setCustomerStarredByPhone(phone, true)
+        assertTrue(db.isCustomerStarredByPhone(phone))
 
         assertEquals(id, db.getCustomerIdByPhone(phone))
         assertTrue(db.getCustomerById(id)!!.starred)

@@ -771,6 +771,27 @@ class MobileApi(
                  * their shops never dealt with. The star is shared: it is on the customer, not on
                  * the manager.
                  */
+                get("/api/mobile/manager/shops/{shopId}/customer-star") {
+                    val loginInfo = authenticateManager() ?: return@get
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        return@get call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                    }
+                    val phone = normalizeCustomerPhone(call.request.queryParameters["phone"].orEmpty())
+                    if (phone.isBlank()) {
+                        return@get call.respond(HttpStatusCode.BadRequest, "A phone number is required")
+                    }
+                    // Read-only, and an unknown number is simply "not starred": no contact check,
+                    // nothing is created.
+                    call.respond(
+                        StarCustomerResponse(
+                            customerId = db.getCustomerIdByPhone(phone) ?: -1,
+                            starred = db.isCustomerStarredByPhone(phone),
+                        )
+                    )
+                }
+
                 put("/api/mobile/manager/shops/{shopId}/customer-star") {
                     val loginInfo = authenticateManager() ?: return@put
                     val shopId = call.parameters["shopId"]?.toIntOrNull()
