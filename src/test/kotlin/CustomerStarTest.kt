@@ -99,6 +99,20 @@ class CustomerStarTest {
         assertFalse(db.shopHasContactWith(a, "+4599999999"))
     }
 
+    @Test
+    fun `un-starring clears every customer row for the number, even a duplicate`() {
+        val db = freshDb()
+        val first = db.insertNewCustomer(phone)
+        db.insertNewCustomer(phone)   // phone is not UNIQUE: a twin row can exist
+        db.setCustomerStarredByPhone(phone, true)
+        assertTrue(db.isCustomerStarredByPhone(phone))
+
+        db.setCustomerStarredByPhone(phone, false)
+
+        assertFalse(db.isCustomerStarredByPhone(phone), "no twin may keep the star alive")
+        assertEquals(first, db.getCustomerIdByPhone(phone))
+    }
+
     // ─── Retention ───────────────────────────────────────────────────────────
 
     private fun DataBase.retentionReady(): DataBase {

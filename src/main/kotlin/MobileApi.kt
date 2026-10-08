@@ -782,8 +782,12 @@ class MobileApi(
                     if (phone.isBlank()) {
                         return@get call.respond(HttpStatusCode.BadRequest, "A phone number is required")
                     }
-                    // Read-only, and an unknown number is simply "not starred": no contact check,
-                    // nothing is created.
+                    // Read-only; nothing is created. A number this shop never dealt with answers
+                    // exactly like an unknown one, so the endpoint cannot be used to probe which
+                    // numbers are customers or starred elsewhere.
+                    if (!db.shopHasContactWith(shopId, phone)) {
+                        return@get call.respond(StarCustomerResponse(customerId = -1, starred = false))
+                    }
                     call.respond(
                         StarCustomerResponse(
                             customerId = db.getCustomerIdByPhone(phone) ?: -1,
@@ -808,7 +812,10 @@ class MobileApi(
                     if (phone.isBlank()) {
                         return@put call.respond(HttpStatusCode.BadRequest, "A phone number is required")
                     }
-                    if (!db.shopHasContactWith(shopId, phone)) {
+                    // Un-starring never needs proof of contact: once message/call retention has purged
+                    // the history, a starred number would otherwise be impossible to un-star (and
+                    // would stay exempt from customer retention for good).
+                    if (body.starred && !db.shopHasContactWith(shopId, phone)) {
                         return@put call.respond(HttpStatusCode.Forbidden, "No contact with this number at this shop")
                     }
 

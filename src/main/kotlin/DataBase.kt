@@ -2251,9 +2251,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      */
     fun setCustomerStarredByPhone(phone: String, starred: Boolean): Int {
         val id = ensureCustomerByPhone(phone)
-        connection.prepareStatement("UPDATE customers SET starred_at = ? WHERE id = ?").use { stmt ->
+        // By phone, not id: customers.phone is not UNIQUE, and the lists read the star by phone, so
+        // a duplicate row left starred would make an un-star appear not to stick.
+        connection.prepareStatement("UPDATE customers SET starred_at = ? WHERE phone = ?").use { stmt ->
             if (starred) stmt.setLong(1, System.currentTimeMillis()) else stmt.setNull(1, java.sql.Types.INTEGER)
-            stmt.setInt(2, id)
+            stmt.setString(2, phone)
             stmt.executeUpdate()
         }
         return id
