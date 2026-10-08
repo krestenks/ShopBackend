@@ -64,6 +64,21 @@ object CallRecordingReaper {
     /** A file is only finalised once it has had time to be closed by MixMonitor. */
     private const val SETTLE_MS = 5L * 60 * 1000
 
+    /**
+     * A RIFF/WAV header is exactly 44 bytes, so a file of that size contains **no audio samples**.
+     *
+     * This is the normal result of a call that was never answered: MixMonitor's `b` option only
+     * writes while the channel is bridged, but the file is opened (and the header written) as soon
+     * as the application runs. Treating "file exists and is non-empty" as "we have audio" showed
+     * such a recording as "0 kB" with a working player that plays silence — which reads as a
+     * broken recording rather than an unanswered call. Observed for real on two calls from the
+     * number this feature was built for.
+     */
+    const val WAV_HEADER_BYTES = 44L
+
+    /** True when the file holds actual audio rather than just a header (or nothing). */
+    fun hasAudio(f: File): Boolean = f.isFile && f.length() > WAV_HEADER_BYTES
+
     data class Summary(
         val finalised: Int = 0,
         val noAudio: Int = 0,
@@ -121,7 +136,7 @@ object CallRecordingReaper {
         for (rec in db.listUnfinalisedCallRecordings()) {
             if (now - rec.startedAt < SETTLE_MS) continue   // may still be recording
             val f = File(rec.path)
-            if (f.isFile && f.length() > 0) {
+            if (hasAudio(f)) {
                 val hash = runCatching { sha256(f) }.getOrNull()
                 db.finaliseCallRecording(rec.id, f.length(), hash, null)
                 db.logCallRecordingAccess(rec.id, "record-confirmed", "system",
@@ -129,11 +144,14 @@ object CallRecordingReaper {
                 finalised++
             } else {
                 // No audio: with MixMonitor's `b` option a call that was never answered writes
-                // nothing. Recorded as size 0 so it stops being re-examined every hour, and so
-                // the chain of custody says plainly that no audio exists.
+                // no samples — either no file at all, or a bare 44-byte header. Recorded as
+                // size 0 either way, so it stops being re-examined every hour and the chain of
+                // custody says plainly that no audio exists.
+                val why = if (f.isFile) "header only (${f.length()} bytes), no audio samples"
+                          else "no file at the expected path"
                 db.finaliseCallRecording(rec.id, 0L, null, null)
                 db.logCallRecordingAccess(rec.id, "no-audio", "system",
-                    "no file at the expected path — call was most likely never answered")
+                    "$why — the call was most likely never answered")
                 noAudio++
             }
         }

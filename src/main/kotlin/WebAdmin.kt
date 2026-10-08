@@ -2726,7 +2726,9 @@ class WebAdmin(
                                         tbody {
                                             for (rec in recordings) {
                                                 val f = java.io.File(rec.path)
-                                                val haveAudio = f.isFile && f.length() > 0
+                                                // A 44-byte file is a bare WAV header: the call was never answered, so
+                                                // there are no audio samples in it.
+                                                val haveAudio = asterisk.CallRecordingReaper.hasAudio(f)
                                                 tr {
                                                     td { +fmtTs(rec.startedAt) }
                                                     td { +rec.direction }
@@ -3135,7 +3137,9 @@ class WebAdmin(
                                 tbody {
                                     for (rec in recordings) {
                                         val f = java.io.File(rec.path)
-                                        val haveAudio = f.isFile && f.length() > 0
+                                        // A 44-byte file is a bare WAV header: the call was never answered, so
+                                        // there are no audio samples in it.
+                                        val haveAudio = asterisk.CallRecordingReaper.hasAudio(f)
                                         tr {
                                             td { +fmtTs(rec.startedAt) }
                                             td { +rec.phone }

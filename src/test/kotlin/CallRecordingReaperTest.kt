@@ -31,8 +31,14 @@ class CallRecordingReaperTest {
     private fun tempDir(): File =
         Files.createTempDirectory("reaper-rec").toFile().also { it.deleteOnExit() }
 
+    /** A bare RIFF/WAV header: what an unanswered call leaves behind. 44 bytes, no samples. */
+    private val headerOnly = ByteArray(44) { 0 }
+
+    /** A header plus samples, i.e. a recording that actually captured something. */
+    private val withSamples = ByteArray(44 + 200) { 0 }
+
     /** Creates a recording row whose file exists, started [daysAgo] before now. */
-    private fun DataBase.recordingWithFile(dir: File, daysAgo: Int, bytes: ByteArray = "audio".toByteArray()): Int {
+    private fun DataBase.recordingWithFile(dir: File, daysAgo: Int, bytes: ByteArray = withSamples): Int {
         val f = File(dir, "rec-$daysAgo-${System.nanoTime()}.wav")
         f.writeBytes(bytes)
         return createCallRecording(
@@ -118,15 +124,48 @@ class CallRecordingReaperTest {
     @Test
     fun `a settled file gets its size and a sha256`() {
         val db = freshDb(); val dir = tempDir()
-        val id = db.recordingWithFile(dir, daysAgo = 1, bytes = "hello".toByteArray())
+        val id = db.recordingWithFile(dir, daysAgo = 1)
 
         val s = CallRecordingReaper.run(db, retentionDays = 365, now = t0)
 
         assertEquals(1, s.finalised)
         val rec = db.getCallRecording(id)!!
-        assertEquals(5L, rec.sizeBytes)
-        // sha256("hello")
-        assertEquals("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", rec.sha256)
+        assertEquals(withSamples.size.toLong(), rec.sizeBytes)
+        assertEquals(64, rec.sha256?.length, "a full SHA-256 hex digest")
+    }
+
+    @Test
+    fun `a header-only file is no audio, not a zero-length recording`() {
+        // Exactly what both calls from the harassment number produced on 2026-10-06: MixMonitor
+        // opens the file and writes the 44-byte header immediately, but option `b` means no
+        // samples are written unless the call is answered. Treating this as "has audio" showed
+        // "0 kB" with a player that plays silence, which reads as a broken recording rather than
+        // an unanswered call.
+        val db = freshDb(); val dir = tempDir()
+        val id = db.recordingWithFile(dir, daysAgo = 1, bytes = headerOnly)
+
+        val s = CallRecordingReaper.run(db, retentionDays = 365, now = t0)
+
+        assertEquals(0, s.finalised)
+        assertEquals(1, s.noAudio)
+        assertEquals(0L, db.getCallRecording(id)!!.sizeBytes, "stored as 0, so the UI says no audio")
+        val note = db.listCallRecordingAccess(id).firstOrNull { it.action == "no-audio" }?.note
+        assertTrue(note?.contains("header only") == true,
+            "the audit should say WHY there is no audio, not just that there is none")
+    }
+
+    @Test
+    fun `hasAudio draws the line at the WAV header size`() {
+        val dir = tempDir()
+        val header = File(dir, "h.wav").also { it.writeBytes(headerOnly) }
+        val real = File(dir, "r.wav").also { it.writeBytes(withSamples) }
+        val empty = File(dir, "e.wav").also { it.writeBytes(ByteArray(0)) }
+
+        assertFalse(CallRecordingReaper.hasAudio(header))
+        assertFalse(CallRecordingReaper.hasAudio(empty))
+        assertFalse(CallRecordingReaper.hasAudio(File(dir, "missing.wav")))
+        assertTrue(CallRecordingReaper.hasAudio(real))
+        assertEquals(44L, CallRecordingReaper.WAV_HEADER_BYTES)
     }
 
     @Test
