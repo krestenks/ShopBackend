@@ -105,6 +105,13 @@ data class CreateBookingMultiResponse(
 @Serializable
 data class UpdateCustomerNameRequest(val name: String)
 
+/** Star / un-star the customer with [phone] (follow-up flag). */
+@Serializable
+data class StarCustomerRequest(val phone: String, val starred: Boolean)
+
+@Serializable
+data class StarCustomerResponse(val customerId: Int, val starred: Boolean)
+
 @Serializable
 data class UpdateCustomerRequest(
     val name: String,
@@ -750,6 +757,43 @@ class MobileApi(
 
                     val appts = db.getAppointmentsForCustomer(customerId, shopId = shopId)
                     call.respond(CustomerDetailResponse(customer = customer, appointments = appts))
+                }
+
+                /**
+                 * Star or un-star a customer (the follow-up flag).
+                 *
+                 * PUT /api/mobile/manager/shops/{shopId}/customer-star
+                 * Body: {"phone":"+45...","starred":true}
+                 *
+                 * Keyed by phone because a call or message row may have no customer record yet; the
+                 * record is created on demand. The shop must actually have had contact with that
+                 * number (SMS or call), so a manager cannot create or flag customers for numbers
+                 * their shops never dealt with. The star is shared: it is on the customer, not on
+                 * the manager.
+                 */
+                put("/api/mobile/manager/shops/{shopId}/customer-star") {
+                    val loginInfo = authenticateManager() ?: return@put
+                    val shopId = call.parameters["shopId"]?.toIntOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing shopId")
+
+                    if (!isAuthorizedForShop(loginInfo, shopId, db)) {
+                        call.respond(HttpStatusCode.Forbidden, "Not authorized for this shop")
+                        return@put
+                    }
+
+                    val body = runCatching { call.receive<StarCustomerRequest>() }.getOrNull()
+                        ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+                    val phone = normalizeCustomerPhone(body.phone)
+                    if (phone.isBlank()) {
+                        return@put call.respond(HttpStatusCode.BadRequest, "A phone number is required")
+                    }
+                    if (!db.shopHasContactWith(shopId, phone)) {
+                        return@put call.respond(HttpStatusCode.Forbidden, "No contact with this number at this shop")
+                    }
+
+                    val customerId = db.setCustomerStarredByPhone(phone, body.starred)
+                    println("[MobileApi/customers] star=${body.starred} customer=$customerId shop=$shopId")
+                    call.respond(StarCustomerResponse(customerId = customerId, starred = body.starred))
                 }
 
                 /**

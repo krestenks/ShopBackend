@@ -75,6 +75,8 @@ data class Customer(
     val language: Int,
     /** Name resolved from the CallApp directory (null if not yet screened or not found). */
     val callappName: String? = null,
+    /** Follow-up star set by a manager; shared by every manager of the owner. */
+    val starred: Boolean = false,
 )
 
 /**
@@ -368,6 +370,8 @@ data class VoiceCallRecord(
     val operatorPhone: String?,        // operator target for this call (cross-shop busy detection)
     /** Name of [shopId]; lets the app label a call without a separate shop lookup. */
     val shopName: String? = null,
+    /** The caller's customer is starred (follow-up flag). */
+    val starred: Boolean = false,
 )
 
 @Serializable
@@ -430,6 +434,8 @@ data class SmsUnhandledNotification(
     val lastBody: String,
     val lastAt: Long,
     val unreadCount: Int,
+    /** The counterparty's customer is starred (follow-up flag). */
+    val starred: Boolean = false,
 )
 
 // ─── Search ─────────────────────────────────────────────────────────────────
@@ -449,6 +455,7 @@ data class SmsSearchHit(
     val body: String,
     val translatedBody: String?,
     val createdAt: Long,
+    val starred: Boolean = false,
 )
 
 /** A conversation matched by counterparty name or number (no body match). Opens the thread. */
@@ -462,6 +469,7 @@ data class SmsThreadHit(
     val callappName: String?,
     val lastBody: String,
     val lastAt: Long,
+    val starred: Boolean = false,
 )
 
 // ─── Group chat ───────────────────────────────────────────────────────────────
@@ -1007,6 +1015,9 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             // authorises deletion.
             "ALTER TABLE customers ADD COLUMN last_activity_at INTEGER",
             "ALTER TABLE customers ADD COLUMN deletion_flagged_at INTEGER",
+            // Follow-up star set by a manager from the app. NULL = not starred. A starred
+            // customer is never flagged or deleted by customer retention.
+            "ALTER TABLE customers ADD COLUMN starred_at INTEGER",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
@@ -1711,7 +1722,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                cs.name AS callapp_name,
                vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
                vc.linked_booking_id, vc.operator_phone,
-               sh.name AS shop_name
+               sh.name AS shop_name,
+               EXISTS (SELECT 1 FROM customers x WHERE x.phone = vc.from_phone AND x.starred_at IS NOT NULL) AS starred
         FROM voice_call vc
         LEFT JOIN shops sh        ON sh.id = vc.shop_id
         LEFT JOIN customers c     ON c.id  = vc.customer_id
@@ -1804,6 +1816,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 linkedBookingId = rs.getInt("linked_booking_id").takeIf { !rs.wasNull() },
                 operatorPhone = rs.getString("operator_phone"),
                 shopName = rs.getString("shop_name")?.trim()?.takeIf { it.isNotBlank() },
+                starred = rs.getInt("starred") != 0,
             )
         }
         return result
@@ -2108,6 +2121,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     fun getCustomerById(id: Int): Customer? {
         val sql = """
             SELECT c.id, c.phone, c.name, c.status, c.payment, c.language,
+                   c.starred_at,
                    s.name AS callapp_name
             FROM customers c
             LEFT JOIN customer_callapp_screening s ON s.customer_id = c.id AND s.found = 1
@@ -2125,6 +2139,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                 payment  = rs.getInt("payment"),
                 language = rs.getInt("language"),
                 callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
+                starred  = rs.getLong("starred_at").let { v -> !rs.wasNull() && v > 0 },
             )
         }
     }
@@ -2205,6 +2220,33 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(2, customerId)
             stmt.executeUpdate()
         }
+    }
+
+    /** True if [shopId] has any SMS or call with [phone]: the proof a manager of that shop may act on it. */
+    fun shopHasContactWith(shopId: Int, phone: String): Boolean {
+        val sql = """
+            SELECT 1 WHERE EXISTS (SELECT 1 FROM sms_message WHERE shop_id = ? AND counterparty_phone = ?)
+                        OR EXISTS (SELECT 1 FROM voice_call  WHERE shop_id = ? AND from_phone = ?)
+        """.trimIndent()
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setInt(1, shopId); stmt.setString(2, phone)
+            stmt.setInt(3, shopId); stmt.setString(4, phone)
+            return stmt.executeQuery().next()
+        }
+    }
+
+    /**
+     * Stars or un-stars the customer with [phone], creating the customer row if the number has
+     * none yet (a caller who never had a record). Returns the customer id.
+     */
+    fun setCustomerStarredByPhone(phone: String, starred: Boolean): Int {
+        val id = ensureCustomerByPhone(phone)
+        connection.prepareStatement("UPDATE customers SET starred_at = ? WHERE id = ?").use { stmt ->
+            if (starred) stmt.setLong(1, System.currentTimeMillis()) else stmt.setNull(1, java.sql.Types.INTEGER)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
+        }
+        return id
     }
 
     /**
@@ -5031,6 +5073,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                    cs.name  AS callapp_name,
                    m.body   AS last_body,
                    m.created_at AS last_at,
+                   EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred,
                    (SELECT COUNT(*) FROM sms_message u
                     WHERE u.shop_id = m.shop_id
                       AND u.counterparty_phone = m.counterparty_phone
@@ -5065,6 +5108,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     lastBody    = rs.getString("last_body") ?: "",
                     lastAt      = rs.getLong("last_at"),
                     unreadCount = rs.getInt("unread_count"),
+                    starred     = rs.getInt("starred") != 0,
                 )
             }
             return result
@@ -5099,6 +5143,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             SELECT m.id, m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
                    m.direction, m.body, m.created_at,
+                   EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred,
                    (SELECT tr.translated_body FROM sms_translation tr WHERE tr.message_id = m.id LIMIT 1) AS translated_body
             FROM sms_message m
             LEFT JOIN shops sh      ON sh.id = m.shop_id
@@ -5133,6 +5178,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     body = rs.getString("body") ?: "",
                     translatedBody = rs.getString("translated_body")?.trim()?.takeIf { it.isNotBlank() },
                     createdAt = rs.getLong("created_at"),
+                    starred = rs.getInt("starred") != 0,
                 )
             }
             return out
@@ -5148,7 +5194,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val sql = """
             SELECT m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
-                   m.body AS last_body, m.created_at AS last_at
+                   m.body AS last_body, m.created_at AS last_at,
+                   EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred
             FROM sms_message m
             LEFT JOIN shops sh      ON sh.id = m.shop_id
             LEFT JOIN customers c   ON c.id = m.customer_id
@@ -5183,6 +5230,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     callappName = rs.getString("callapp_name")?.trim()?.takeIf { it.isNotBlank() },
                     lastBody = rs.getString("last_body") ?: "",
                     lastAt = rs.getLong("last_at"),
+                    starred = rs.getInt("starred") != 0,
                 )
             }
             return out
@@ -5228,6 +5276,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                    cs.name  AS callapp_name,
                    m.body   AS last_body,
                    m.created_at AS last_at,
+                   EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred,
                    (SELECT COUNT(*) FROM sms_message u
                     WHERE u.shop_id = m.shop_id
                       AND u.counterparty_phone = m.counterparty_phone
@@ -5269,6 +5318,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     lastBody    = rs.getString("last_body") ?: "",
                     lastAt      = rs.getLong("last_at"),
                     unreadCount = rs.getInt("unread_count"),
+                    starred     = rs.getInt("starred") != 0,
                 )
             }
             return result
@@ -5804,6 +5854,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      *
      * Everything here is a positive assertion of inactivity. Note `last_activity_at IS NOT NULL`:
      * an unknown last-activity is a third state and must not be read as "inactive".
+     * A starred customer (a manager's follow-up flag) is never eligible, and because the predicate
+     * is shared, starring one also withdraws an existing deletion flag in stage 0.
      */
     private val customerInactivePredicate = """
             c.last_activity_at IS NOT NULL
@@ -5822,6 +5874,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         AND NOT EXISTS (
             SELECT 1 FROM phone_blacklist b WHERE b.phone_e164 = c.phone AND b.active = 1
         )
+        AND c.starred_at IS NULL
     """.trimIndent()
 
     data class CustomerRetentionSummary(
@@ -6683,6 +6736,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "CREATE INDEX IF NOT EXISTS idx_employees_owner ON employees(owner_id)",
             "CREATE INDEX IF NOT EXISTS idx_services_owner  ON services(owner_id)",
             "CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id)",
+            // Star state is looked up by phone for every row of the call and message lists.
+            "CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone)",
         ).forEach { sql ->
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
