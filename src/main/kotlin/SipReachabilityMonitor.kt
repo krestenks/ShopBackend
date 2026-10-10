@@ -17,10 +17,10 @@ import asterisk.SmsQueue
  * The alert SMS is sent FROM the shop's own SIM to every manager associated with the shop who
  * has a phone number on file — so it reaches their real phone even though the app is down.
  *
- * Guards against noise/cost: skips entirely when AMI is down (inconclusive), requires the
- * outage to persist [DEBOUNCE_CHECKS] consecutive polls before the first alert, and re-alerts
- * at most once per [RENOTIFY_COOLDOWN_MS] while a shop stays down. Set SIP_MONITOR_ENABLED=false
- * to disable.
+ * Guards against noise/cost: skips entirely when AMI is down (inconclusive) and requires the
+ * outage to persist [DEBOUNCE_CHECKS] consecutive polls before alerting. There is no re-notify —
+ * one SMS on the offline edge, one on the recovery edge, nothing in between however long it
+ * lasts. Set SIP_MONITOR_ENABLED=false to disable.
  */
 class SipReachabilityMonitor(
     private val db: DataBase,
@@ -33,11 +33,12 @@ class SipReachabilityMonitor(
     private companion object {
         const val CHECK_INTERVAL_MS = 120_000L        // poll every 2 min
         const val DEBOUNCE_CHECKS = 5                 // must be down this many consecutive polls (~10 min)
-        const val RENOTIFY_COOLDOWN_MS = 30 * 60_000L // while still down, re-alert at most this often
     }
 
-    private val downStreak = HashMap<Int, Int>()      // shopId → consecutive down polls
-    private val lastAlertAt = HashMap<Int, Long>()    // shopId → last alert (epoch ms)
+    /** Edge-detection per MANAGER endpoint, not per shop. See [ManagerReachabilityTracker]. */
+    private val tracker = ManagerReachabilityTracker(
+        downDebounceChecks = DEBOUNCE_CHECKS,
+    )
 
     fun start() {
         if (!enabled) {
@@ -59,66 +60,117 @@ class SipReachabilityMonitor(
     }
 
     private fun runCheck() {
-        // AMI down → we can't tell who's reachable; skip rather than false-alarm every shop.
+        // AMI down → we can't tell who's reachable. Skip entirely rather than false-alarm: an
+        // inconclusive read must not authorise an alert, and the tracker is never fed a verdict
+        // we don't have.
         if (!amiClient.connected) return
         val reachableAors = amiClient.pjsipReachableAors()
+        val now = System.currentTimeMillis()
 
-        for (shop in db.getAllShops()) {
-            // Only shops with a SIM can (a) receive GSM calls and (b) send the alert SMS.
-            val hasSim = runCatching { !db.getShopTelephonyConfig(shop.id).modemDataDevice.isNullOrBlank() }
+        // Shops that can both receive GSM calls and send an alert SMS.
+        val shopsWithSim = db.getAllShops().filter { shop ->
+            runCatching { !db.getShopTelephonyConfig(shop.id).modemDataDevice.isNullOrBlank() }
                 .getOrDefault(false)
-            if (!hasSim) { clear(shop.id); continue }
+        }
 
-            val onDuty = db.getOnDutyManagerIdsForShop(shop.id)
-            if (onDuty.isEmpty()) { clear(shop.id); continue }   // nobody claims coverage → not alertable
+        // Which on-duty managers cover which shops. Only on-duty managers are tracked, which is
+        // what keeps the spare handsets out of this: being off duty is how the fleet declares that
+        // a phone is not expected to be ringable.
+        val coverage = HashMap<Int, MutableList<Shop>>()
+        for (shop in shopsWithSim) {
+            for (mgrId in db.getOnDutyManagerIdsForShop(shop.id)) {
+                coverage.getOrPut(mgrId) { mutableListOf() } += shop
+            }
+        }
 
-            val anyReachable = onDuty.any { reachableAors.contains(config.managerEndpointId(it)) }
-            if (anyReachable) { clear(shop.id); continue }        // at least one on-duty manager is up
+        // Forget managers who went off duty, so a later outage isn't held back by a stale guard.
+        for (stale in tracker.tracked() - coverage.keys) tracker.forget(stale)
 
-            // Unconnected: on-duty managers exist, none reachable. Debounce, then alert with cooldown.
-            val streak = (downStreak[shop.id] ?: 0) + 1
-            downStreak[shop.id] = streak
-            if (streak < DEBOUNCE_CHECKS) continue
+        for ((mgrId, shops) in coverage) {
+            val reachable = reachableAors.contains(config.managerEndpointId(mgrId))
+            when (val action = tracker.observe(mgrId, reachable, now)) {
+                is ReachabilityAction.None -> {}
 
-            val now = System.currentTimeMillis()
-            if (now - (lastAlertAt[shop.id] ?: 0L) < RENOTIFY_COOLDOWN_MS) continue
-            lastAlertAt[shop.id] = now
-            alert(shop)
+                is ReachabilityAction.Suppressed ->
+                    println("[SipMonitor] SUPPRESSED offline-alert mgr=$mgrId " +
+                            "reason=${action.reason} ${action.detail}")
+
+                is ReachabilityAction.AlertOffline -> alertOffline(mgrId, shops, action.downSince)
+
+                is ReachabilityAction.AlertOnline -> alertOnline(mgrId, action.outageMs)
+            }
         }
     }
 
-    /** Shop recovered (or isn't alertable) — forget its state so the next outage alerts promptly. */
-    private fun clear(shopId: Int) {
-        downStreak.remove(shopId)
-        lastAlertAt.remove(shopId)
+    /** "HH:mm" in the shops' local time — short enough to keep the SMS to one GSM-7 segment. */
+    private fun hhmm(ms: Long): String = java.time.Instant.ofEpochMilli(ms)
+        .atZone(java.time.ZoneId.of("Europe/Copenhagen"))
+        .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+
+    private fun humanDuration(ms: Long): String {
+        val mins = ms / 60_000
+        return if (mins < 60) "${mins}m" else "${mins / 60}h ${mins % 60}m"
     }
 
-    private fun alert(shop: Shop) {
-        // (label → phone) for logging. Managers with a number on file, plus the admin (always).
-        val managers = db.getManagerIdsForShop(shop.id)
-            .mapNotNull { db.getManagerById(it) }
-            .filter { !it.phone.isNullOrBlank() }
-            .map { it.name to it.phone!!.trim() }
-            .distinctBy { it.second }
-        // Plain ASCII only — GSM-7 keeps it to one SMS segment and avoids modem UCS-2 quirks.
-        val msg = "ALERT: shop '${shop.name}' has no connected phone line right now - an on-duty " +
-            "manager is not reachable. Please open the ShopManager app on your phone to reconnect."
-        val trunk = config.trunkName(shop.id)
-        if (managers.isNotEmpty()) {
-            println("[SipMonitor] ${shop.name} UNCONNECTED — queueing ${managers.size} manager alert SMS from $trunk")
-            for ((name, phone) in managers) {
-                smsQueue.enqueue(trunk, phone, msg)   // non-blocking; SmsQueue logs the actual send result
-                println("[SipMonitor]   queued → $name <$phone>")
+    /**
+     * One alert on the offline edge: the admin, plus a single nudge to the manager whose phone it
+     * is. The nudge is the only thing that actually fixes the outage — it arrives over GSM, so it
+     * reaches the handset even though the app and the tailnet are down.
+     */
+    private fun alertOffline(managerId: Int, shops: List<Shop>, downSince: Long) {
+        val manager = db.getManagerById(managerId)
+        val who = manager?.name ?: "mgr$managerId"
+
+        // The real blast radius: shops left with no reachable on-duty manager at all. With one
+        // manager on duty that is all of them, but it stays correct if a second is ever added.
+        val reachable = runCatching { amiClient.pjsipReachableAors() }.getOrDefault(emptySet())
+        val stranded = shops.filter { shop ->
+            db.getOnDutyManagerIdsForShop(shop.id)
+                .none { reachable.contains(config.managerEndpointId(it)) }
+        }
+        val shopList = stranded.joinToString(", ") { it.name }.ifBlank { "none" }
+
+        println("[SipMonitor] OFFLINE mgr=$managerId ($who) since ${hhmm(downSince)} " +
+                "strandedShops=$shopList — one admin alert + one manager nudge")
+
+        // Nudge the manager, once. Plain ASCII: GSM-7 keeps it to a single segment.
+        val phone = manager?.phone?.trim()
+        if (!phone.isNullOrBlank()) {
+            val trunk = alerter.healthyTrunkName()
+            if (trunk != null) {
+                smsQueue.enqueue(
+                    trunk, phone,
+                    "ShopManager: your phone is not connected, so shop calls cannot reach you. " +
+                        "Please open the ShopManager app to reconnect.",
+                )
+                println("[SipMonitor]   nudge queued → $who <$phone> (from $trunk)")
+            } else {
+                println("[SipMonitor]   no healthy modem to send the manager nudge")
             }
         } else {
-            println("[SipMonitor] ${shop.name} UNCONNECTED — no associated manager has a phone number on file")
+            println("[SipMonitor]   $who has no phone number on file — no nudge possible")
         }
-        // Record it + notify the admin (centralized: logged to the admin event log, admin SMS from a
-        // healthy SIM, rate-limited).
+
+        // shopId = null on purpose: it makes the alerter's rate-limit key global rather than
+        // per-shop, which is what turned one offline phone into four admin SMS.
         alerter.record(
-            "warn", "shop_unconnected", shop.id,
-            "Shop '${shop.name}' has no reachable phone line (on-duty manager unreachable)",
+            "warn", "manager_offline", null,
+            "$who's phone went OFFLINE at ${hhmm(downSince)}. Shops without a line: $shopList.",
             alertAdmin = true,
+            dedupeKey = "manager_offline:mgr$managerId",
         )
     }
+
+    /** One alert on the recovery edge. Admin only — no point texting a phone that just came back. */
+    private fun alertOnline(managerId: Int, outageMs: Long) {
+        val who = db.getManagerById(managerId)?.name ?: "mgr$managerId"
+        println("[SipMonitor] ONLINE mgr=$managerId ($who) after ${humanDuration(outageMs)}")
+        alerter.record(
+            "info", "manager_online", null,
+            "$who's phone is back ONLINE, after ${humanDuration(outageMs)} offline.",
+            alertAdmin = true,
+            dedupeKey = "manager_online:mgr$managerId",
+        )
+    }
+
 }

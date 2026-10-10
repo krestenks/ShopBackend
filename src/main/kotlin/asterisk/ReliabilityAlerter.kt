@@ -28,14 +28,28 @@ class ReliabilityAlerter(
      * category+shop). [shopId] is the affected shop — used for the log and the preferred sender SIM.
      */
     @Synchronized
-    fun record(severity: String, category: String, shopId: Int?, message: String, alertAdmin: Boolean) {
+    fun record(
+        severity: String,
+        category: String,
+        shopId: Int?,
+        message: String,
+        alertAdmin: Boolean,
+        /**
+         * Overrides the rate-limit key, which defaults to category+shop.
+         *
+         * Needed where the natural unit is not a shop: two managers going offline inside the
+         * cooldown would otherwise collapse into one admin SMS, because both would key on
+         * "category:0". Pass something that identifies the subject instead.
+         */
+        dedupeKey: String? = null,
+    ) {
         runCatching { db.recordReliabilityEvent(severity, category, shopId, message) }
             .onFailure { println("[Reliability] log write failed: ${it.message}") }
         println("[Reliability] $severity/$category${shopId?.let { " shop$it" } ?: ""}: $message")
         if (!alertAdmin) return
 
         val admin = db.getSipAlertAdminPhone() ?: return
-        val key = "$category:${shopId ?: 0}"
+        val key = dedupeKey ?: "$category:${shopId ?: 0}"
         val now = System.currentTimeMillis()
         if (now - (lastAdminAlertAt[key] ?: 0L) < ADMIN_SMS_COOLDOWN_MS) return
 
@@ -47,6 +61,9 @@ class ReliabilityAlerter(
         smsQueue.enqueue(trunk, admin, "ShopManager alert: $message")
         println("[Reliability] admin alert queued → $admin (from $trunk)")
     }
+
+    /** A trunk whose modem is currently Free, for callers that need to send their own SMS. */
+    fun healthyTrunkName(preferShopId: Int? = null): String? = pickHealthyTrunk(preferShopId)
 
     /** A trunk whose modem is currently Free — the affected shop's if possible, else any. */
     private fun pickHealthyTrunk(preferShopId: Int?): String? {

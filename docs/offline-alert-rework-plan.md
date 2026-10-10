@@ -157,7 +157,48 @@ fired" is silent.** The mitigation is that every transition decision is logged, 
 suppressions, so `grep SipMonitor` tells you what the state machine thought — rather than silence
 being ambiguous between "nothing happened" and "it is broken".
 
-## 6. The one thing I need from you
+## 6. Decided and built (2026-10-10)
+
+**Keep the nudge** — Kresten's call. So each outage sends:
+
+| Edge | To the admin | To the affected manager |
+|---|---|---|
+| offline | one SMS, naming the manager and the stranded shops | one nudge: "open the ShopManager app to reconnect" |
+| back online | one SMS, with the outage duration | nothing — no point texting a phone that just came back |
+
+**3 SMS per outage, down from 204.**
+
+Built as `ManagerReachabilityTracker`, a pure state machine with no Asterisk, SMS or clock in it,
+so the measured gaps can be replayed exactly. `SipReachabilityMonitor` now iterates **on-duty
+managers** rather than shops, which is also what keeps the spares out: being off duty is how the
+fleet declares a phone is not expected to be ringable, and today only mgr2 (Jiji) is on duty —
+Kresten and Testmanager are both `on_duty = 0`. So this yields exactly one pair of messages, and
+it stays correct if a second handset is ever put on duty.
+
+Two things fixed while building:
+
+- **`ReliabilityAlerter` gained an optional `dedupeKey`.** Its rate-limit key was
+  `"category:${shopId ?: 0}"`, so with `shopId = null` two managers going offline inside the
+  15-minute cooldown would have collapsed into one admin SMS. Now keyed per manager.
+- **The reported outage duration was overstating by the up-debounce.** A test caught it: an
+  18-hour outage reported 18 h 2 m, because the duration ran to the *confirming* reachable poll
+  rather than to the first one. The phone was already back at the first good poll; the debounce is
+  our caution, not part of the outage. Now measured to the first reachable poll, which also makes
+  the figure independent of the debounce setting.
+
+### Tests (13, all passing)
+
+Replayed against the real data: **every gap that ever healed itself (33, 40, 50, 60, 106 s)
+produces no alert**. Plus: the debounce boundary, an 18-hour outage producing exactly one pair,
+200 further polls while down producing nothing, recovery needing the up-debounce, a recovery that
+was never reported staying silent, inconclusive readings never alerting *and* never advancing the
+streak, an AMI dropout mid-outage not re-alerting, the flap guard reporting once and being bounded,
+managers tracked independently, and off-duty clearing the state.
+
+Teeth verified by breaking it twice: removing the "already reported" gate turns 3 red (including
+the 18-hour case), and treating an inconclusive reading as "down" turns the null-input test red.
+
+## 7. Open, if you want it later
 
 **Should the affected manager still get a nudge?**
 
