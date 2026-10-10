@@ -11,19 +11,54 @@ package telephony
  */
 object LebaraBalance {
     /**
+     * The cash needed to renew the package: **100 kr exactly** (Kresten, 2026-10-10).
+     *
+     * The mechanism, corrected — an earlier version of this comment had it wrong:
+     *
+     * - The cash balance funds **both** the 30-day package renewal **and** pay-as-you-go SMS.
+     * - A shop at 99.50 kr is **not** dead. Nothing fails immediately.
+     * - The failure happens at **renewal time**: if cash cannot cover the renewal, the package
+     *   does not renew and **outgoing calls die**.
+     * - **SMS keeps working either way**, billed per message against the cash balance — so it
+     *   carries on draining the very balance the renewal depends on.
+     *
+     * Two consequences worth holding on to. The symptom is *outgoing calls*, not SMS, so a shop
+     * can look healthy (texts going out fine, incoming calls ringing) while being unable to dial.
+     * And because SMS still bills, any machine-sent SMS — including our own alerts — eats the
+     * renewal money.
+     *
+     * This is a fact about the carrier, not a tuneable. [THRESHOLD_KR] is the tuneable.
+     */
+    const val HARD_FLOOR_KR: Double = 100.0
+
+    /**
      * Warn the manager to top up when the kr cash balance drops below this. Env-overridable via
      * LOW_BALANCE_THRESHOLD_KR.
      *
-     * Default 99 kr: the Lebara DK offline packages these SIMs run on (GETALL = 60 GB + 10 hrs,
-     * 99 kr/30 days) auto-renew by deducting from the kr CASH balance, and the shop buys 99 kr
-     * top-ups. Below 99 kr the balance can't cover the next renewal → the package fails to renew and
-     * outbound SMS + calls stop silently (incoming calls keep working, so it's easy to miss). So the
-     * alarm = "you don't have enough for the next renewal, add a top-up." Lebara's own low-balance
-     * SMS only fires under 25 kr — far too late. The MB/data figure in the balance reply is NOT a
-     * health signal (data is unused, it never moves).
+     * Must stay **above** [HARD_FLOOR_KR]: an alarm at the floor fires only once the renewal has
+     * already failed. The previous default was 99 — at or below the floor — which is why shop1 sat
+     * at 106.92 kr with nothing raised.
+     *
+     * **120 kr**, chosen by Kresten on 2026-10-10 as reasonable for the message volume these SIMs
+     * carry. That is 20 kr of margin above the floor; at the busiest shop's ~45 outbound SMS/day
+     * it buys on the order of a day or two to top up, which is the trade-off he accepted.
+     *
+     * Note what this threshold does *not* model: the real question is whether the balance will
+     * still be ≥ [HARD_FLOOR_KR] on renewal day, and SMS keeps draining it until then. A level
+     * check approximates that; see docs for the runway-based alternative, which was offered and
+     * not built.
+     *
+     * Lebara's own low-balance SMS only fires under 25 kr — far too late to be useful. The MB/data
+     * figure in the balance reply is NOT a health signal; data is unused and never moves.
      */
     val THRESHOLD_KR: Double =
-        System.getenv("LOW_BALANCE_THRESHOLD_KR")?.trim()?.toDoubleOrNull() ?: 99.0
+        System.getenv("LOW_BALANCE_THRESHOLD_KR")?.trim()?.toDoubleOrNull() ?: 120.0
+
+    /**
+     * True when [kr] is at or below the renewal price — i.e. the next renewal would fail and
+     * outgoing calls would stop. Not "already dead": SMS still works at this level.
+     */
+    fun isBelowHardFloor(kr: Double?): Boolean = kr != null && kr <= HARD_FLOOR_KR
 
     // Amount immediately followed by a currency word — the most reliable signal.
     private val ANCHORED = Regex("""(\d+(?:[.,]\d{1,2})?)\s*(?:kr|dkk)\b""", RegexOption.IGNORE_CASE)
