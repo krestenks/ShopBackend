@@ -386,14 +386,9 @@ fun persistInboundSms(
     translationService: TranslationService? = null,
     elapsedSinceNs: Long = System.nanoTime(),
 ): InboundSmsPersistResult {
-    // Blacklist check (tenant-wide) — silently drop messages from blocked senders
-    val smsOwnerId = db.getOwnerIdForShop(shopId)
-    val isSmsBlacklisted = if (smsOwnerId != null) {
-        db.isPhoneBlacklistedByOwner(smsOwnerId, fromPhone)
-    } else {
-        db.isPhoneBlacklisted(shopId, fromPhone)
-    }
-    if (fromPhone.isNotBlank() && isSmsBlacklisted) {
+    // Blocking is tenant-wide — silently drop messages from senders blocked at ANY of the
+    // tenant's shops. There is no per-shop blocking.
+    if (fromPhone.isNotBlank() && db.isPhoneBlockedForShop(shopId, fromPhone)) {
         smsLog("[SMS-IN] DROP blacklisted From=$fromPhone shop=$shopId Sid=$providerMessageSid")
         return InboundSmsPersistResult.BLACKLISTED
     }

@@ -209,17 +209,21 @@ fun Routing.internalTelephonyRoutes(
         val isKnown = existingCustomerId != null && !status.isNullOrBlank() && !status.equals("New", ignoreCase = true)
         db.updateCallCustomer(callId, customerId, if (isKnown) "known" else "unknown")
 
-        // 1. Tenant-wide blacklist → reject for everyone.
-        val ownerId = db.getOwnerIdForShop(shopId)
-        val blacklisted = from.isNotBlank() && if (ownerId != null) {
-            db.isPhoneBlacklistedByOwner(ownerId, from)
-        } else {
-            db.isPhoneBlacklisted(shopId, from)
-        }
+        // 1. Blocking is tenant-wide — there is no per-shop blocking. A number blocked from any
+        //    shop's screen is rejected on every shop's line of that tenant.
+        val blacklisted = from.isNotBlank() && db.isPhoneBlockedForShop(shopId, from)
         if (blacklisted) {
             db.updateCallState(callId, VoiceCallState.REJECTED_BLACKLISTED, "caller=$from")
             db.terminateCall(callId, VoiceCallOutcome.BLACKLIST_REJECTED)
-            println("[Asterisk/call-inbound] REJECT blacklisted caller=$from shop=$shopId")
+            // Name the evidence, not just the decision: the owner whose blacklist matched and the
+            // row that authorised it. Without those, "why was this caller rejected?" needs a
+            // database archaeology session — which is exactly what 2026-10-16 turned into.
+            val owner = db.getOwnerIdForShop(shopId)
+            val row = owner?.let { db.getBlacklistRow(it, from) }
+            println(
+                "[Asterisk/call-inbound] REJECT blacklisted caller=$from shop=$shopId owner=$owner " +
+                    "entry=${row?.id ?: "?"} blockedSince=${row?.createdAt ?: "?"}"
+            )
             call.respondText("reject")
             return@post
         }

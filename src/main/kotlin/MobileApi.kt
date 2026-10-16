@@ -1675,7 +1675,16 @@ class MobileApi(
                         return@post call.respond(HttpStatusCode.BadRequest, "phone is required")
                     }
 
-                    db.addBlacklistEntry(shopId, body.phone, body.reason)
+                    // Tenant-wide: this blocks the number on every shop of the owner, not just
+                    // the shop whose screen it came from. The actor is recorded so a later
+                    // "who blocked/unblocked this?" is answerable.
+                    db.blockPhoneForOwner(
+                        ownerId = db.getOwnerIdForShop(shopId),
+                        phone = body.phone,
+                        reason = body.reason,
+                        actor = loginInfo.managerId?.let { "manager:$it" } ?: "role:${loginInfo.role}",
+                        fromShopId = shopId,
+                    )
                     call.respond(HttpStatusCode.Created)
                 }
 
@@ -1695,9 +1704,39 @@ class MobileApi(
                         return@delete
                     }
 
-                    val removed = db.removeBlacklistEntryById(entryId)
-                    if (removed) call.respond(HttpStatusCode.NoContent)
-                    else call.respond(HttpStatusCode.NotFound, "Blacklist entry not found")
+                    // Lifts the block for the whole tenant, matching how it was applied. Removing
+                    // one shop's row used to leave the caller blocked by another shop's row, with
+                    // nothing in the UI to explain why.
+                    val phone = db.getBlacklistPhoneForEntry(entryId)
+                    if (phone == null) {
+                        call.respond(HttpStatusCode.NotFound, "Blacklist entry not found")
+                        return@delete
+                    }
+                    val ownerId = db.getOwnerIdForShop(shopId)
+                    val lifted = db.unblockPhoneForOwner(
+                        ownerId = ownerId,
+                        phone = phone,
+                        actor = loginInfo.managerId?.let { "manager:$it" } ?: "role:${loginInfo.role}",
+                    )
+                    when {
+                        lifted > 0 -> call.respond(HttpStatusCode.NoContent)
+                        // The row exists but nothing was lifted, so the caller is very likely still
+                        // being rejected. Answering 404 "not found" here would tell the manager the
+                        // block is gone while it is still hanging callers up — the worst possible
+                        // message for this failure. Say it could not be removed instead.
+                        db.isPhoneBlockedForShop(shopId, phone) -> {
+                            println(
+                                "[Blacklist] ERROR could not lift entry $entryId (shop=$shopId " +
+                                    "owner=$ownerId) — the number is still blocked"
+                            )
+                            call.respond(
+                                HttpStatusCode.Conflict,
+                                "Could not remove this block — it is still in force. Please report this.",
+                            )
+                        }
+                        // Nothing lifted and nothing blocked: it was already inactive. Idempotent.
+                        else -> call.respond(HttpStatusCode.NoContent)
+                    }
                 }
 
                 // ─────────────────────────────────────────────────────────────

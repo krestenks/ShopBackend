@@ -521,14 +521,49 @@ data class CustomerCallAppScreening(
 
 // ─── Blacklist ───────────────────────────────────────────────────────────────
 
+/**
+ * A blocked number. **The scope is the tenant (owner), not the shop.**
+ *
+ * Enforcement was already tenant-wide — a block anywhere rejected the caller everywhere — but the
+ * rows were keyed per shop and removal only ever touched one row. That asymmetry meant unblocking
+ * at one shop silently left the caller blocked by another shop's row, which the app could not even
+ * display (its list was per shop). [shopId] is now **provenance only**: the shop whose screen the
+ * block was added from. Nothing reads it to decide anything.
+ */
 @Serializable
 data class BlacklistEntry(
     val id: Int,
+    /** Provenance: the shop this was added from. NOT a scope — blocking is tenant-wide. */
     val shopId: Int,
     val phoneE164: String,
     val reason: String?,
+    /** When the number was FIRST blocked. Re-blocking no longer overwrites this. */
     val createdAt: Long,
     val active: Boolean,
+    /** When it was last unblocked, or null if it has never been unblocked. */
+    val deactivatedAt: Long? = null,
+)
+
+/**
+ * One block/unblock transition, so "was this number blocked at 17:10?" is a lookup.
+ *
+ * It was not answerable before, which is why a reported leak took six hypotheses to settle on
+ * 2026-10-16: `created_at` was overwritten on every re-block, and removal wrote nothing at all —
+ * no timestamp, no actor. The only reason that case could be resolved was that the call path
+ * happened to log its verdict. This table removes the guesswork.
+ */
+@Serializable
+data class BlacklistEvent(
+    val id: Int,
+    val phoneE164: String,
+    /** "block" or "unblock". */
+    val action: String,
+    /** Who did it, as far as we can tell: "manager:4", "admin", "migration", … */
+    val actor: String?,
+    /** The shop whose UI was used, when known. Informational. */
+    val shopId: Int?,
+    val reason: String?,
+    val at: Long,
 )
 
 @Serializable
@@ -840,6 +875,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             );
             """,
             """
+            CREATE TABLE IF NOT EXISTS phone_blacklist_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER,
+                phone_e164 TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor TEXT,
+                shop_id INTEGER,
+                reason TEXT,
+                at INTEGER NOT NULL
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS voice_call (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 shop_id INTEGER NOT NULL,
@@ -1003,6 +1050,10 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
             // ── Tenant-wide blacklist: add owner_id to phone_blacklist ──
             "ALTER TABLE phone_blacklist ADD COLUMN owner_id INTEGER",
+            // ── Blacklist history: when a block was lifted, and never clobber created_at again ──
+            // Removal used to write nothing, so a lifted block was indistinguishable from one that
+            // never existed. See [BlacklistEvent].
+            "ALTER TABLE phone_blacklist ADD COLUMN deactivated_at INTEGER",
             // ── Per-manager SIP identity (mgr{id}) for the duty-aware call pool ──
             "ALTER TABLE managers ADD COLUMN sip_password TEXT",
             // Per-manager opt-in: allow opening the web backend (admin UI) inside the app. Default off.
@@ -1218,6 +1269,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "CREATE INDEX IF NOT EXISTS idx_voice_call_customer ON voice_call(customer_id)",
             "CREATE INDEX IF NOT EXISTS idx_appointments_customer ON appointments(customer_id)",
             "CREATE INDEX IF NOT EXISTS idx_blacklist_phone_active ON phone_blacklist(phone_e164, active)",
+            // History lookups are always "this number, in time order".
+            "CREATE INDEX IF NOT EXISTS idx_blacklist_event_phone ON phone_blacklist_event(phone_e164, at)",
         ).forEach { sql ->
             try {
                 connection.createStatement().use { it.execute(sql) }
@@ -1448,9 +1501,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     // =========================================================================
 
     /**
-     * Checks if a phone number is blacklisted for the given shop (per-shop check).
-     * Prefer [isPhoneBlacklistedByOwner] for tenant-wide enforcement.
+     * Whether a single shop's own row is active. **Not an enforcement check** — blocking is
+     * tenant-wide, so asking one shop gives the wrong answer for every other shop of that tenant.
+     * Use [isPhoneBlockedForShop]. Kept only for inspecting provenance.
      */
+    @Deprecated("Blocking is tenant-wide; use isPhoneBlockedForShop", ReplaceWith("isPhoneBlockedForShop(shopId, phone)"))
     fun isPhoneBlacklisted(shopId: Int, phone: String): Boolean {
         val sql = "SELECT 1 FROM phone_blacklist WHERE shop_id = ? AND phone_e164 = ? AND active = 1 LIMIT 1"
         connection.prepareStatement(sql).use { stmt ->
@@ -1481,63 +1536,394 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    fun addBlacklistEntry(shopId: Int, phone: String, reason: String?): Int {
-        // Resolve the owner_id for this shop so the entry is tenant-scoped
+    /**
+     * The single question the call and SMS paths ask: is this caller blocked for the tenant that
+     * owns [shopId]?
+     *
+     * Centralised so there is exactly one answer. The two call sites each used to inline their own
+     * owner-resolve-else-per-shop branch, which is how a per-shop fallback could linger unnoticed.
+     */
+    fun isPhoneBlockedForShop(shopId: Int, phone: String): Boolean {
+        if (phone.isBlank()) return false
         val ownerId = getOwnerIdForShop(shopId)
-        val sql = """
-            INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active, owner_id)
-            VALUES (?, ?, ?, ?, 1, ?)
-            ON CONFLICT(shop_id, phone_e164) DO UPDATE SET active = 1, reason = excluded.reason, created_at = excluded.created_at, owner_id = excluded.owner_id
-        """.trimIndent()
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
-            stmt.setString(2, phone.trim())
-            stmt.setString(3, reason)
-            stmt.setLong(4, System.currentTimeMillis())
-            if (ownerId != null) stmt.setInt(5, ownerId) else stmt.setNull(5, java.sql.Types.INTEGER)
+        if (ownerId != null) return isPhoneBlacklistedByOwner(ownerId, phone)
+        // Could not determine the tenant. That is INCONCLUSIVE, not "blocked" — and the action
+        // this authorises is destructive: cause 21 on the caller and their SMS silently dropped.
+        // So it fails closed in the safe direction (let the call through, raise the alarm) rather
+        // than widening the reject to every tenant's blocks, which is what an earlier draft of
+        // this function did. docs/recovery-code-rules.md §1-2.
+        println(
+            "[Blacklist] ALERT shop $shopId has no owner_id — cannot evaluate the blacklist, " +
+                "ALLOWING the call. Fix the shop's owner_id; blocking is inoperative for this shop."
+        )
+        runCatching {
+            recordReliabilityEvent(
+                severity = "warn",
+                category = "blacklist_owner_unresolved",
+                shopId = shopId,
+                message = "Shop $shopId has no owner_id, so number blocking cannot be evaluated " +
+                    "for it. Calls and SMS from blocked numbers will get through on this shop's " +
+                    "line until its owner_id is set.",
+            )
+        }
+        return false
+    }
+
+    /**
+     * Blocks [phone] for the whole tenant. Idempotent.
+     *
+     * Existing data has several rows for a few numbers (one per shop that blocked them), so this
+     * reactivates EVERY row for that owner and phone, and inserts only when none exists. Paired
+     * with [unblockPhoneForOwner] lifting every row, the two are now symmetric — which is the
+     * actual fix, since enforcement has always asked "is there ANY active row".
+     *
+     * `created_at` is deliberately NOT touched on a re-block: it means "first blocked". Overwriting
+     * it is what made 2026-10-16 unanswerable — a row's timestamp read four hours *after* the call
+     * it supposedly governed. Transitions go to [BlacklistEvent] instead.
+     */
+    fun blockPhoneForOwner(
+        ownerId: Int?,
+        phone: String,
+        reason: String?,
+        actor: String?,
+        fromShopId: Int,
+    ): Boolean {
+        val p = phone.trim()
+        if (p.isBlank()) return false
+        val now = System.currentTimeMillis()
+
+        // Scoped through `shops`, the SAME key enforcement uses. Keying writes on
+        // phone_blacklist.owner_id instead would give two keys that can drift apart, and a row
+        // whose stored owner no longer matches its shop's owner would be enforced (the check joins
+        // shops) while being invisible to the list and immune to removal — a block with no way out.
+        // owner_id is still written, as provenance and to heal any drift.
+        val reactivated = if (ownerId != null) {
+            connection.prepareStatement(
+                """
+                UPDATE phone_blacklist
+                   SET active = 1, deactivated_at = NULL, reason = COALESCE(?, reason), owner_id = ?
+                 WHERE phone_e164 = ?
+                   AND shop_id IN (SELECT id FROM shops WHERE owner_id = ?)
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setString(1, reason)
+                stmt.setInt(2, ownerId)
+                stmt.setString(3, p)
+                stmt.setInt(4, ownerId)
+                stmt.executeUpdate()
+            }
+        } else 0
+
+        if (reactivated == 0) {
+            connection.prepareStatement(
+                """
+                INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active, owner_id)
+                VALUES (?, ?, ?, ?, 1, ?)
+                ON CONFLICT(shop_id, phone_e164)
+                  DO UPDATE SET active = 1, deactivated_at = NULL, reason = excluded.reason,
+                                owner_id = excluded.owner_id
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setInt(1, fromShopId)
+                stmt.setString(2, p)
+                stmt.setString(3, reason)
+                stmt.setLong(4, now)
+                if (ownerId != null) stmt.setInt(5, ownerId) else stmt.setNull(5, java.sql.Types.INTEGER)
+                stmt.executeUpdate()
+            }
+        }
+        recordBlacklistEvent(ownerId, p, "block", actor, fromShopId, reason, now)
+        return true
+    }
+
+    /**
+     * Lifts the block on [phone] across the whole tenant. Returns how many rows were lifted.
+     *
+     * This is the half that was broken. Removal deactivated ONE row while enforcement asked "is
+     * there ANY active row for this owner", so unblocking at one shop left the caller blocked by
+     * another shop's row — and the app could not show it, because its list was per shop. Two
+     * numbers were in exactly that state on 2026-10-16.
+     */
+    fun unblockPhoneForOwner(ownerId: Int?, phone: String, actor: String?): Int {
+        val p = phone.trim()
+        if (p.isBlank()) return 0
+        val now = System.currentTimeMillis()
+        if (ownerId == null) {
+            println("[Blacklist] WARN unblocking ${maskForLog(p)} without an owner — lifting every tenant's row")
+        }
+        // Scoped through `shops` to match enforcement exactly: anything the join would reject on
+        // must be reachable here, or a block becomes impossible to lift.
+        val sql = if (ownerId != null) {
+            """
+            UPDATE phone_blacklist SET active = 0, deactivated_at = ?
+             WHERE phone_e164 = ? AND active = 1
+               AND shop_id IN (SELECT id FROM shops WHERE owner_id = ?)
+            """.trimIndent()
+        } else {
+            "UPDATE phone_blacklist SET active = 0, deactivated_at = ? WHERE phone_e164 = ? AND active = 1"
+        }
+        val lifted = connection.prepareStatement(sql).use { stmt ->
+            stmt.setLong(1, now)
+            stmt.setString(2, p)
+            if (ownerId != null) stmt.setInt(3, ownerId)
             stmt.executeUpdate()
         }
-        connection.createStatement().use { s ->
-            val rs = s.executeQuery("SELECT last_insert_rowid()")
-            return if (rs.next()) rs.getInt(1) else -1
+        if (lifted > 0) recordBlacklistEvent(ownerId, p, "unblock", actor, null, null, now)
+        return lifted
+    }
+
+    /** Records one transition. Never throws: losing history must not fail the block itself. */
+    private fun recordBlacklistEvent(
+        ownerId: Int?,
+        phone: String,
+        action: String,
+        actor: String?,
+        shopId: Int?,
+        reason: String?,
+        at: Long,
+    ) {
+        runCatching {
+            connection.prepareStatement(
+                """
+                INSERT INTO phone_blacklist_event (owner_id, phone_e164, action, actor, shop_id, reason, at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent()
+            ).use { stmt ->
+                if (ownerId != null) stmt.setInt(1, ownerId) else stmt.setNull(1, java.sql.Types.INTEGER)
+                stmt.setString(2, phone)
+                stmt.setString(3, action)
+                stmt.setString(4, actor)
+                if (shopId != null) stmt.setInt(5, shopId) else stmt.setNull(5, java.sql.Types.INTEGER)
+                stmt.setString(6, reason)
+                stmt.setLong(7, at)
+                stmt.executeUpdate()
+            }
+        }.onFailure {
+            println("[Blacklist] WARN could not record '$action' for ${maskForLog(phone)}: ${it.message}")
         }
     }
 
-    fun removeBlacklistEntry(shopId: Int, phone: String): Boolean {
-        val sql = "UPDATE phone_blacklist SET active = 0 WHERE shop_id = ? AND phone_e164 = ?"
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
-            stmt.setString(2, phone.trim())
-            return stmt.executeUpdate() > 0
-        }
-    }
+    private fun maskForLog(phone: String): String =
+        if (phone.length > 6) phone.take(3) + "XXXX" + phone.takeLast(2) else "***"
 
-    fun removeBlacklistEntryById(entryId: Int): Boolean {
-        val sql = "UPDATE phone_blacklist SET active = 0 WHERE id = ?"
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, entryId)
-            return stmt.executeUpdate() > 0
-        }
-    }
-
-    fun listBlacklist(shopId: Int): List<BlacklistEntry> {
-        val sql = "SELECT id, shop_id, phone_e164, reason, created_at, active FROM phone_blacklist WHERE shop_id = ? AND active = 1 ORDER BY created_at DESC"
-        connection.prepareStatement(sql).use { stmt ->
-            stmt.setInt(1, shopId)
+    /** Every recorded block/unblock for [phone], newest first. */
+    fun getBlacklistHistory(phone: String, limit: Int = 50): List<BlacklistEvent> {
+        if (phone.isBlank()) return emptyList()
+        connection.prepareStatement(
+            """
+            SELECT id, phone_e164, action, actor, shop_id, reason, at
+              FROM phone_blacklist_event
+             WHERE phone_e164 = ? ORDER BY at DESC, id DESC LIMIT ?
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setString(1, phone.trim())
+            stmt.setInt(2, limit)
             val rs = stmt.executeQuery()
-            val result = mutableListOf<BlacklistEntry>()
+            val out = mutableListOf<BlacklistEvent>()
             while (rs.next()) {
-                result += BlacklistEntry(
+                out += BlacklistEvent(
+                    id = rs.getInt("id"),
+                    phoneE164 = rs.getString("phone_e164"),
+                    action = rs.getString("action"),
+                    actor = rs.getString("actor"),
+                    shopId = rs.getInt("shop_id").takeIf { !rs.wasNull() },
+                    reason = rs.getString("reason"),
+                    at = rs.getLong("at"),
+                )
+            }
+            return out
+        }
+    }
+
+    /**
+     * Was [phone] blocked at [instantMs]?
+     *
+     * **null means "cannot tell"** — distinct from false — because history only exists from the
+     * moment this table was added. Answering "no" from missing history is exactly the mistake that
+     * wasted an afternoon on 2026-10-16, so the unknown is explicit and callers must handle it.
+     */
+    fun wasPhoneBlockedAt(phone: String, instantMs: Long): Boolean? {
+        if (phone.isBlank()) return null
+        connection.prepareStatement(
+            """
+            SELECT action FROM phone_blacklist_event
+             WHERE phone_e164 = ? AND at <= ? ORDER BY at DESC, id DESC LIMIT 1
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setString(1, phone.trim())
+            stmt.setLong(2, instantMs)
+            val rs = stmt.executeQuery()
+            if (rs.next()) return rs.getString("action") == "block"
+        }
+        return null   // nothing recorded at or before that instant
+    }
+
+    /**
+     * Tenant-wide list, one entry per number — the same list for every shop of that owner.
+     *
+     * Scoped through `shops`, the same key enforcement uses, so anything that would be rejected on
+     * a call is listed here and can therefore be removed. Keying this on phone_blacklist.owner_id
+     * would let a row with a drifted owner be enforced yet absent from this list.
+     */
+    fun listBlacklistForOwner(ownerId: Int): List<BlacklistEntry> {
+        connection.prepareStatement(
+            """
+            SELECT MIN(pb.id) AS id, MIN(pb.shop_id) AS shop_id, pb.phone_e164,
+                   MAX(pb.reason) AS reason, MIN(pb.created_at) AS created_at
+              FROM phone_blacklist pb
+              JOIN shops s ON s.id = pb.shop_id
+             WHERE s.owner_id = ? AND pb.active = 1
+             GROUP BY pb.phone_e164
+             ORDER BY created_at DESC
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<BlacklistEntry>()
+            while (rs.next()) {
+                out += BlacklistEntry(
                     id = rs.getInt("id"),
                     shopId = rs.getInt("shop_id"),
                     phoneE164 = rs.getString("phone_e164"),
                     reason = rs.getString("reason"),
                     createdAt = rs.getLong("created_at"),
-                    active = rs.getInt("active") != 0,
+                    active = true,
                 )
             }
-            return result
+            return out
         }
+    }
+
+    /**
+     * What the app asks for. It still passes a shop id, but the answer is the tenant's list, so
+     * every shop shows the same blocks and a block made anywhere is visible — and removable —
+     * everywhere.
+     */
+    fun listBlacklist(shopId: Int): List<BlacklistEntry> {
+        val ownerId = getOwnerIdForShop(shopId) ?: return emptyList()
+        return listBlacklistForOwner(ownerId)
+    }
+
+    /** Back-compat wrapper: blocks for the tenant owning [shopId]. Returns the active row's id. */
+    fun addBlacklistEntry(shopId: Int, phone: String, reason: String?): Int {
+        blockPhoneForOwner(getOwnerIdForShop(shopId), phone, reason, "shop:$shopId", shopId)
+        connection.prepareStatement(
+            "SELECT MIN(id) AS id FROM phone_blacklist WHERE phone_e164 = ? AND active = 1"
+        ).use { stmt ->
+            stmt.setString(1, phone.trim())
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("id") else -1
+        }
+    }
+
+    /** Back-compat wrapper: lifts the block tenant-wide, not just at [shopId]. */
+    fun removeBlacklistEntry(shopId: Int, phone: String): Boolean =
+        unblockPhoneForOwner(getOwnerIdForShop(shopId), phone, "shop:$shopId") > 0
+
+    /**
+     * Inserts a row in the **pre-2026-10-16 per-shop shape**: one row per shop that blocked the
+     * number, each with its own id.
+     *
+     * This exists because that data is still in production — 207 active rows over 203 distinct
+     * numbers, with 3 numbers holding rows at two or three shops. [blockPhoneForOwner] can no
+     * longer create that shape (it collapses to one row per owner and phone), so without this the
+     * tests for tenant-wide unblocking would pass trivially against single-row data and prove
+     * nothing about the rows that actually caused the bug.
+     */
+    fun insertLegacyPerShopBlacklistRow(shopId: Int, ownerId: Int?, phone: String, createdAt: Long) {
+        connection.prepareStatement(
+            """
+            INSERT INTO phone_blacklist (shop_id, phone_e164, reason, created_at, active, owner_id)
+            VALUES (?, ?, NULL, ?, 1, ?)
+            ON CONFLICT(shop_id, phone_e164) DO UPDATE SET active = 1
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, shopId)
+            stmt.setString(2, phone.trim())
+            stmt.setLong(3, createdAt)
+            if (ownerId != null) stmt.setInt(4, ownerId) else stmt.setNull(4, java.sql.Types.INTEGER)
+            stmt.executeUpdate()
+        }
+    }
+
+    /** How many blacklist rows exist for a number, active or not. Used to verify the data shape. */
+    fun countBlacklistRows(phone: String, activeOnly: Boolean): Int {
+        val sql = if (activeOnly) {
+            "SELECT COUNT(*) AS n FROM phone_blacklist WHERE phone_e164 = ? AND active = 1"
+        } else {
+            "SELECT COUNT(*) AS n FROM phone_blacklist WHERE phone_e164 = ?"
+        }
+        connection.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, phone.trim())
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("n") else 0
+        }
+    }
+
+    /**
+     * The newest row for [phone] under [ownerId], **active or not**, so callers can see whether a
+     * block was lifted and when.
+     *
+     * [listBlacklistForOwner] is deliberately active-only, which left `deactivated_at` written but
+     * never read — a column that exists only in writes is indistinguishable from one that does not
+     * work, and a test asserting on it would pass against the data-class default.
+     */
+    fun getBlacklistRow(ownerId: Int, phone: String): BlacklistEntry? {
+        if (phone.isBlank()) return null
+        connection.prepareStatement(
+            """
+            SELECT pb.id, pb.shop_id, pb.phone_e164, pb.reason, pb.created_at, pb.active,
+                   pb.deactivated_at
+              FROM phone_blacklist pb
+              JOIN shops s ON s.id = pb.shop_id
+             WHERE s.owner_id = ? AND pb.phone_e164 = ?
+             ORDER BY pb.active DESC, pb.id DESC LIMIT 1
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, ownerId)
+            stmt.setString(2, phone.trim())
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            return BlacklistEntry(
+                id = rs.getInt("id"),
+                shopId = rs.getInt("shop_id"),
+                phoneE164 = rs.getString("phone_e164"),
+                reason = rs.getString("reason"),
+                createdAt = rs.getLong("created_at"),
+                active = rs.getInt("active") != 0,
+                deactivatedAt = rs.getLong("deactivated_at").takeIf { !rs.wasNull() },
+            )
+        }
+    }
+
+    /** The number a blacklist row refers to, so callers can lift it tenant-wide by phone. */
+    fun getBlacklistPhoneForEntry(entryId: Int): String? {
+        connection.prepareStatement("SELECT phone_e164 FROM phone_blacklist WHERE id = ?").use { stmt ->
+            stmt.setInt(1, entryId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString("phone_e164") else null
+        }
+    }
+
+    /**
+     * Lifts the block that row [entryId] belongs to — for the whole tenant, not just that row.
+     * The app deletes by id from a list it no longer scopes per shop, so this has to match.
+     */
+    fun removeBlacklistEntryById(entryId: Int): Boolean {
+        var ownerId: Int? = null
+        var phone: String? = null
+        connection.prepareStatement(
+            "SELECT owner_id, phone_e164 FROM phone_blacklist WHERE id = ?"
+        ).use { stmt ->
+            stmt.setInt(1, entryId)
+            val rs = stmt.executeQuery()
+            if (rs.next()) {
+                ownerId = rs.getInt("owner_id").takeIf { !rs.wasNull() }
+                phone = rs.getString("phone_e164")
+            }
+        }
+        val p = phone ?: return false
+        return unblockPhoneForOwner(ownerId, p, "entry:$entryId") > 0
     }
 
     // =========================================================================
@@ -2358,11 +2744,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      * Does NOT delete appointments (those remain for historical records).
      */
     fun deleteCustomer(id: Int): Boolean {
-        // Soft-remove any blacklist entries for this customer's phone (best-effort)
-        getCustomerById(id)?.phone?.trim()?.takeIf { it.isNotBlank() }?.let { phone ->
-            connection.prepareStatement("UPDATE phone_blacklist SET active = 0 WHERE phone_e164 = ?").use { stmt ->
-                stmt.setString(1, phone)
-                stmt.executeUpdate()
+        // Soft-remove any blacklist entries for this customer's phone (best-effort).
+        // Routed through unblockPhoneForOwner so this lift is recorded like any other: deleting a
+        // customer silently un-blocks them, and that transition has to be visible in the history.
+        // Scoped to the customer's own tenant — an unscoped lift would clear another tenant's
+        // block on the same number as a side effect of deleting our customer.
+        getCustomerById(id)?.let { c ->
+            c.phone.trim().takeIf { it.isNotBlank() }?.let { phone ->
+                unblockPhoneForOwner(
+                    ownerId = getOwnerIdForCustomer(id),
+                    phone = phone,
+                    actor = "customer-delete:$id",
+                )
             }
         }
         connection.prepareStatement("DELETE FROM customers WHERE id = ?").use { stmt ->
@@ -6305,6 +6698,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "UPDATE services  SET owner_id = 1 WHERE owner_id IS NULL",
             "UPDATE customers SET owner_id = 1 WHERE owner_id IS NULL",
             "UPDATE app_account SET owner_id = 1 WHERE owner_id IS NULL",
+            // phone_blacklist was missing from this list. Harmless so far (no NULL rows exist in
+            // production), but a NULL here used to mean a block that enforcement still applied
+            // while the app could neither show nor remove it. The read path no longer depends on
+            // this column, so this is belt-and-braces: keep it truthful as provenance.
+            "UPDATE phone_blacklist SET owner_id = (SELECT s.owner_id FROM shops s WHERE s.id = phone_blacklist.shop_id) WHERE owner_id IS NULL",
         ).forEach { sql ->
             try {
                 val updated = connection.createStatement().use { it.executeUpdate(sql) }
@@ -6402,6 +6800,15 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
+    /** The tenant a customer belongs to, so side effects of editing them stay inside it. */
+    fun getOwnerIdForCustomer(customerId: Int): Int? {
+        connection.prepareStatement("SELECT owner_id FROM customers WHERE id = ?").use { stmt ->
+            stmt.setInt(1, customerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
+        }
+    }
+
     fun getOwnerIdForManager(managerId: Int): Int? {
         connection.prepareStatement("SELECT owner_id FROM managers WHERE id = ?").use { stmt ->
             stmt.setInt(1, managerId)
@@ -6424,6 +6831,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.executeUpdate()
         }
         if (updated > 0) {
+            // Keep the blacklist's provenance column with the shop it belongs to. Enforcement,
+            // listing and removal all resolve the owner through `shops`, so a stale value here no
+            // longer orphans a block — but leaving it wrong would make the audit trail lie.
+            connection.prepareStatement(
+                "UPDATE phone_blacklist SET owner_id = ? WHERE shop_id = ?"
+            ).use { stmt ->
+                stmt.setInt(1, newOwnerId)
+                stmt.setInt(2, shopId)
+                stmt.executeUpdate()
+            }
         }
         return updated > 0
     }

@@ -2487,7 +2487,7 @@ class WebAdmin(
 
                 call.respondAdminPage(
                     titleText = "Customers",
-                    subtitle = "Browse and verify customer records. 'New' = auto-created on first call/booking. Blacklist is tenant-wide (blocking in one shop blocks all shops under the same owner).",
+                    subtitle = "Browse and verify customer records. 'New' = auto-created on first call/booking. Blocking is tenant-wide: there is no per-shop blocking — one block covers every shop's line, and removing it removes it everywhere.",
                     activePath = "/customers",
                 ) {
                     div("panel") {
@@ -2546,12 +2546,13 @@ class WebAdmin(
                                                 }
                                             }
                                             td {
+                                                // Blocking is tenant-wide, so the shop names are
+                                                // provenance only — listing them read as "blocked
+                                                // just there", which was never true.
                                                 if (blacklistShops.isEmpty()) {
                                                     span("badge ok") { +"No" }
                                                 } else {
-                                                    span("badge danger") {
-                                                        +"Yes — ${blacklistShops.joinToString(", ") { it.second }}"
-                                                    }
+                                                    span("badge danger") { +"Blocked — all shops" }
                                                 }
                                             }
                                             td { +bookingCount.toString() }
@@ -2660,10 +2661,40 @@ class WebAdmin(
                             hr()
                             h3 { +"Blacklist status" }
                             if (blacklistShops.isEmpty()) {
-                                p { span("badge ok") { +"Not blacklisted in any shop" } }
+                                p { span("badge ok") { +"Not blocked" } }
                             } else {
-                                p { span("badge danger") { +"Blacklisted in: ${blacklistShops.joinToString(", ") { it.second }}" } }
-                                p("hint") { +"To remove from blacklist, go to the relevant shop's Blacklist page in the mobile app, or use the Blacklist API." }
+                                p { span("badge danger") { +"Blocked on every shop line" } }
+                                p("hint") {
+                                    +("Blocking is tenant-wide: one block covers all shops, and removing it in the "
+                                        + "app's Blacklist page removes it everywhere. Added from: "
+                                        + blacklistShops.joinToString(", ") { it.second } + ".")
+                                }
+                            }
+
+                            // History — the thing that was missing. Before this existed, a lifted
+                            // block looked identical to one that had never been made, so "I blocked
+                            // them and they still got through" could not be checked at all.
+                            val blockHistory = db.getBlacklistHistory(customer.phone, limit = 20)
+                            if (blockHistory.isEmpty()) {
+                                p("hint") { +"No block/unblock history recorded for this number yet." }
+                            } else {
+                                table("table") {
+                                    thead { tr { th { +"When" }; th { +"Action" }; th { +"By" }; th { +"Reason" } } }
+                                    tbody {
+                                        for (e in blockHistory) {
+                                            tr {
+                                                td { +fmtTs(e.at) }
+                                                td {
+                                                    span("badge ${if (e.action == "block") "danger" else "ok"}") {
+                                                        +e.action
+                                                    }
+                                                }
+                                                td { +(e.actor ?: "—") }
+                                                td { +(e.reason ?: "—") }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // ── Call recording — ADMIN ONLY ───────────────────
