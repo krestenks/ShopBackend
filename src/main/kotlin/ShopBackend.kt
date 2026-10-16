@@ -159,6 +159,13 @@ object ShopBackend {
         // See [OneWayAudioMonitor].
         OneWayAudioMonitor(amiClient, reliabilityAlerter).start()
 
+        // If the backend does not answer the dialplan's routing request, the call is connected
+        // anyway — with the blacklist and opening hours bypassed — and leaves NO voice_call row,
+        // because the row is written by the endpoint that did not answer. The dialplan's FAILOPEN
+        // log line is the only trace; this turns it into a reliability event and one admin SMS.
+        // See [FailOpenLogWatch]. Read-only: it cannot hang up, restart or reconfigure anything.
+        asterisk.FailOpenLogWatch(db, reliabilityAlerter).start()
+
         // Once a day, refresh each Lebara shop's prepaid balance so a low balance surfaces as a
         // top-up nudge in the manager app (see [LebaraBalanceMonitor] + the balance-alerts endpoint).
         LebaraBalanceMonitor(db, telephonyService, amiClient).start()

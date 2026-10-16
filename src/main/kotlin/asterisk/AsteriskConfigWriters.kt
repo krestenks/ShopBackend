@@ -247,6 +247,20 @@ class DialplanWriter(private val config: AsteriskConfig, private val amiClient: 
                 appendLine(" same => n,GotoIf($d[\"$d{VERDICT}\" = \"menu_open\"]?welcomeopen,1)")
                 appendLine(" same => n,GotoIf($d[\"$d{VERDICT}\" = \"menu_closed\"]?welcomeclosed,1)")
                 appendLine(" same => n,GotoIf($d[\"$d{VERDICT}\" = \"menu_temp\"]?welcometemp,1)")
+                appendLine("; Anything other than those four or \"ring\" means the backend did not answer —")
+                appendLine("; it is mid-deploy, or the request failed. The call still goes through, because")
+                appendLine("; hanging up on a real customer over our own restart would be worse. But it must")
+                appendLine("; NOT be silent: the blacklist AND opening hours were both bypassed for this call,")
+                appendLine("; and the backend writes the voice_call row itself, so a call that leaks this way")
+                appendLine("; leaves no database row at all and is invisible to every query. This log line is")
+                appendLine("; the only trace. FailOpenLogWatch turns it into a reliability event + admin SMS.")
+                appendLine("; No commas in the message: Log() would read them as extra arguments.")
+                appendLine(
+                    " same => n,ExecIf($d[\"$d{VERDICT}\" != \"ring\"]?" +
+                        "Log(WARNING,FAILOPEN shop=$id verdict=[$d{VERDICT:0:40}] " +
+                        "caller=$d{CALLERID(num)} id=$d{UNIQUEID} - backend unreachable so the " +
+                        "blacklist and opening hours were BYPASSED for this call))"
+                )
                 appendLine(" same => n,Wait(2)")
                 appendLine("; Duty-aware pool routing: backend returns the &-joined on-duty manager")
                 appendLine("; endpoints; empty result falls back to this shop's legacy manager endpoint.")
