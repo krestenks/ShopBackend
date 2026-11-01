@@ -153,6 +153,62 @@ card id via udev (`ATTR{id}="EC25Shop1"`) or use `hw:CARD=EC25EUX,DEV=0` style
 addressing per USB path. Configure the resulting name in the shop's
 "ALSA audio device" field.
 
+## 7a. Hub port map — which physical port holds which shop
+
+All modems hang off one 16-port USB hub. The hub presents an upstream hub and
+four downstream 4-port chips, and **both numberings run opposite to the labels
+on the case**: chip 4 carries ports 1-4, chip 3 ports 5-8, chip 2 ports 9-12,
+chip 1 ports 13-16, and within a chip `.4` is the lowest-numbered physical port
+and `.1` the highest.
+
+A USB path `1-1.2.C.P` is therefore the labelled port:
+
+```
+physical port = (4 - C) * 4 + (5 - P)
+```
+
+| Port | USB path  | ALSA card   | Shop        |
+|------|-----------|-------------|-------------|
+| 1    | 1.2.4.4   | EC25EUX     | shop2 — JJ   |
+| 2    | 1.2.4.3   | EC25EUX_1   | shop1 — Aim  |
+| 3    | 1.2.4.2   | EC25EUX_2   | shop5 — Gina |
+| 4    | 1.2.4.1   | EC25EUX_3   | shop6 — Koi  |
+| 5    | 1.2.3.4   | EC25EUX_5   | spare        |
+| 6    | 1.2.3.3   | EC25EUX_4   | shop7 — Nan  |
+| 7    | 1.2.3.2   | EC25EUX_9   | spare        |
+| 8    | 1.2.3.1   | EC25EUX_7   | spare        |
+| 9    | 1.2.2.4   | EC25EUX_A   | spare        |
+| 10   | 1.2.2.3   | EC25EUX_6   | spare        |
+| 11   | 1.2.2.2   | EC25EUX_8   | spare        |
+| 12   | 1.2.2.1   | —           | empty        |
+| 13-16| 1.2.1.x   | —           | empty        |
+
+Ports 1-11 are populated; chip 1 (ports 13-16) is unused. ALSA card ids follow
+USB *registration* order, not socket order, so the card column is only valid
+until the next re-enumeration — derive it, do not trust it:
+
+```bash
+for p in /dev/snd/by-path/*usb*; do
+  c=$(readlink -f "$p" | grep -oE '[0-9]+$')
+  echo "$(basename "$p" | sed -E 's/.*usb-0:([0-9.]+):.*/\1/')  card$c  $(cat /proc/asound/card$c/id)"
+done | sort
+```
+
+**The direction within chips 2 and 3 is verified** by the switch-sequence
+mapping run (powering ports on one at a time and watching which path appeared).
+Chip 4's direction is inferred from the hub being four identical chips, and is
+consistent with ports 1-11 being contiguously populated.
+
+**Confirm by IMEI before pulling a SIM or a cable.** The port number is a
+convenience; the modem's identity is not. `quectel show device state shopN`
+prints the IMEI, and neighbouring ports are other live shops:
+
+```bash
+sudo asterisk -rx "quectel show devices" | awk '/^shop/{print $1, $(NF-1), $NF}'   # trunk, IMEI, IMSI
+```
+
+A SIM swap needs more than the slot: see §7c.
+
 ## 7b. Modem radio config — the three settings every EC25 must have
 
 **All three are required, on every modem, and two of ours ran for months without
@@ -305,6 +361,31 @@ hand, because it aborts *before* the reboot if any readback is wrong.
 ```
 AT+QMBNCFG="AutoSel",0 ; AT+QMBNCFG="Deactivate" ; AT+QCFG="ims",0 ; AT+CFUN=1,1
 ```
+
+## 7c. Swapping a SIM
+
+The shop is bound to its SIM **by IMSI** (`AsteriskProvisioner.assignShopToImsi`
+— "the IMSI is the stable key"), so a new SIM needs a new binding. In order:
+
+1. **Swap the card.** `QSIMDET` is `0,0` on these modems — hot-swap detection is
+   off, so a SIM put into a powered modem stays invisible.
+2. **Reset the modem** so it reads the new card: `AT+CFUN=1,1` on the **free**
+   `:1.3` tty (chan_quectel owns `:1.2`). Do it with the trunk idle; USB
+   re-enumerates. Until this runs, `quectel show device state` keeps reporting
+   the **old** IMSI and ICCID — chan_quectel caches them.
+3. **Unassign the shop first.** The assign UI only offers shops whose IMSI is
+   blank, so a shop still holding the stale IMSI never appears in the dropdown:
+   web admin → Telephony setup → unassign, then assign the new IMSI. Assigning
+   provisions, which rewrites `quectel_shops.conf` and reloads chan_quectel.
+4. **Re-enter the number.** `assignShopToImsi` clears `phoneNumber` whenever the
+   IMSI changes, because a different SIM means a different number. Set it under
+   the shop's telephony page — and set the **carrier** in the same form, which
+   overwrites it from its own field: submitting without it sets `carrier` to
+   NULL and the Lebara balance monitoring for that shop silently stops.
+5. **Re-check `ims` once the SIM is funded.** A fresh or unfunded SIM comes up
+   `ims,1,0` — enabled but inert — and `AT+CGACT=1,2` does not always clear it
+   immediately. See §7b.3; an inert IMS is what caused months of intermittent
+   SMS submit failures.
 
 ## 8. First provisioning + smoke test
 

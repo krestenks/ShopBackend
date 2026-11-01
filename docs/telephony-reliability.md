@@ -181,6 +181,96 @@ elsewhere now only skips the resync for that pass instead of holding back the ad
 re-runs the module's config reload — the process keeps the old `.so` in memory. Verify what is
 *running*: `sudo grep chan_quectel /proc/$(pidof asterisk)/maps` must not say `(deleted)`.
 
+### 7. Every call on one shop ends at ~15 s in silence (modem audio wedged)
+**Symptom.** One trunk's bridged calls all end inside a narrow 13-24 s band while the other shops
+run 40-60 s, and callers redial within the minute. Nobody hears anybody, or one side hears nothing.
+shop5, 2026-10-17 → 11-01: ten consecutive calls, none over 24 s, against a normal 41 s average for
+that same shop the fortnight before.
+
+**The signature is in the database, not the logs.** A conversation varies in length; a timeout does
+not. Ten calls inside an 11-second band is a caller giving up on silence:
+
+```sql
+SELECT shop_id, COUNT(*) n,
+       ROUND(AVG((ended_at-started_at)/1000)) avg_s,
+       MAX((ended_at-started_at)/1000)        max_s
+FROM voice_call
+WHERE outcome='OPERATOR_BRIDGED' AND ended_at IS NOT NULL
+  AND started_at > (strftime('%s','now') - 14*86400)*1000
+GROUP BY shop_id ORDER BY shop_id;
+```
+A shop whose `max_s` collapses while its peers hold is the one to look at. Note `started_at` is
+**epoch milliseconds**, and `strftime('%s', '<literal>')` parses as UTC — compare against `'now'`
+arithmetic, not a local-time string, or the window is silently off by the UTC offset.
+
+**Cause.** The modem's firmware stops bridging audio between the USB sound card and the GSM call.
+Nothing outside the modem can see it. Everything that can be queried reads correct and identical to
+a working trunk: `usbcfg` UAC bit set, `QDAI`, `QPCMV: 1,2`, `QAUDMOD`, `CMUT: 0`, `QMIC`/`QRXGAIN`,
+`ims,1,1`, `AutoSel,1`, `QINISTAT: 7`, registered with good RSSI. ALSA and USB are healthy —
+streams run in real time in both directions, no XRUN beyond what healthy trunks show, no kernel USB
+errors, no `[ALSA]` errors. Asterisk hands the modem audio exactly as it does for a shop that works.
+
+**Do not chase these — they are system-wide, not the fault:**
+- `N lost frame(s) X/0 (slin@8000)->(ulaw@8000)` — present on every shop, healthy ones most of all;
+  the trailing `0` is always `0`.
+- `state: XRUN` on an idle card, and mid-call re-prepares. A **working** trunk re-prepares its
+  stream *more* often than a broken one (4 times in 37 s vs 3 times in 33 s, measured).
+- `[ALSA][PLAYBACK] Error - try again later` — logged by shops whose audio is fine.
+
+**How to prove it.** Static comparison finds nothing; only a live call does. Place a test call to
+the suspect shop and **a control call to a healthy shop within the same few minutes**, with the
+same manager phone answering. The duty pool is owner-scoped, so one phone serves every shop — if it
+is good on one trunk and deaf on another minutes apart, the phone and the backend are excluded and
+only the modem is left. While the call runs, sample the card:
+
+```bash
+cat /proc/asound/card<N>/pcm0c/sub0/status   # hw_ptr / 8000 = seconds of audio streamed
+```
+`hw_ptr` advancing at ~8000 frames/s means ALSA is moving audio; it says nothing about whether the
+modem puts that audio on the air. Which card belongs to which shop: `quectel show device state
+shopN` → `Audio UAC`, cross-checked against `/dev/snd/by-path` (see phone-server-setup.md §7a).
+
+**Fix.** `AT+CFUN=1,1` on the free `:1.3` tty with the trunk idle. shop5 came back in 14 s with the
+same IMEI and the same ALSA card id, and the next call ran 56 s. Verify the card id is unchanged
+afterwards — if it is not, `alsadev=` points at the wrong card and the shop needs re-provisioning.
+
+**Most likely trigger: a power cycle.** The onset sat inside the window in which every modem was
+switched off and on for the USB-hub move. Not proven — the window also contains days with no
+bridged calls at all.
+
+**Nothing alerts on this.** The shop was dead for two weeks and the only signal was customers
+redialling. A per-shop duration check against the query above would catch it on day two.
+
+### 8. `Device or resource busy` opening a modem's ALSA card
+**Symptom.** On the log, right after a modem re-enumerates:
+```
+ERROR src/pcm.c: [ALSA][CAPTURE] Fail to open device - dev:'hw:CARD=EC25EUX_N' err:'Device or resource busy'
+ERROR src/chan_quectel.c: [shopN][ALSA] Problem opening capture device 'hw:CARD=EC25EUX_N'
+```
+
+**Cause.** PulseAudio claims every USB sound card as it appears and chan_quectel can lose the race
+for the PCM. Both instances on this box do it — the long-running user session's and the `gdm`
+greeter's — so it is not tied to a login. It fires on any event that re-enumerates a modem:
+`AT+CFUN=1,1`, a replug, a hub power cycle. Seen twice on 2026-11-01, on two different cards.
+
+**Impact.** Usually transient: chan_quectel retries and wins, and the trunk is fine. A loss that is
+*not* retried leaves that shop with no audio while every other check reports it healthy — which
+presents exactly as failure mode 7 above.
+
+**Check who holds a card:**
+```bash
+sudo lsof /dev/snd/pcmC<N>D0c /dev/snd/pcmC<N>D0p    # asterisk should hold both
+cat /proc/asound/card<N>/pcm0c/sub0/status           # 'closed' on a live trunk is wrong
+```
+
+**Fix (proposed, not yet applied).** Tell PulseAudio to ignore the modem cards with a udev rule:
+```
+SUBSYSTEM=="sound", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0125", ENV{PULSE_IGNORE}="1"
+```
+Unverified here: this box runs pipewire *and* pulseaudio, and `PULSE_IGNORE` is honoured by the
+PulseAudio ALSA-card detection path only. Confirm with `lsof` after a re-enumeration before
+trusting it. It takes effect on the next enumeration, not retrospectively.
+
 ## Reliability event log + admin alerts
 `ReliabilityAlerter` records events to the `reliability_event` table (capped 1000) and, for
 call-blocking ones, SMSes the admin (from a currently-healthy SIM, via `SmsQueue`, rate-limited
