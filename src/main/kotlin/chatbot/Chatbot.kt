@@ -503,7 +503,7 @@ class ChatbotService(private val db: DataBase, private val config: ChatbotConfig
             if (db.isAppointmentOverlapping(empId, epochMilli, durationMinutes)) {
                 """{"error":"Time slot is no longer available","success":false}"""
             } else {
-                val customerId = db.ensureCustomerByPhone(customerPhone)
+                val customerId = db.ensureCustomerByPhone(customerPhone, shopId)
                 val appointmentId = db.addAppointment(empId, shopId, customerId, epochMilli, durationMinutes)
                 """{"success":true,"confirmationId":"b-$appointmentId","message":"Booking confirmed!"}"""
             }

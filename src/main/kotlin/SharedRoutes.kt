@@ -128,7 +128,7 @@ fun Route.sharedBookingRoutes(db: DataBase, smsService: TelephonyService) {
             return@post call.respond(HttpStatusCode.BadRequest, "Missing shop_id or phone")
         }
 
-        val customerId = db.ensureCustomerByPhone(phone) // implement if needed
+        val customerId = db.ensureCustomerByPhone(phone, shopId)
         val bookingToken = db.generateBookingToken( customerId, shopId, phone)
 
         val baseUrl = PublicBaseUrl.fromCall(call)

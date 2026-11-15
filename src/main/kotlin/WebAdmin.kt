@@ -2467,7 +2467,7 @@ class WebAdmin(
                         return@post call.respond(HttpStatusCode.BadRequest, "Missing shop_id or phone")
                     }
 
-                    val customerId = db.ensureCustomerByPhone(phone) // implement if needed
+                    val customerId = db.ensureCustomerByPhone(phone, shopId)
                     val booking_token = db.generateBookingToken( customerId, shopId, phone)
 
                     val baseUrl = PublicBaseUrl.fromCall(call)

@@ -819,7 +819,7 @@ class MobileApi(
                         return@put call.respond(HttpStatusCode.Forbidden, "No contact with this number at this shop")
                     }
 
-                    val customerId = db.setCustomerStarredByPhone(phone, body.starred)
+                    val customerId = db.setCustomerStarredByPhone(phone, body.starred, shopId)
                     println("[MobileApi/customers] star=${body.starred} customer=$customerId shop=$shopId")
                     call.respond(StarCustomerResponse(customerId = customerId, starred = body.starred))
                 }
@@ -1798,7 +1798,7 @@ class MobileApi(
                     val customerId: Int = when {
                         body.customerId != null && body.customerId > 0 -> body.customerId
                         !body.customerPhone.isNullOrBlank() -> {
-                            val cid = db.ensureCustomerByPhone(body.customerPhone)
+                            val cid = db.ensureCustomerByPhone(body.customerPhone, shopId)
                             println("[create-json] resolved customerPhone=${body.customerPhone} -> customerId=$cid")
                             cid
                         }
@@ -1916,7 +1916,7 @@ class MobileApi(
                     val customerId: Int = when {
                         body.customerId != null && body.customerId > 0 -> body.customerId
                         !body.customerPhone.isNullOrBlank() -> {
-                            val cid = db.ensureCustomerByPhone(body.customerPhone)
+                            val cid = db.ensureCustomerByPhone(body.customerPhone, shopId)
                             println("[create-multi-json] resolved customerPhone=${body.customerPhone} -> customerId=$cid")
                             cid
                         }

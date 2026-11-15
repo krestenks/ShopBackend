@@ -396,7 +396,7 @@ fun persistInboundSms(
     // Auto-create a customer record if none exists yet — mirrors the behaviour of inbound
     // voice calls so that every new SMS sender immediately gets a profile (status "New").
     val customerId: Int? = if (fromPhone.isNotBlank()) {
-        val id = db.ensureCustomerByPhone(fromPhone)
+        val id = db.ensureCustomerByPhone(fromPhone, shopId)
         // Retroactively link any prior SMS messages that arrived before the record existed
         db.linkSmsMessagesToCustomer(shopId, fromPhone, id)
         id

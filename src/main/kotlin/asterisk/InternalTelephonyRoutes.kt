@@ -203,7 +203,7 @@ fun Routing.internalTelephonyRoutes(
         // "Known" (whitelisted) = existing row whose status is set and not "New".
         val existingCustomerId = if (from.isNotBlank()) db.getCustomerIdByPhone(from) else null
         val customerId = existingCustomerId ?: from.takeIf { it.isNotBlank() }?.let {
-            runCatching { db.insertNewCustomer(it) }.getOrNull()
+            runCatching { db.insertNewCustomer(it, shopId) }.getOrNull()
         }
         val status = existingCustomerId?.let { db.getCustomerById(it)?.status?.trim() }
         val isKnown = existingCustomerId != null && !status.isNullOrBlank() && !status.equals("New", ignoreCase = true)
@@ -436,7 +436,7 @@ fun Routing.internalTelephonyRoutes(
 
         record?.let { db.updateCallState(it.id, VoiceCallState.KNOWN_CUSTOMER_SMS_BOOKING) }
 
-        val customerId = db.ensureCustomerByPhone(from)
+        val customerId = db.ensureCustomerByPhone(from, shopId)
         val token = db.generateBookingToken(customerId, shopId, from)
         val base = (System.getenv("PUBLIC_BASE_URL") ?: System.getenv("PUBLIC_BOOKING_URL") ?: config.backendBaseUrl).trimEnd('/')
         val body = "Booking link: $base/api/book?token=$token"

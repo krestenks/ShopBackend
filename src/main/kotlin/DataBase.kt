@@ -2543,11 +2543,19 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return id
     }
 
-    fun insertNewCustomer(phone: String): Int {
-        val insertStmt = connection.prepareStatement("INSERT INTO customers (phone, status, name, payment, language) VALUES (?, 'New', 'NoName', 0, 0)")
-        insertStmt.setString(1, phone)
-        insertStmt.executeUpdate()
-        insertStmt.close()
+    /**
+     * Creates the stub customer for an unknown number. The owner is taken from [shopId], the shop
+     * that had the contact; with no shop, or a shop without an owner, the owner stays empty.
+     */
+    fun insertNewCustomer(phone: String, shopId: Int? = null): Int {
+        val ownerId = shopId?.let { getOwnerIdForShop(it) }
+        connection.prepareStatement(
+            "INSERT INTO customers (phone, status, name, payment, language, owner_id) VALUES (?, 'New', 'NoName', 0, 0, ?)"
+        ).use { insertStmt ->
+            insertStmt.setString(1, phone)
+            if (ownerId != null) insertStmt.setInt(2, ownerId) else insertStmt.setNull(2, java.sql.Types.INTEGER)
+            insertStmt.executeUpdate()
+        }
 
         // Retrieve last inserted row ID (works in SQLite)
         val idStmt = connection.createStatement()
@@ -2559,8 +2567,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return id
     }
 
-    fun ensureCustomerByPhone(phone: String): Int {
-        return getCustomerIdByPhone(phone) ?: insertNewCustomer(phone)
+    fun ensureCustomerByPhone(phone: String, shopId: Int? = null): Int {
+        return getCustomerIdByPhone(phone) ?: insertNewCustomer(phone, shopId)
     }
 
     /**
@@ -2635,8 +2643,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
      * Stars or un-stars the customer with [phone], creating the customer row if the number has
      * none yet (a caller who never had a record). Returns the customer id.
      */
-    fun setCustomerStarredByPhone(phone: String, starred: Boolean): Int {
-        val id = ensureCustomerByPhone(phone)
+    fun setCustomerStarredByPhone(phone: String, starred: Boolean, shopId: Int? = null): Int {
+        val id = ensureCustomerByPhone(phone, shopId)
         // By phone, not id: customers.phone is not UNIQUE, and the lists read the star by phone, so
         // a duplicate row left starred would make an un-star appear not to stick.
         connection.prepareStatement("UPDATE customers SET starred_at = ? WHERE phone = ?").use { stmt ->
@@ -5747,7 +5755,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 val shopId = rs.getInt("shop_id")
                 val phone  = rs.getString("counterparty_phone")
-                val cid    = ensureCustomerByPhone(phone)
+                val cid    = ensureCustomerByPhone(phone, shopId)
                 linkSmsMessagesToCustomer(shopId, phone, cid)
                 linked++
             }
