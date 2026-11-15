@@ -118,3 +118,23 @@ App
 - Quick messages: two managers, each sees only their own list.
 - Timeline: customer with calls and SMS across two shops, check order, the line filter, and paging across the boundary.
 - Not verified until built: the emoji SMS behaviour above.
+
+## Implementation status (2026-11-15)
+
+All four phases are implemented and committed (backend `0eac317`, app `4f40b59` in the ShopManager repo).
+Nothing is deployed to the edge. The backend runs on the EliteDesk staging copy (port 8081) with a copy of
+the edge database in which employee names were set to the shop names.
+
+Tested:
+- Backend: 259 tests pass, including 23 in `ManagerAppFeaturesTest` and 5 in `CustomerOwnerOnInsertTest`.
+- App on a Galaxy S21 (debug build `com.kkstech.shopmanager.dev`, staging backend):
+  - Therapists: list, rename of a single-therapist shop (employee and shop renamed, no Asterisk config written), rename back.
+  - Quick messages: add, edit, reorder, delete; chips fill the message box on the first tap; the second tap on Send sends (staging has no modem, so the send failed with "Asterisk AMI not connected" and was stored as failed).
+  - Customer timeline: calls and SMS together, line filter, "Load older" appends the next page.
+
+Not tested or not done:
+- Move a therapist to another shop from the app (backend tested only).
+- The route layer has no automated test; the app tests above exercise it by hand.
+- Star routes still match customers by phone across owners.
+- The timeline queries have no indexes.
+- The employee-name correction has not been run on the edge database.
