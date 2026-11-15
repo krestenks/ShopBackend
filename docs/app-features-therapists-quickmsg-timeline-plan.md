@@ -27,7 +27,7 @@ The app is Activities with XML layouts and Retrofit, not Compose.
 | Number ownership | The SIM number stays on the shop (`shop_telephony_config.phone_number`). The app shows whether the number is dedicated or shared. |
 | Dedicated or shared | Derived, not stored. A shop with exactly one `employee_shop` row: "Dedicated to <name>". Any other count: "Shared shop number". |
 | Number editing | Read only in the app. Changed in WebAdmin only. |
-| Therapist name | Editable from the app. |
+| Therapist name | Editable from the app. In a shop with exactly one therapist, the rename also renames the shop. Otherwise only the employee name changes. |
 | Therapist page | Name (editable), shop (editable), number (read only, with the dedicated or shared label). |
 | Shared scope | Customer records are tenant-wide (all shops of one owner, all managers). |
 | Quick messages | Private per manager, stored in the backend DB, plain text and emoji, no placeholders. Tap fills the message box, a second tap sends. |
@@ -36,7 +36,9 @@ The app is Activities with XML layouts and Retrofit, not Compose.
 ## Assumptions to confirm
 
 1. "Dedicated" is derived from the number of employees in the shop, as in the table above.
-2. Every shop already has its therapist as an `employees` row. Not verified against the live data; check one shop with no employee or with several before building.
+2. Every shop has its therapist as an `employees` row. Checked on an edge snapshot taken 2026-11-15: shops 1, 2, 5, 6 and 7 have exactly one employee each; the two test shops (3 and 4) have none and no line number. All 5 employees have `owner_id = 1` and one shop. All 5 have an empty `phone`, so the Mobile row is hidden for everyone until phones are entered.
+   Shop names and employee names do not match everywhere: shop 1 "Aor" has employee "Patty", and shop 6 "Patty" has employee "Kaew". Confirmed by you: the shop names are correct, and the employee names are out of date because the shop name has been used as the therapist name. The app shows the shop name.
+   Data correction before Phase 1 ships: set `employees.name` to the shop name for each shop that has exactly one employee (employee 1 to "Aor", 2 "JJ", 3 "Gina", 4 "Patty", 5 "Nan"). Run it on the staging copy first, then on the edge only with your approval and with the backend stopped or through WebAdmin, since the database has one connection. Employee names appear in the price-list SMS (`MessageThreadActivity.buildAndConfirmPriceList` lists each employee by `emp.name`), in appointment history and in reports, so those currently show the stale names. Check the Reports and appointment screens against the corrected names.
 3. A manager can edit therapists in every shop of the tenant, not only the shops they cover.
 4. The timeline shows tenant-wide history for the customer, not only the manager's own shops.
 5. `employees.phone` is the therapist's own mobile (confirmed by you). The therapist page shows it and the shop line number as two separate labelled rows: "Mobile" and "Shop line (dedicated / shared)". Both are read only in the app and changed in WebAdmin. Every manager of the tenant can see the therapist's mobile. The mobile can be empty, and the row is then hidden.
@@ -50,7 +52,9 @@ Backend
 - `GET /api/mobile/therapists/{id}`.
 - `PATCH /api/mobile/therapists/{id}` with `name` and `shopId`. The owner check applies to both the employee and the target shop. A shop change calls the existing `assignEmployeeToShop(id, shopId, exclusive = true)`.
 - Moving a therapist changes shop availability (`employee_shop.available`, which the Availability screen controls). The move keeps the default available state and the response says so. Appointments keep their `employee_id`.
-- Shop name: decided that a rename in the app updates only `employees.name`. The shop name is not changed, so the call log, search and SMS header keep showing the shop name as set in WebAdmin. Until the shop is renamed there, it can differ from the therapist's name. The therapist page shows both, with the shop name labelled as the shop.
+- Shop name (decided): when the shop has exactly one employee, renaming that therapist in the app changes `employees.name` and `shops.name` in one transaction, so the call log, search and SMS header show the new name. When the shop has none or several employees, a rename changes only `employees.name`. The response says which names changed. This replaces the earlier "name only" decision, which was taken before it was known that the shop name is the displayed name.
+- Rename side effects, checked by searching `asterisk/*.kt` for shop-name use (searched, not read in full): the only use found is the display name in `ModemScanner`. No Asterisk config is written from `shops.name`, so a rename should not trigger a provisioning pass or a module reload. Verify this on staging by watching for writes in the scratch config directory after a rename. `shop_voice_config.business_name` is a separate field and is not changed.
+- The two writes sit behind one route and one database function, so they cannot be applied separately.
 
 App
 - New drawer item "Therapists" in `drawer_menu.xml`, handled in `ShopScheduleActivity`, hidden for the `shop` role. It opens a list Activity, then a therapist page Activity. Name and shop are editable; the number is read only with the dedicated or shared label.
@@ -61,7 +65,10 @@ App
 
 - Customers are currently global by phone number, not by owner (see the findings above). Make `getCustomerById`, `getCustomerIdByPhone` and the routes that use them filter by `customers.owner_id`, with the owner taken from the authenticated manager.
 - The app passes `shop_id` to customer screens and calls. Keep that for compatibility. The timeline endpoint takes the customer id only and does not need a shop.
-- Check that a customer is one record per owner and normalised phone. Check for duplicates created per shop in existing data (`SELECT owner_id, phone, COUNT(*) ... HAVING COUNT(*) > 1`).
+- Snapshot of 2026-11-15: 1 owner, 7 shops, 3 managers, 2586 customers. No duplicate phone numbers. 671 customers have `owner_id` NULL.
+- Cause (confirmed in `DataBase.kt`): customers created automatically from calls and SMS are inserted without `owner_id` (the insert at line 2547). A startup step then sets `owner_id = 1` on every row where it is NULL (around line 6699). On the staging start of 2026-11-15 it backfilled exactly those 671 rows. So the live edge accumulates null-owner customers until its next restart, and an owner filter added now would hide every customer created since the last restart.
+- Fix: set `owner_id` at insert time from the shop that had the contact, and replace the hard-coded `owner_id = 1` backfill with one derived from the shop. The hard-coded value is only correct while there is one owner.
+- With one owner today, the missing owner scoping is not reachable by another tenant yet; it matters when a second owner is added.
 - `voice_call.customer_id` is nullable. Where it is empty, match by normalised phone within the owner.
 
 ## Phase 3: quick messages
