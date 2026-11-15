@@ -66,16 +66,19 @@ class CustomerOwnerOnInsertTest {
     }
 
     @Test
-    fun `an existing customer keeps its owner`() {
+    fun `an existing customer keeps its owner, and another owner gets its own customer`() {
         val file = freshDbFile()
         val db = DataBase(file.toString())
         val first = db.addShopForOwner(1, "Alpha", null, null)
+        val sameOwner = db.addShopForOwner(1, "Beta", null, null)
         val other = db.addShopForOwner(2, "OtherTenant", null, null)
 
         val id = db.ensureCustomerByPhone("+4551000104", first)
-        val again = db.ensureCustomerByPhone("+4551000104", other)
 
-        assertEquals(id, again)
+        assertEquals(id, db.ensureCustomerByPhone("+4551000104", sameOwner))
         assertEquals(1, ownerOf(file, id))
+        val otherId = db.ensureCustomerByPhone("+4551000104", other)
+        assertEquals(2, ownerOf(file, otherId))
+        assertEquals(1, ownerOf(file, id), "the first owner's customer is untouched")
     }
 }

@@ -1192,6 +1192,24 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             )
         """.trimIndent()) }
 
+        // Quick messages: canned SMS texts, private to the manager who wrote them.
+        connection.createStatement().use { it.execute("""
+            CREATE TABLE IF NOT EXISTS quick_message (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                manager_id INTEGER NOT NULL,
+                owner_id   INTEGER,
+                text       TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """.trimIndent()) }
+        try {
+            connection.createStatement().use { it.execute(
+                "CREATE INDEX IF NOT EXISTS idx_quick_message_manager ON quick_message(manager_id, sort_order)"
+            ) }
+        } catch (_: Exception) {}
+
         // Latest radio/signal telemetry reported by each manager's phone (piggybacked on sip-report).
         // One row per manager, overwritten each report — used to correlate outages with LTE signal
         // and battery level (a phone that dies overnight goes dark; see the battery telemetry).
@@ -2567,8 +2585,30 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return id
     }
 
+    /**
+     * The customer with [phone] inside one owner. A row with no owner yet also matches, so the
+     * startup step that fills in missing owners does not leave a duplicate behind.
+     */
+    fun getCustomerIdByPhoneForOwner(phone: String, ownerId: Int): Int? {
+        connection.prepareStatement(
+            "SELECT id FROM customers WHERE phone = ? AND (owner_id = ? OR owner_id IS NULL) " +
+                "ORDER BY (owner_id IS NULL), id LIMIT 1"
+        ).use { stmt ->
+            stmt.setString(1, phone)
+            stmt.setInt(2, ownerId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getInt(1) else null
+        }
+    }
+
+    /**
+     * Finds the customer for [phone] or creates it. With a [shopId] the search stays inside that
+     * shop's owner, so two owners can each have a customer with the same number.
+     */
     fun ensureCustomerByPhone(phone: String, shopId: Int? = null): Int {
-        return getCustomerIdByPhone(phone) ?: insertNewCustomer(phone, shopId)
+        val ownerId = shopId?.let { getOwnerIdForShop(it) }
+        val existing = if (ownerId != null) getCustomerIdByPhoneForOwner(phone, ownerId) else getCustomerIdByPhone(phone)
+        return existing ?: insertNewCustomer(phone, shopId)
     }
 
     /**
@@ -6704,7 +6744,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "UPDATE managers  SET owner_id = 1 WHERE owner_id IS NULL",
             "UPDATE employees SET owner_id = 1 WHERE owner_id IS NULL",
             "UPDATE services  SET owner_id = 1 WHERE owner_id IS NULL",
-            "UPDATE customers SET owner_id = 1 WHERE owner_id IS NULL",
+            // Customers get the owner of a shop they had contact with; only when the system has
+            // exactly one owner is the remainder given to that owner.
+            """UPDATE customers SET owner_id = (
+                   SELECT s.owner_id FROM shops s
+                   WHERE s.owner_id IS NOT NULL AND s.id IN (
+                       SELECT m.shop_id FROM sms_message m WHERE m.customer_id = customers.id
+                       UNION SELECT v.shop_id FROM voice_call v WHERE v.customer_id = customers.id
+                   ) ORDER BY s.id LIMIT 1
+               ) WHERE owner_id IS NULL""",
+            "UPDATE customers SET owner_id = (SELECT id FROM owners LIMIT 1) WHERE owner_id IS NULL AND (SELECT COUNT(*) FROM owners) = 1",
             "UPDATE app_account SET owner_id = 1 WHERE owner_id IS NULL",
             // phone_blacklist was missing from this list. Harmless so far (no NULL rows exist in
             // production), but a NULL here used to mean a block that enforcement still applied
@@ -6815,6 +6864,251 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.getInt("owner_id").takeIf { !rs.wasNull() && it > 0 } else null
         }
+    }
+
+    // ── Therapists (employees seen from the manager app) ──────────────────────
+
+    private fun readTherapist(rs: java.sql.ResultSet): TherapistDto {
+        val count = rs.getInt("shop_employee_count")
+        return TherapistDto(
+            id = rs.getInt("id"),
+            name = rs.getString("name"),
+            mobile = rs.getString("phone")?.trim()?.takeIf { it.isNotBlank() },
+            shopId = rs.getInt("shop_id"),
+            shopName = rs.getString("shop_name"),
+            lineNumber = rs.getString("phone_number")?.trim()?.takeIf { it.isNotBlank() },
+            numberMode = if (count == 1) "dedicated" else "shared",
+        )
+    }
+
+    private val therapistSelect = """
+        SELECT e.id, e.name, e.phone, s.id AS shop_id, s.name AS shop_name, t.phone_number,
+               (SELECT COUNT(*) FROM employee_shop x WHERE x.shop_id = s.id) AS shop_employee_count
+        FROM employees e
+        JOIN employee_shop es ON es.employee_id = e.id
+        JOIN shops s ON s.id = es.shop_id
+        LEFT JOIN shop_telephony_config t ON t.shop_id = s.id
+    """.trimIndent()
+
+    /** The therapists of one owner, one entry per employee (the lowest shop id when several). */
+    fun getTherapistsForOwner(ownerId: Int): List<TherapistDto> {
+        connection.prepareStatement("$therapistSelect WHERE s.owner_id = ? ORDER BY s.id, e.id").use { stmt ->
+            stmt.setInt(1, ownerId)
+            val rs = stmt.executeQuery()
+            val seen = HashSet<Int>()
+            val out = mutableListOf<TherapistDto>()
+            while (rs.next()) {
+                val t = readTherapist(rs)
+                if (seen.add(t.id)) out.add(t)
+            }
+            return out
+        }
+    }
+
+    fun getTherapistForOwner(id: Int, ownerId: Int): TherapistDto? =
+        getTherapistsForOwner(ownerId).firstOrNull { it.id == id }
+
+    /**
+     * Renames a therapist. In a shop with exactly one therapist the shop gets the same name, in
+     * the same transaction. Returns null when the therapist is not one of the owner's.
+     */
+    fun renameTherapist(id: Int, ownerId: Int, newName: String): UpdateTherapistResponse? {
+        val name = newName.trim()
+        require(name.isNotEmpty()) { "name is required" }
+        require(name.length <= THERAPIST_NAME_MAX_LENGTH) { "name is longer than $THERAPIST_NAME_MAX_LENGTH characters" }
+        val current = getTherapistForOwner(id, ownerId) ?: return null
+        val renameShop = current.numberMode == "dedicated"
+        inTransaction {
+            connection.prepareStatement("UPDATE employees SET name = ? WHERE id = ?").use { stmt ->
+                stmt.setString(1, name)
+                stmt.setInt(2, id)
+                stmt.executeUpdate()
+            }
+            if (renameShop) {
+                connection.prepareStatement("UPDATE shops SET name = ? WHERE id = ? AND owner_id = ?").use { stmt ->
+                    stmt.setString(1, name)
+                    stmt.setInt(2, current.shopId)
+                    stmt.setInt(3, ownerId)
+                    stmt.executeUpdate()
+                }
+            }
+        }
+        return UpdateTherapistResponse(
+            therapist = getTherapistForOwner(id, ownerId)!!,
+            employeeRenamed = name != current.name,
+            shopRenamed = renameShop && name != current.shopName,
+        )
+    }
+
+    /**
+     * Moves a therapist to another shop of the same owner. Returns null when the therapist or the
+     * shop is not the owner's.
+     */
+    fun moveTherapist(id: Int, ownerId: Int, shopId: Int): TherapistDto? {
+        getTherapistForOwner(id, ownerId) ?: return null
+        if (!isShopOwnedBy(shopId, ownerId)) return null
+        inTransaction { assignEmployeeToShop(id, shopId, exclusive = true) }
+        return getTherapistForOwner(id, ownerId)
+    }
+
+    // ── Quick messages (private to each manager) ──────────────────────────────
+
+    fun getQuickMessages(managerId: Int): List<QuickMessageDto> {
+        connection.prepareStatement(
+            "SELECT id, text, sort_order FROM quick_message WHERE manager_id = ? ORDER BY sort_order, id"
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            val rs = stmt.executeQuery()
+            val out = mutableListOf<QuickMessageDto>()
+            while (rs.next()) out.add(QuickMessageDto(rs.getInt("id"), rs.getString("text"), rs.getInt("sort_order")))
+            return out
+        }
+    }
+
+    private fun checkQuickMessageText(text: String): String {
+        val t = text.trim()
+        require(t.isNotEmpty()) { "text is required" }
+        require(t.codePointCount(0, t.length) <= QUICK_MESSAGE_MAX_LENGTH) {
+            "text is longer than $QUICK_MESSAGE_MAX_LENGTH characters"
+        }
+        return t
+    }
+
+    /** Adds a message at the end of the manager's list. Fails when the list is full. */
+    fun addQuickMessage(managerId: Int, ownerId: Int?, text: String): QuickMessageDto {
+        val t = checkQuickMessageText(text)
+        val existing = getQuickMessages(managerId)
+        require(existing.size < QUICK_MESSAGE_MAX_COUNT) { "at most $QUICK_MESSAGE_MAX_COUNT quick messages" }
+        val order = (existing.maxOfOrNull { it.sortOrder } ?: -1) + 1
+        val now = System.currentTimeMillis()
+        connection.prepareStatement(
+            "INSERT INTO quick_message (manager_id, owner_id, text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        ).use { stmt ->
+            stmt.setInt(1, managerId)
+            if (ownerId != null) stmt.setInt(2, ownerId) else stmt.setNull(2, java.sql.Types.INTEGER)
+            stmt.setString(3, t)
+            stmt.setInt(4, order)
+            stmt.setLong(5, now)
+            stmt.setLong(6, now)
+            stmt.executeUpdate()
+        }
+        connection.createStatement().use { s ->
+            val rs = s.executeQuery("SELECT last_insert_rowid()")
+            rs.next()
+            return QuickMessageDto(rs.getInt(1), t, order)
+        }
+    }
+
+    /** Changes the text of one of the manager's own messages; false when it is not theirs. */
+    fun updateQuickMessage(id: Int, managerId: Int, text: String): Boolean {
+        val t = checkQuickMessageText(text)
+        connection.prepareStatement(
+            "UPDATE quick_message SET text = ?, updated_at = ? WHERE id = ? AND manager_id = ?"
+        ).use { stmt ->
+            stmt.setString(1, t)
+            stmt.setLong(2, System.currentTimeMillis())
+            stmt.setInt(3, id)
+            stmt.setInt(4, managerId)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
+    fun deleteQuickMessage(id: Int, managerId: Int): Boolean {
+        connection.prepareStatement("DELETE FROM quick_message WHERE id = ? AND manager_id = ?").use { stmt ->
+            stmt.setInt(1, id)
+            stmt.setInt(2, managerId)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
+    /** Sets the order. [ids] must be exactly the manager's current messages; otherwise nothing changes. */
+    fun reorderQuickMessages(managerId: Int, ids: List<Int>): Boolean {
+        val current = getQuickMessages(managerId).map { it.id }
+        if (ids.size != current.size || ids.toSet() != current.toSet()) return false
+        inTransaction {
+            connection.prepareStatement("UPDATE quick_message SET sort_order = ? WHERE id = ? AND manager_id = ?").use { stmt ->
+                ids.forEachIndexed { index, id ->
+                    stmt.setInt(1, index)
+                    stmt.setInt(2, id)
+                    stmt.setInt(3, managerId)
+                    stmt.executeUpdate()
+                }
+            }
+        }
+        return true
+    }
+
+    // ── Customer timeline ─────────────────────────────────────────────────────
+
+    /**
+     * Calls and SMS for one customer across all shops of the owner, newest first. [before] pages
+     * to older entries; [shopId] limits the list to one shop. Returns null when the customer is
+     * not the owner's, or [shopId] is not one of the owner's shops.
+     */
+    fun getCustomerTimeline(customerId: Int, ownerId: Int, shopId: Int?, before: Long?, limit: Int): TimelineResponse? {
+        if (getOwnerIdForCustomer(customerId) != ownerId) return null
+        if (shopId != null && !isShopOwnedBy(shopId, ownerId)) return null
+        val phone = getCustomerById(customerId)?.phone ?: return null
+        val capped = limit.coerceIn(1, 200)
+        val entries = mutableListOf<TimelineEntry>()
+
+        val smsSql = buildString {
+            append("SELECT m.id, m.shop_id, s.name AS shop_name, m.created_at, m.direction, m.body, m.status ")
+            append("FROM sms_message m JOIN shops s ON s.id = m.shop_id ")
+            append("WHERE s.owner_id = ? AND (m.customer_id = ? OR m.counterparty_phone = ?) ")
+            if (shopId != null) append("AND m.shop_id = ? ")
+            if (before != null) append("AND m.created_at < ? ")
+            append("ORDER BY m.created_at DESC, m.id DESC LIMIT ?")
+        }
+        connection.prepareStatement(smsSql).use { stmt ->
+            var i = 1
+            stmt.setInt(i++, ownerId); stmt.setInt(i++, customerId); stmt.setString(i++, phone)
+            if (shopId != null) stmt.setInt(i++, shopId)
+            if (before != null) stmt.setLong(i++, before)
+            stmt.setInt(i, capped + 1)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                entries.add(TimelineEntry(
+                    type = "sms", id = rs.getInt("id"), shopId = rs.getInt("shop_id"),
+                    shopName = rs.getString("shop_name"), at = rs.getLong("created_at"),
+                    direction = if (rs.getString("direction") == "outbound") "outbound" else "inbound",
+                    body = rs.getString("body"), status = rs.getString("status"),
+                ))
+            }
+        }
+
+        val callSql = buildString {
+            append("SELECT v.id, v.shop_id, s.name AS shop_name, v.started_at, v.ended_at, v.from_phone, v.outcome ")
+            append("FROM voice_call v JOIN shops s ON s.id = v.shop_id ")
+            append("WHERE s.owner_id = ? AND (v.customer_id = ? OR v.from_phone = ? OR v.to_phone = ?) ")
+            if (shopId != null) append("AND v.shop_id = ? ")
+            if (before != null) append("AND v.started_at < ? ")
+            append("ORDER BY v.started_at DESC, v.id DESC LIMIT ?")
+        }
+        connection.prepareStatement(callSql).use { stmt ->
+            var i = 1
+            stmt.setInt(i++, ownerId); stmt.setInt(i++, customerId); stmt.setString(i++, phone); stmt.setString(i++, phone)
+            if (shopId != null) stmt.setInt(i++, shopId)
+            if (before != null) stmt.setLong(i++, before)
+            stmt.setInt(i, capped + 1)
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val started = rs.getLong("started_at")
+                val ended = rs.getLong("ended_at").takeIf { !rs.wasNull() }
+                entries.add(TimelineEntry(
+                    type = "call", id = rs.getInt("id"), shopId = rs.getInt("shop_id"),
+                    shopName = rs.getString("shop_name"), at = started,
+                    direction = if (rs.getString("from_phone") == phone) "inbound" else "outbound",
+                    outcome = rs.getString("outcome"),
+                    durationSeconds = ended?.let { ((it - started) / 1000).coerceAtLeast(0) },
+                ))
+            }
+        }
+
+        val sorted = entries.sortedWith(compareByDescending<TimelineEntry> { it.at }.thenBy { it.type }.thenByDescending { it.id })
+        val page = sorted.take(capped)
+        val more = sorted.size > capped
+        return TimelineResponse(page, nextBefore = if (more) page.last().at else null)
     }
 
     fun getOwnerIdForManager(managerId: Int): Int? {

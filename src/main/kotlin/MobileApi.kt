@@ -410,6 +410,9 @@ class MobileApi(
 
             authenticate("jwt") {
 
+                // Therapist page, quick messages, customer timeline.
+                mobileFeatureRoutes(db)
+
                 // ─────────────────────────────────────────────────────────────
                 // SIP credentials (self-hosted Asterisk telephony)
                 // ─────────────────────────────────────────────────────────────
@@ -752,6 +755,10 @@ class MobileApi(
                         return@get
                     }
 
+                    // A customer of another owner answers like a missing one.
+                    if (!customerBelongsToOwner(customerId, loginInfo, db)) {
+                        return@get call.respond(HttpStatusCode.NotFound, "Customer not found")
+                    }
                     val customer = db.getCustomerById(customerId)
                         ?: return@get call.respond(HttpStatusCode.NotFound, "Customer not found")
 
@@ -850,6 +857,9 @@ class MobileApi(
                         return@patch call.respond(HttpStatusCode.BadRequest, "name is required")
                     }
 
+                    if (!customerBelongsToOwner(customerId, loginInfo, db)) {
+                        return@patch call.respond(HttpStatusCode.NotFound, "Customer not found")
+                    }
                     val existing = db.getCustomerById(customerId)
                         ?: return@patch call.respond(HttpStatusCode.NotFound, "Customer not found")
 
@@ -884,6 +894,9 @@ class MobileApi(
                     val body = runCatching { call.receive<UpdateCustomerRequest>() }.getOrNull()
                         ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
 
+                    if (!customerBelongsToOwner(customerId, loginInfo, db)) {
+                        return@put call.respond(HttpStatusCode.NotFound, "Customer not found")
+                    }
                     db.getCustomerById(customerId)
                         ?: return@put call.respond(HttpStatusCode.NotFound, "Customer not found")
 
