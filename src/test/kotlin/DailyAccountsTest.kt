@@ -4,18 +4,20 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
+import java.time.LocalDate
 import java.time.YearMonth
 
-/** Daily accounts per therapist: storage, totals, validation and owner scoping. Amounts are øre. */
+/** Accounts per therapist: job lines per day, day and month totals, validation and owner scoping. Amounts are øre. */
 class DailyAccountsTest {
 
     private val november = YearMonth.of(2026, 11)
+    private val day10 = LocalDate.of(2026, 11, 10)
 
     private class Setup(val db: DataBase, val file: java.nio.file.Path, val shopA: Int, val shopB: Int, val therapist: Int, val otherOwnerTherapist: Int) {
-        fun accountRowCount(employeeId: Int): Int =
+        fun jobRowCount(employeeId: Int): Int =
             java.sql.DriverManager.getConnection("jdbc:sqlite:${file.toAbsolutePath()}").use { c ->
                 c.createStatement().use { st ->
-                    val rs = st.executeQuery("SELECT COUNT(*) FROM daily_accounts WHERE employee_id = $employeeId")
+                    val rs = st.executeQuery("SELECT COUNT(*) FROM account_jobs WHERE employee_id = $employeeId")
                     rs.next(); rs.getInt(1)
                 }
             }
@@ -38,8 +40,8 @@ class DailyAccountsTest {
         return Setup(db, f, shopA, shopB, mai, zed)
     }
 
-    private fun day(date: String, cash: Long = 0, mobilepay: Long = 0, revolut: Long = 0, food: Long = 0) =
-        AccountDayDto(date, cash, mobilepay, revolut, food)
+    private fun job(line: Int, cash: Long = 0, mobilepay: Long = 0, revolut: Long = 0, food: Long = 0) =
+        AccountJobDto(line, cash, mobilepay, revolut, food)
 
     @Test
     fun `a month lists every date, with zero for days that were not entered`() {
@@ -57,82 +59,121 @@ class DailyAccountsTest {
     }
 
     @Test
-    fun `day total is received minus food and the month row sums each column`() {
+    fun `a day with no entries has no job lines`() {
         val s = setup()
-        val saved = s.db.saveAccountsMonth(
-            s.therapist, november,
+        val d = s.db.getAccountsDay(s.therapist, day10)
+        assertEquals("2026-11-10", d.day)
+        assertTrue(d.jobs.isEmpty())
+        assertEquals(0L, d.totals.total)
+    }
+
+    @Test
+    fun `a job total is received minus food, and the day sums its jobs`() {
+        val s = setup()
+        val saved = s.db.saveAccountsDay(
+            s.therapist, day10,
             listOf(
-                day("2026-11-03", cash = 50000, mobilepay = 120000, revolut = 30000, food = 4500),
-                day("2026-11-04", cash = 10000, food = 12000),
+                job(1, cash = 50000, mobilepay = 120000, food = 4500),
+                job(2, revolut = 30000),
+                job(3, cash = 10000, food = 12000),
             ),
         )
-        val d3 = saved.days.first { it.day == "2026-11-03" }
-        assertEquals(50000 + 120000 + 30000 - 4500L, d3.total)
-        assertEquals(10000 - 12000L, saved.days.first { it.day == "2026-11-04" }.total, "a day can be negative")
+        assertEquals(3, saved.jobs.size)
+        assertEquals(50000 + 120000 - 4500L, saved.jobs[0].total)
+        assertEquals(30000L, saved.jobs[1].total)
+        assertEquals(-2000L, saved.jobs[2].total, "a job can be negative")
         assertEquals(60000L, saved.totals.cash)
         assertEquals(120000L, saved.totals.mobilepay)
         assertEquals(30000L, saved.totals.revolut)
         assertEquals(16500L, saved.totals.food)
-        assertEquals(60000 + 120000 + 30000 - 16500L, saved.totals.total)
-        assertEquals(saved.days.sumOf { it.total }, saved.totals.total, "the month total equals the sum of the day totals")
+        assertEquals(saved.jobs.sumOf { it.total }, saved.totals.total)
     }
 
     @Test
-    fun `entries are kept when the month is read again, and a later save replaces the day`() {
+    fun `the month shows the sum of each day's jobs and a month row`() {
         val s = setup()
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-10", cash = 1000)))
-        assertEquals(1000L, s.db.getAccountsMonth(s.therapist, november).days[9].cash)
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-10", cash = 2500, food = 100)))
-        val d = s.db.getAccountsMonth(s.therapist, november).days[9]
-        assertEquals(2500L, d.cash)
-        assertEquals(100L, d.food)
-        assertEquals(0L, s.db.getAccountsMonth(s.therapist, YearMonth.of(2026, 10)).totals.cash, "another month is untouched")
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 1000), job(2, cash = 500, food = 100)))
+        s.db.saveAccountsDay(s.therapist, LocalDate.of(2026, 11, 11), listOf(job(1, mobilepay = 700)))
+        val m = s.db.getAccountsMonth(s.therapist, november)
+        val d10 = m.days[9]
+        assertEquals(1500L, d10.cash)
+        assertEquals(100L, d10.food)
+        assertEquals(1400L, d10.total)
+        assertEquals(700L, m.days[10].total)
+        assertEquals(1500L, m.totals.cash)
+        assertEquals(700L, m.totals.mobilepay)
+        assertEquals(2100L, m.totals.total)
+        assertEquals(m.days.sumOf { it.total }, m.totals.total)
+        assertEquals(0L, s.db.getAccountsMonth(s.therapist, YearMonth.of(2026, 10)).totals.total, "another month is untouched")
     }
 
     @Test
-    fun `a day with every amount zero is removed`() {
+    fun `a save replaces the whole day, and lines keep their position`() {
         val s = setup()
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-10", cash = 1000)))
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-10")))
-        val rows = s.accountRowCount(s.therapist)
-        assertEquals(0, rows)
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 100), job(2, cash = 200), job(4, cash = 400)))
+        val saved = s.db.saveAccountsDay(s.therapist, day10, listOf(job(2, cash = 250), job(5, cash = 500)))
+        assertEquals(listOf(2, 5), saved.jobs.map { it.line }, "lines left out are removed, empty positions stay empty")
+        assertEquals(250L, saved.jobs[0].cash)
+        assertEquals(750L, saved.totals.cash)
     }
 
     @Test
-    fun `a save changes only the days it names`() {
+    fun `a job line with every amount zero is not stored`() {
         val s = setup()
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-01", cash = 100), day("2026-11-02", cash = 200)))
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-02", cash = 999)))
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 1000), job(2)))
+        assertEquals(1, s.jobRowCount(s.therapist))
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1)))
+        assertEquals(0, s.jobRowCount(s.therapist))
+    }
+
+    @Test
+    fun `a save changes only that day`() {
+        val s = setup()
+        s.db.saveAccountsDay(s.therapist, LocalDate.of(2026, 11, 1), listOf(job(1, cash = 100)))
+        s.db.saveAccountsDay(s.therapist, LocalDate.of(2026, 11, 2), listOf(job(1, cash = 200)))
+        s.db.saveAccountsDay(s.therapist, LocalDate.of(2026, 11, 2), listOf(job(1, cash = 999)))
         val m = s.db.getAccountsMonth(s.therapist, november)
         assertEquals(100L, m.days[0].cash)
         assertEquals(999L, m.days[1].cash)
     }
 
     @Test
+    fun `more than five job lines are stored, up to the limit`() {
+        val s = setup()
+        val many = (1..ACCOUNT_JOB_MAX_LINES).map { job(it, cash = 100L * it) }
+        val saved = s.db.saveAccountsDay(s.therapist, day10, many)
+        assertEquals(ACCOUNT_JOB_MAX_LINES, saved.jobs.size)
+        assertEquals(100L * ACCOUNT_JOB_MAX_LINES * (ACCOUNT_JOB_MAX_LINES + 1) / 2, saved.totals.cash)
+    }
+
+    @Test
     fun `bad input is refused and nothing from that save is stored`() {
         val s = setup()
-        fun refused(vararg days: AccountDayDto) {
-            assertThrows(IllegalArgumentException::class.java) { s.db.saveAccountsMonth(s.therapist, november, days.toList()) }
+        fun refused(vararg jobs: AccountJobDto) {
+            assertThrows(IllegalArgumentException::class.java) { s.db.saveAccountsDay(s.therapist, day10, jobs.toList()) }
         }
-        refused(day("not-a-date", cash = 1))
-        refused(day("2026-11-31", cash = 1))                 // no such date
-        refused(day("2026-12-01", cash = 1))                 // another month
-        refused(day("2026-11-05", cash = -1))
-        refused(day("2026-11-05", food = -5))
-        refused(day("2026-11-05", cash = ACCOUNT_AMOUNT_MAX_ORE + 1))
-        refused(day("2026-11-05", cash = 1), day("2026-11-05", cash = 2))   // repeated day
-        // A good day followed by a bad one: the whole save is refused.
-        refused(day("2026-11-06", cash = 5000), day("2026-11-07", cash = -1))
-        assertEquals(0, s.accountRowCount(s.therapist))
+        refused(job(0, cash = 1))
+        refused(job(ACCOUNT_JOB_MAX_LINES + 1, cash = 1))
+        refused(job(1, cash = -1))
+        refused(job(1, food = -5))
+        refused(job(1, cash = ACCOUNT_AMOUNT_MAX_ORE + 1))
+        refused(job(1, cash = 1), job(1, cash = 2))          // repeated line
+        // A good line followed by a bad one: the whole save is refused.
+        refused(job(1, cash = 5000), job(2, cash = -1))
+        assertEquals(0, s.jobRowCount(s.therapist))
+        // A refused save leaves the day as it was.
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 300)))
+        refused(job(1, cash = 9), job(2, cash = -1))
+        assertEquals(300L, s.db.getAccountsDay(s.therapist, day10).totals.cash)
         // The limit itself is accepted.
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-08", cash = ACCOUNT_AMOUNT_MAX_ORE)))
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = ACCOUNT_AMOUNT_MAX_ORE)))
         assertEquals(ACCOUNT_AMOUNT_MAX_ORE, s.db.getAccountsMonth(s.therapist, november).totals.cash)
     }
 
     @Test
     fun `entries belong to the therapist, so a move to another shop keeps them`() {
         val s = setup()
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-12", cash = 7700)))
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 7700)))
         s.db.moveTherapist(s.therapist, 1, s.shopB)
         assertEquals(7700L, s.db.getAccountsMonth(s.therapist, november).totals.cash)
     }
@@ -147,21 +188,25 @@ class DailyAccountsTest {
     @Test
     fun `a deleted therapist's entries stay, and another therapist's entries are separate`() {
         val s = setup()
-        s.db.saveAccountsMonth(s.therapist, november, listOf(day("2026-11-12", cash = 7700)))
-        s.db.saveAccountsMonth(s.otherOwnerTherapist, november, listOf(day("2026-11-12", cash = 11)))
+        s.db.saveAccountsDay(s.therapist, day10, listOf(job(1, cash = 7700)))
+        s.db.saveAccountsDay(s.otherOwnerTherapist, day10, listOf(job(1, cash = 11)))
         assertEquals(7700L, s.db.getAccountsMonth(s.therapist, november).totals.cash)
         s.db.deleteEmployee(s.therapist)
-        assertEquals(1, s.accountRowCount(s.therapist), "the entries are kept")
+        assertEquals(1, s.jobRowCount(s.therapist), "the entries are kept")
         assertEquals(11L, s.db.getAccountsMonth(s.otherOwnerTherapist, november).totals.cash)
     }
 
     @Test
-    fun `month parser accepts yyyy-MM only`() {
+    fun `month and date parsers accept only their own format`() {
         assertEquals(november, parseAccountsMonth("2026-11"))
         assertNull(parseAccountsMonth(null))
-        assertNull(parseAccountsMonth(""))
         assertNull(parseAccountsMonth("2026-13"))
         assertNull(parseAccountsMonth("2026-1"))
         assertNull(parseAccountsMonth("November"))
+        assertEquals(day10, parseAccountsDate("2026-11-10"))
+        assertNull(parseAccountsDate(null))
+        assertNull(parseAccountsDate("2026-11-31"))
+        assertNull(parseAccountsDate("2026-11"))
+        assertNull(parseAccountsDate("10 Nov"))
     }
 }

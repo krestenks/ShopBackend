@@ -809,15 +809,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             );
             """,
             """
-            CREATE TABLE IF NOT EXISTS daily_accounts (
+            CREATE TABLE IF NOT EXISTS account_jobs (
                 employee_id INTEGER NOT NULL,
                 day TEXT NOT NULL,
+                line INTEGER NOT NULL,
                 cash INTEGER NOT NULL DEFAULT 0,
                 mobilepay INTEGER NOT NULL DEFAULT 0,
                 revolut INTEGER NOT NULL DEFAULT 0,
                 food INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY (employee_id, day)
+                PRIMARY KEY (employee_id, day, line)
             );
             """,
             """
@@ -7004,13 +7005,16 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         getTherapistsForOwner(ownerId).firstOrNull { it.id == id }
 
     /**
-     * One month of daily accounts for a therapist: every date of the month, with the totals.
-     * Amounts are øre. The day total is cash + MobilePay + Revolut minus food.
+     * One month of accounts for a therapist: every date of the month with the sum of its job
+     * lines, and the month totals. Amounts are øre. A total is cash + MobilePay + Revolut minus food.
      */
     fun getAccountsMonth(employeeId: Int, month: java.time.YearMonth): AccountsMonthDto {
         val entered = HashMap<String, AccountDayDto>()
         connection.prepareStatement(
-            "SELECT day, cash, mobilepay, revolut, food FROM daily_accounts WHERE employee_id = ? AND day >= ? AND day <= ?"
+            """
+            SELECT day, SUM(cash) AS cash, SUM(mobilepay) AS mobilepay, SUM(revolut) AS revolut, SUM(food) AS food
+            FROM account_jobs WHERE employee_id = ? AND day >= ? AND day <= ? GROUP BY day
+            """.trimIndent()
         ).use { stmt ->
             stmt.setInt(1, employeeId)
             stmt.setString(2, month.atDay(1).toString())
@@ -7035,50 +7039,67 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     private fun accountDay(day: String, cash: Long, mobilepay: Long, revolut: Long, food: Long) =
         AccountDayDto(day, cash, mobilepay, revolut, food, cash + mobilepay + revolut - food)
 
-    /**
-     * Saves the given days of one month in one transaction. A day with every amount zero is
-     * removed. Throws IllegalArgumentException (shown to the app) for a bad day, a day outside
-     * the month, a repeated day, or an amount that is negative or above the limit.
-     */
-    fun saveAccountsMonth(employeeId: Int, month: java.time.YearMonth, days: List<AccountDayDto>): AccountsMonthDto {
-        val seen = HashSet<String>()
-        for (d in days) {
-            val date = try { java.time.LocalDate.parse(d.day) } catch (_: Exception) {
-                throw IllegalArgumentException("Invalid date: ${d.day}")
+    /** The stored job lines of one day, in line order, with the day totals. Empty lines are not stored. */
+    fun getAccountsDay(employeeId: Int, date: java.time.LocalDate): AccountDayJobsDto {
+        val jobs = ArrayList<AccountJobDto>()
+        connection.prepareStatement(
+            "SELECT line, cash, mobilepay, revolut, food FROM account_jobs WHERE employee_id = ? AND day = ? ORDER BY line"
+        ).use { stmt ->
+            stmt.setInt(1, employeeId)
+            stmt.setString(2, date.toString())
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val cash = rs.getLong("cash"); val mobilepay = rs.getLong("mobilepay")
+                val revolut = rs.getLong("revolut"); val food = rs.getLong("food")
+                jobs += AccountJobDto(rs.getInt("line"), cash, mobilepay, revolut, food, cash + mobilepay + revolut - food)
             }
-            if (java.time.YearMonth.from(date) != month) throw IllegalArgumentException("${d.day} is not in $month")
-            if (!seen.add(d.day)) throw IllegalArgumentException("${d.day} is given twice")
-            for (amount in listOf(d.cash, d.mobilepay, d.revolut, d.food)) {
+        }
+        return AccountDayJobsDto(
+            date.toString(), jobs,
+            accountDay(date.toString(), jobs.sumOf { it.cash }, jobs.sumOf { it.mobilepay }, jobs.sumOf { it.revolut }, jobs.sumOf { it.food }),
+        )
+    }
+
+    /**
+     * Replaces all job lines of one day in one transaction. A line with every amount zero is not
+     * stored. Throws IllegalArgumentException (shown to the app) for a line number outside
+     * 1..ACCOUNT_JOB_MAX_LINES, a repeated line, or an amount that is negative or above the limit.
+     */
+    fun saveAccountsDay(employeeId: Int, date: java.time.LocalDate, jobs: List<AccountJobDto>): AccountDayJobsDto {
+        val seen = HashSet<Int>()
+        for (j in jobs) {
+            if (j.line < 1 || j.line > ACCOUNT_JOB_MAX_LINES) throw IllegalArgumentException("Job line must be 1 to $ACCOUNT_JOB_MAX_LINES")
+            if (!seen.add(j.line)) throw IllegalArgumentException("Job line ${j.line} is given twice")
+            for (amount in listOf(j.cash, j.mobilepay, j.revolut, j.food)) {
                 if (amount < 0) throw IllegalArgumentException("Amounts cannot be negative")
                 if (amount > ACCOUNT_AMOUNT_MAX_ORE) throw IllegalArgumentException("An amount is above the limit of ${ACCOUNT_AMOUNT_MAX_ORE / 100} kr")
             }
         }
         val now = System.currentTimeMillis()
         inTransaction {
-            for (d in days) {
-                if (d.cash == 0L && d.mobilepay == 0L && d.revolut == 0L && d.food == 0L) {
-                    connection.prepareStatement("DELETE FROM daily_accounts WHERE employee_id = ? AND day = ?").use { stmt ->
-                        stmt.setInt(1, employeeId)
-                        stmt.setString(2, d.day)
-                        stmt.executeUpdate()
-                    }
-                } else {
-                    connection.prepareStatement(
-                        "INSERT OR REPLACE INTO daily_accounts (employee_id, day, cash, mobilepay, revolut, food, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                    ).use { stmt ->
-                        stmt.setInt(1, employeeId)
-                        stmt.setString(2, d.day)
-                        stmt.setLong(3, d.cash)
-                        stmt.setLong(4, d.mobilepay)
-                        stmt.setLong(5, d.revolut)
-                        stmt.setLong(6, d.food)
-                        stmt.setLong(7, now)
-                        stmt.executeUpdate()
-                    }
+            connection.prepareStatement("DELETE FROM account_jobs WHERE employee_id = ? AND day = ?").use { stmt ->
+                stmt.setInt(1, employeeId)
+                stmt.setString(2, date.toString())
+                stmt.executeUpdate()
+            }
+            for (j in jobs) {
+                if (j.cash == 0L && j.mobilepay == 0L && j.revolut == 0L && j.food == 0L) continue
+                connection.prepareStatement(
+                    "INSERT INTO account_jobs (employee_id, day, line, cash, mobilepay, revolut, food, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                ).use { stmt ->
+                    stmt.setInt(1, employeeId)
+                    stmt.setString(2, date.toString())
+                    stmt.setInt(3, j.line)
+                    stmt.setLong(4, j.cash)
+                    stmt.setLong(5, j.mobilepay)
+                    stmt.setLong(6, j.revolut)
+                    stmt.setLong(7, j.food)
+                    stmt.setLong(8, now)
+                    stmt.executeUpdate()
                 }
             }
         }
-        return getAccountsMonth(employeeId, month)
+        return getAccountsDay(employeeId, date)
     }
 
     /**

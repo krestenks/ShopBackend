@@ -123,6 +123,24 @@ data class AccountDayDto(
 @Serializable
 data class AccountsMonthDto(val month: String, val days: List<AccountDayDto>, val totals: AccountDayDto)
 
-/** The days to save for one month. The total of each day is ignored: the server calculates it. */
+/** The most job lines one therapist can have on one day. */
+const val ACCOUNT_JOB_MAX_LINES = 20
+
+/** One job line of a day. `line` is the position (1 first); the total is calculated by the server. */
 @Serializable
-data class SaveAccountsRequest(val month: String, val days: List<AccountDayDto>)
+data class AccountJobDto(
+    val line: Int,
+    val cash: Long = 0,
+    val mobilepay: Long = 0,
+    val revolut: Long = 0,
+    val food: Long = 0,
+    val total: Long = 0,
+)
+
+/** The stored job lines of one day (lines with no amounts are absent) and the day totals. */
+@Serializable
+data class AccountDayJobsDto(val day: String, val jobs: List<AccountJobDto>, val totals: AccountDayDto)
+
+/** All job lines of the day. Lines left out are removed. The totals are ignored. */
+@Serializable
+data class SaveAccountDayRequest(val jobs: List<AccountJobDto>)
