@@ -76,7 +76,7 @@ App
 Backend
 - Table `quick_message (id, manager_id, owner_id, text, sort_order, created_at, updated_at)`.
 - `GET /api/mobile/quick-messages`, `POST`, `PUT /{id}`, `DELETE /{id}`, and `PUT /order`. Every query filters by the authenticated `manager_id`, so one manager never sees another's list.
-- Limit: 20 messages per manager, 320 characters per message (limit values are a proposal).
+- Limit: 20 messages per manager, 1000 characters per message (changed from 320 on 2026-11-16).
 
 App
 - `activity_message_thread.xml`: a horizontally scrolling chip row between the price-list/book buttons and the compose row. Tap sets `messageInput` text and focuses it; the existing `sendButton` and `sendMessage(text)` send. The thread screen is already crowded with two full-width buttons, so the chip row replaces nothing and the layout needs checking on a small phone.

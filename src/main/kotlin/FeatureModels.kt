@@ -94,7 +94,7 @@ data class TimelineResponse(
 
 /** Limits for the per-manager quick messages. */
 const val QUICK_MESSAGE_MAX_COUNT = 20
-const val QUICK_MESSAGE_MAX_LENGTH = 320
+const val QUICK_MESSAGE_MAX_LENGTH = 1000
 const val THERAPIST_NAME_MAX_LENGTH = 60
 const val SHOP_NAME_MAX_LENGTH = 60
 const val SHOP_ADDRESS_MAX_LENGTH = 200
