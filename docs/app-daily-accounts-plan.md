@@ -22,7 +22,7 @@ A month view on each therapist's page. One row per date. Columns: Cash, MobilePa
 | Key | The therapist (employee id), not the shop. Moving a therapist to another shop does not change or split the history. |
 | Amounts | Integer øre in the database. The app accepts whole kroner or two decimals. Display in kr. Currency is DKK only. |
 | Categories | Fixed columns: Cash, MobilePay, Revolut, Food. A new category later is a migration. |
-| Total column | Net: Cash + MobilePay + Revolut minus Food. It can be negative. |
+| Total column | Net: Cash minus MobilePay, Revolut and Food (changed 2026-11-16 from adding MobilePay and Revolut). It can be negative. |
 | Month total row | The sum of each column over the month, computed by the server. |
 | Independence | Not linked to appointments or the Reports screen. No automatic fill. |
 | Who can use it | Managers, for therapists of their owner. The in-shop role gets 403 and no button. |
@@ -88,3 +88,5 @@ Request: the month is an overview only. A tap on a day opens that day with the s
 | Access | Unchanged: managers only, owner scoped. |
 
 Risk: a save replaces the whole day. If two phones edit the same day, the later save wins.
+
+Formula change (2026-11-16): Total = Cash - MobilePay - Revolut - Food, per job and per day. Month totals use the same formula on the column sums. The rows above that say MobilePay and Revolut are added are superseded by this.
