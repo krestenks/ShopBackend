@@ -1,6 +1,6 @@
 # Plan: shop page in the app, with "Use employee name"
 
-Status: planned, not started. Written 2026-11-16.
+Status: planned, decisions confirmed 2026-11-16, not started. Written 2026-11-16.
 Scope: ShopBackend and the ShopManager app. Nothing here touches call handling or the Asterisk
 provisioning, so Rule 1 (recovery code) is not triggered. Deploying the backend restarts it, so Rule 2 applies at deploy time.
 
@@ -37,7 +37,7 @@ provisioning, so Rule 1 (recovery code) is not triggered. Deploying the backend 
    - `updateEmployee` (so the WebAdmin employee forms stay consistent),
    - employee delete and employee add with a shop,
    - turning the option on.
-3. `updateShop` keeps the stored name when the option is active, so the WebAdmin shop forms cannot break the rule. The three forms show the option as a checkbox, or at least a note.
+3. `updateShop` keeps the stored name when the option is active, so the WebAdmin shop forms cannot break the rule. The three forms show the option as a checkbox, and save it with the shop.
 4. Routes in `MobileFeatureRoutes.kt`, owner-scoped through `resolveOwnerId`, managers only:
    - `GET /api/mobile/shops`: every shop of the owner with `id, name, address, directions, useEmployeeName, nameFollowActive, lineNumber, therapists[]`.
    - `GET /api/mobile/shops/{id}`.
@@ -72,9 +72,9 @@ provisioning, so Rule 1 (recovery code) is not triggered. Deploying the backend 
 - The backfill runs on the edge database at the next deploy. It only sets a flag and does not rename anything.
 - Reports and exported file names use the shop name, so a rename changes later file names. Old reports keep the name they were made with.
 
-## Questions for you
+## Answers (2026-11-16)
 
-1. Should the paused state (second therapist added) keep the old name, as proposed, or should the option switch itself off?
-2. Is name, address and directions the right set of editable fields, or do you want more (for example the manager assignment)?
-3. Should the WebAdmin shop forms get the same option now, or only the note?
-4. Do you want creating and deleting shops in the app, or does that stay in WebAdmin?
+1. Paused state: when a second therapist is added, the option stays set and is paused. The name keeps its last value.
+2. Editable fields: name, address, directions and the option, as proposed.
+3. WebAdmin: the three shop forms get the option as a checkbox, not only a note.
+4. Creating and deleting shops stays in WebAdmin.
