@@ -15,6 +15,15 @@ import shared.components.BookingUI
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/**
+ * The "Use employee name" checkbox of a shop form: a hidden "0" is always sent and a checked box
+ * adds "1". Null when the form does not carry the field, which keeps the stored option.
+ */
+internal fun useEmployeeNameParam(params: Parameters): Boolean? {
+    val values = params.getAll("useEmployeeName") ?: return null
+    return "1" in values
+}
+
 class WebAdmin(
     private val db: DataBase,
     private val telephonyService: telephony.TelephonyService,
@@ -1077,6 +1086,15 @@ class WebAdmin(
                             p("hint") { +"Shown in the app and used in confirmations." }
                             textInput { name = "name"; value = shop.name }
                             br()
+                            hiddenInput { name = "useEmployeeName"; value = "0" }
+                            checkBoxInput {
+                                name = "useEmployeeName"
+                                value = "1"
+                                checked = db.getUseEmployeeName(shop.id)
+                            }
+                            +" Use employee name"
+                            p("hint") { +"The shop name is the name of its employee. Works only when the shop has exactly one employee." }
+                            br()
                             label { +"Address" }
                             p("hint") { +"Will be included in booking confirmation SMS." }
                             textInput { name = "address"; value = shop.address ?: "" }
@@ -1747,7 +1765,7 @@ class WebAdmin(
                     // dialplan when the pool or the primary manager actually changed.
                     val oldPrimary = db.getShopById(id)?.managerId
                     val oldPool = db.getShopPoolManagerIds(id).toSet()
-                    db.updateShop(id, name, address, directions, managerId)
+                    db.updateShop(id, name, address, directions, managerId, useEmployeeNameParam(params))
                     db.setShopPool(id, poolManagerIds)
                     val routingChanged = oldPrimary != managerId || oldPool != poolManagerIds.toSet()
 
@@ -3836,6 +3854,16 @@ class WebAdmin(
                         form(action = "/owner/shops/edit", method = FormMethod.post) {
                             hiddenInput { name = "id"; value = id.toString() }
                             label { +"Shop name" }; textInput { name = "name"; value = shop.name }
+                            hiddenInput { name = "useEmployeeName"; value = "0" }
+                            div {
+                                checkBoxInput {
+                                    name = "useEmployeeName"
+                                    value = "1"
+                                    checked = db.getUseEmployeeName(shop.id)
+                                }
+                                +" Use employee name"
+                            }
+                            p("hint") { +"The shop name is the name of its employee. Works only when the shop has exactly one employee." }
                             label { +"Address" }; textInput { name = "address"; value = shop.address ?: "" }
                             label { +"Directions" }; textArea { name = "directions"; +(shop.directions ?: "") }
                             label { +"Manager (primary)" }
@@ -4045,7 +4073,7 @@ class WebAdmin(
                 if (name.isNotBlank()) {
                     val oldPrimary = db.getShopById(id)?.managerId
                     val oldPool = db.getShopPoolManagerIds(id).toSet()
-                    db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId)
+                    db.updateShop(id, name, address.ifBlank { null }, directions.ifBlank { null }, managerId, useEmployeeNameParam(params))
                     // Call pool — only managers belonging to this owner may be assigned.
                     val poolManagerIds = (params.getAll("poolManagerIds")?.mapNotNull { it.toIntOrNull() } ?: emptyList())
                         .filter { db.isManagerOwnedBy(it, session.ownerId) }

@@ -77,6 +77,42 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         call.respond(UpdateTherapistResponse(db.getTherapistForOwner(id, ownerId)!!, employeeRenamed, shopRenamed))
     }
 
+    // ── Shops ─────────────────────────────────────────────────────────────────
+
+    get("/api/mobile/shops") {
+        val login = authenticateManager() ?: return@get
+        if (login.role != "manager") return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@get call.respond(HttpStatusCode.Forbidden, "No owner")
+        call.respond(db.getShopDtosForOwner(ownerId))
+    }
+
+    get("/api/mobile/shops/{id}") {
+        val login = authenticateManager() ?: return@get
+        if (login.role != "manager") return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@get call.respond(HttpStatusCode.Forbidden, "No owner")
+        val id = call.parameters["id"]?.toIntOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing id")
+        call.respond(db.getShopDtoForOwner(id, ownerId) ?: return@get call.respond(HttpStatusCode.NotFound, "Shop not found"))
+    }
+
+    patch("/api/mobile/shops/{id}") {
+        val login = authenticateManager() ?: return@patch
+        if (login.role != "manager") return@patch call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@patch call.respond(HttpStatusCode.Forbidden, "No owner")
+        val id = call.parameters["id"]?.toIntOrNull() ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val body = runCatching { call.receive<UpdateShopRequest>() }.getOrNull()
+            ?: return@patch call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+        if (body.name == null && body.address == null && body.directions == null && body.useEmployeeName == null) {
+            return@patch call.respond(HttpStatusCode.BadRequest, "Nothing to change")
+        }
+        val updated = try {
+            db.updateShopForOwner(id, ownerId, body)
+        } catch (e: IllegalArgumentException) {
+            return@patch call.respond(HttpStatusCode.BadRequest, e.message ?: "Invalid value")
+        } ?: return@patch call.respond(HttpStatusCode.NotFound, "Shop not found")
+        println("[MobileApi/shops] manager=${login.managerId} shop=$id name=${body.name != null} address=${body.address != null} directions=${body.directions != null} useEmployeeName=${body.useEmployeeName}")
+        call.respond(updated)
+    }
+
     // ── Quick messages (each manager sees only their own) ─────────────────────
 
     get("/api/mobile/quick-messages") {

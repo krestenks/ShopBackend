@@ -79,8 +79,9 @@ class ManagerAppFeaturesTest {
     }
 
     @Test
-    fun `renaming the only therapist of a shop renames the shop too`() {
+    fun `renaming the only therapist of a shop with Use employee name renames the shop too`() {
         val w = world()
+        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
 
         val r = w.db.renameTherapist(w.aorTherapist, 1, "  Aor Noi  ")!!
 
@@ -92,12 +93,13 @@ class ManagerAppFeaturesTest {
     }
 
     @Test
-    fun `renaming to the name the shop already has reports no shop change`() {
+    fun `renaming the only therapist of a shop without the option leaves the shop name alone`() {
         val w = world()
-        val r = w.db.renameTherapist(w.aorTherapist, 1, "Aor")!!
+        val r = w.db.renameTherapist(w.aorTherapist, 1, "Aor Noi")!!
         assertTrue(r.employeeRenamed)
-        assertFalse(r.shopRenamed, "the shop already had this name")
+        assertFalse(r.shopRenamed)
         assertEquals("Aor", r.therapist.shopName)
+        assertFalse(r.therapist.shopUsesEmployeeName)
     }
 
     @Test
@@ -165,9 +167,172 @@ class ManagerAppFeaturesTest {
         val w = world()
         w.db.moveTherapist(w.duoTwo, 1, w.aor)
         assertEquals("dedicated", w.db.getTherapistForOwner(w.duoOne, 1)!!.numberMode)
+        w.db.updateShopForOwner(w.duo, 1, UpdateShopRequest(useEmployeeName = true))
         val r = w.db.renameTherapist(w.duoOne, 1, "Mai Solo")!!
-        assertTrue(r.shopRenamed, "the shop is now the therapist's own")
+        assertTrue(r.shopRenamed, "the shop is now the therapist's own and has the option on")
         assertEquals("Mai Solo", r.therapist.shopName)
+    }
+
+    // ── Shops ─────────────────────────────────────────────────────────────────
+
+    private fun shopName(w: World, id: Int) = w.e.query("SELECT name FROM shops WHERE id = $id") { it.getString(1) }
+
+    @Test
+    fun `shops list shows fields, therapists and line, for the owner only`() {
+        val w = world()
+        val list = w.db.getShopDtosForOwner(1)
+        assertEquals(listOf("Aor", "Duo"), list.map { it.name })
+        val duo = list.first { it.id == w.duo }
+        assertEquals(listOf("Mai", "Lek"), duo.therapists.map { it.name })
+        assertEquals("+4550000002", duo.lineNumber)
+        assertFalse(duo.useEmployeeName)
+        assertFalse(duo.nameFollowActive)
+        assertNull(w.db.getShopDtoForOwner(w.other, 1))
+    }
+
+    @Test
+    fun `address and directions are edited, blank clears, name stays`() {
+        val w = world()
+        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(address = " Main St 1 ", directions = "Second floor"))!!
+        assertEquals("Main St 1", s.address)
+        assertEquals("Second floor", s.directions)
+        assertEquals("Aor", s.name)
+        val cleared = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(address = "  "))!!
+        assertNull(cleared.address)
+        assertEquals("Second floor", cleared.directions)
+    }
+
+    @Test
+    fun `turning Use employee name on gives the shop the employee name at once`() {
+        val w = world()
+        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))!!
+        assertEquals("Old Aor", s.name)
+        assertTrue(s.useEmployeeName)
+        assertTrue(s.nameFollowActive)
+    }
+
+    @Test
+    fun `Use employee name is refused for a shop with several therapists`() {
+        val w = world()
+        assertThrows(IllegalArgumentException::class.java) {
+            w.db.updateShopForOwner(w.duo, 1, UpdateShopRequest(useEmployeeName = true))
+        }
+        assertFalse(w.db.getShopDtoForOwner(w.duo, 1)!!.useEmployeeName)
+    }
+
+    @Test
+    fun `Use employee name is refused for a shop with no therapist`() {
+        val w = world()
+        val empty = w.db.addShopForOwner(1, "Empty", null, null)
+        assertThrows(IllegalArgumentException::class.java) {
+            w.db.updateShopForOwner(empty, 1, UpdateShopRequest(useEmployeeName = true))
+        }
+    }
+
+    @Test
+    fun `a name is refused while the option is active and allowed after it is turned off`() {
+        val w = world()
+        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
+        assertThrows(IllegalArgumentException::class.java) {
+            w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "By hand"))
+        }
+        assertEquals("Old Aor", shopName(w, w.aor))
+        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "By hand", useEmployeeName = false))!!
+        assertEquals("By hand", s.name)
+        assertFalse(s.useEmployeeName)
+    }
+
+    @Test
+    fun `a bad shop name or field is rejected and nothing changes`() {
+        val w = world()
+        assertThrows(IllegalArgumentException::class.java) { w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "  ")) }
+        assertThrows(IllegalArgumentException::class.java) { w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "x".repeat(SHOP_NAME_MAX_LENGTH + 1))) }
+        assertThrows(IllegalArgumentException::class.java) { w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(address = "x".repeat(SHOP_ADDRESS_MAX_LENGTH + 1))) }
+        assertThrows(IllegalArgumentException::class.java) { w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(directions = "x".repeat(SHOP_DIRECTIONS_MAX_LENGTH + 1))) }
+        assertEquals("Aor", shopName(w, w.aor))
+    }
+
+    @Test
+    fun `another owner cannot read or edit a shop`() {
+        val w = world()
+        assertNull(w.db.updateShopForOwner(w.aor, 2, UpdateShopRequest(name = "Hijack")))
+        assertNull(w.db.getShopDtoForOwner(w.aor, 2))
+        assertEquals("Aor", shopName(w, w.aor))
+    }
+
+    @Test
+    fun `a second therapist pauses the option and keeps the name, removing one resumes it`() {
+        val w = world()
+        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
+        val extra = w.db.employee("Newcomer", null, w.duo)
+        w.db.assignEmployeeToShop(extra, w.aor)             // second therapist in Aor
+        val paused = w.db.getShopDtoForOwner(w.aor, 1)!!
+        assertTrue(paused.useEmployeeName)
+        assertFalse(paused.nameFollowActive)
+        assertEquals("Old Aor", paused.name)
+        w.db.renameTherapist(w.aorTherapist, 1, "Renamed")
+        assertEquals("Old Aor", shopName(w, w.aor), "paused: the name does not follow")
+        w.db.removeEmployeeFromAllShops(extra)
+        assertEquals("Renamed", shopName(w, w.aor), "resumed with one therapist left")
+    }
+
+    @Test
+    fun `moving a therapist into an empty shop with the option on gives it the name`() {
+        val w = world()
+        val empty = w.db.addShopForOwner(1, "Empty", null, null)
+        w.e.exec("UPDATE shops SET use_employee_name = 1 WHERE id = $empty")
+        w.db.moveTherapist(w.duoOne, 1, empty)
+        assertEquals("Mai", shopName(w, empty))
+    }
+
+    @Test
+    fun `updateEmployee from WebAdmin keeps an active shop in step`() {
+        val w = world()
+        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
+        w.db.updateEmployee(w.aorTherapist, "From WebAdmin", null)
+        assertEquals("From WebAdmin", shopName(w, w.aor))
+    }
+
+    @Test
+    fun `WebAdmin updateShop cannot change the name while active, and sets or keeps the option`() {
+        val w = world()
+        w.db.updateShop(w.aor, "Typed", null, null, null, useEmployeeName = true)
+        assertEquals("Old Aor", shopName(w, w.aor))
+        w.db.updateShop(w.aor, "Typed again", null, null, null)          // option not in the form: kept
+        assertEquals("Old Aor", shopName(w, w.aor))
+        w.db.updateShop(w.aor, "Free again", null, null, null, useEmployeeName = false)
+        assertEquals("Free again", shopName(w, w.aor))
+        w.db.updateShop(w.duo, "Duo", null, null, null, useEmployeeName = true)   // two therapists: ignored
+        assertFalse(w.db.getUseEmployeeName(w.duo))
+    }
+
+    @Test
+    fun `the WebAdmin checkbox is read from the form`() {
+        fun p(vararg v: String) = io.ktor.http.parametersOf("useEmployeeName", v.toList())
+        assertEquals(true, useEmployeeNameParam(p("0", "1")))
+        assertEquals(false, useEmployeeNameParam(p("0")))
+        assertNull(useEmployeeNameParam(io.ktor.http.Parameters.Empty))
+    }
+
+    @Test
+    fun `the option is backfilled once for shops whose names already match`() {
+        val e = env()
+        e.db.addShopForOwner(1, "Same", null, null)
+        e.db.addShopForOwner(1, "Differs", null, null)
+        val same = e.query("SELECT id FROM shops WHERE name = 'Same'") { it.getInt(1) }
+        val differs = e.query("SELECT id FROM shops WHERE name = 'Differs'") { it.getInt(1) }
+        e.db.employee("Same", null, same)
+        e.db.employee("Other name", null, differs)
+        e.exec("UPDATE shops SET use_employee_name = 0")
+        // Simulate a database from before the column: drop it, then open again.
+        e.exec("ALTER TABLE shops DROP COLUMN use_employee_name")
+        val reopened = DataBase(e.file.toString())
+        fun flag(id: Int) = reopened.getUseEmployeeName(id)
+        assertTrue(flag(same))
+        assertFalse(flag(differs))
+        reopened.updateShop(same, "Same", null, null, null, useEmployeeName = false)
+        val third = DataBase(e.file.toString())
+        assertFalse(third.getUseEmployeeName(same), "a later start does not set it again")
     }
 
     // ── Quick messages ────────────────────────────────────────────────────────

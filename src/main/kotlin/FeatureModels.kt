@@ -15,6 +15,36 @@ data class TherapistDto(
     val lineNumber: String?,
     /** "dedicated" when the shop has exactly one therapist, otherwise "shared". */
     val numberMode: String,
+    /** True when the shop has "Use employee name" on, so renaming this therapist renames the shop. */
+    val shopUsesEmployeeName: Boolean = false,
+)
+
+/** A shop as the manager app shows and edits it. */
+@Serializable
+data class ShopDto(
+    val id: Int,
+    val name: String,
+    val address: String?,
+    val directions: String?,
+    /** The stored option "Use employee name". */
+    val useEmployeeName: Boolean,
+    /** True when the option is on and the shop has exactly one therapist, so the name follows. */
+    val nameFollowActive: Boolean,
+    /** The shop's SIM number; null when the shop has no line. */
+    val lineNumber: String?,
+    val therapists: List<ShopTherapistDto>,
+)
+
+@Serializable
+data class ShopTherapistDto(val id: Int, val name: String)
+
+/** Each field is changed only when present. A blank address or directions clears it. */
+@Serializable
+data class UpdateShopRequest(
+    val name: String? = null,
+    val address: String? = null,
+    val directions: String? = null,
+    val useEmployeeName: Boolean? = null,
 )
 
 @Serializable
@@ -71,3 +101,6 @@ data class TimelineResponse(
 const val QUICK_MESSAGE_MAX_COUNT = 20
 const val QUICK_MESSAGE_MAX_LENGTH = 320
 const val THERAPIST_NAME_MAX_LENGTH = 60
+const val SHOP_NAME_MAX_LENGTH = 60
+const val SHOP_ADDRESS_MAX_LENGTH = 200
+const val SHOP_DIRECTIONS_MAX_LENGTH = 1000
