@@ -1,6 +1,6 @@
 # Plan: daily accounts per therapist, in the app
 
-Status: built 2026-11-16 (backend b3621a5, 283 tests pass; app ca0b3cb). Staging runs it. Tested on the S21 against staging: month view, live totals, save, negative day, decimals, invalid amount, month change with and without unsaved changes, clearing a day removes its row. Not tested: the 403 and 404 answers over HTTP, screen rotation, amounts above 99,999 kr in a cell, an owner with no therapists. Not deployed to the edge.
+Status: first version (one row of amounts per day) built 2026-11-16, then revised the same day to job lines per day (see "Revision: job lines" at the end). The revision is in backend c6e5963 (286 tests pass) and the app commit made with it. Staging runs the revision. Tested on the S21 against staging: month overview, day screen, live totals, + for a sixth line, save, reload, month sums, discard prompt, clearing a day. Not tested: the 403 and 404 answers over HTTP, screen rotation, an owner with no therapists, a day with 20 lines. Not deployed to the edge.
 Scope: ShopBackend and the ShopManager app. No call handling, no Asterisk, no recovery code, so Rule 1 is not triggered. Deploying restarts the backend, so Rule 2 applies at deploy time.
 
 ## Request
@@ -72,3 +72,19 @@ A month view on each therapist's page. One row per date. Columns: Cash, MobilePa
 2. Access: managers only.
 3. Therapist deleted in WebAdmin: the entries are kept.
 4. Export: app only. No xlsx and no WebAdmin page for now.
+
+## Revision: job lines (2026-11-16)
+
+Request: the month is an overview only. A tap on a day opens that day with the same fields per job, so the manager can enter each amount as the money comes in. Five job lines to start with, and a + button for more.
+
+| Topic | Decision |
+|---|---|
+| Storage | Table `account_jobs(employee_id, day, line, cash, mobilepay, revolut, food, updated_at, PRIMARY KEY (employee_id, day, line))` replaces `daily_accounts`. `line` is the position, 1 first. A line with every amount zero is not stored. Position is kept: jobs 1, 2 and 6 stored leave 3 to 5 empty. `daily_accounts` was never on the edge, so nothing is migrated. Staging has an empty `daily_accounts` table that nothing reads. |
+| Month | `GET .../accounts?month=yyyy-MM` is unchanged in shape. Each day is the sum of its job lines. Read only in the app. |
+| Day | `GET` and `PUT /api/mobile/therapists/{id}/accounts/{yyyy-MM-dd}`. The PUT sends all job lines of the day and replaces the day in one transaction; lines left out are removed. The old month `PUT` is removed. |
+| Limits | At most 20 lines per day (`ACCOUNT_JOB_MAX_LINES`, my choice). Same per-amount limit as before. |
+| App | Month screen: rows open the day. Day screen: 5 lines, + adds one, Day row at the bottom, Save, discard prompt. The month reloads when the day screen closes. |
+| Not included | A note or customer name per job. A job cannot be moved to another day. |
+| Access | Unchanged: managers only, owner scoped. |
+
+Risk: a save replaces the whole day. If two phones edit the same day, the later save wins.
