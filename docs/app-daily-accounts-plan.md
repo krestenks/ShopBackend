@@ -1,6 +1,6 @@
 # Plan: daily accounts per therapist, in the app
 
-Status: plan agreed 2026-11-16, nothing built.
+Status: built 2026-11-16 (backend b3621a5, 283 tests pass; app ca0b3cb). Staging runs it. Tested on the S21 against staging: month view, live totals, save, negative day, decimals, invalid amount, month change with and without unsaved changes, clearing a day removes its row. Not tested: the 403 and 404 answers over HTTP, screen rotation, amounts above 99,999 kr in a cell, an owner with no therapists. Not deployed to the edge.
 Scope: ShopBackend and the ShopManager app. No call handling, no Asterisk, no recovery code, so Rule 1 is not triggered. Deploying restarts the backend, so Rule 2 applies at deploy time.
 
 ## Request
