@@ -79,27 +79,16 @@ class ManagerAppFeaturesTest {
     }
 
     @Test
-    fun `renaming the only therapist of a shop with Use employee name renames the shop too`() {
+    fun `renaming the only therapist of a shop never changes the shop name`() {
         val w = world()
-        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
 
         val r = w.db.renameTherapist(w.aorTherapist, 1, "  Aor Noi  ")!!
 
         assertEquals("Aor Noi", r.therapist.name)
-        assertEquals("Aor Noi", r.therapist.shopName)
-        assertTrue(r.employeeRenamed)
-        assertTrue(r.shopRenamed)
-        assertEquals("Aor Noi", w.e.query("SELECT name FROM shops WHERE id = ${w.aor}") { it.getString(1) })
-    }
-
-    @Test
-    fun `renaming the only therapist of a shop without the option leaves the shop name alone`() {
-        val w = world()
-        val r = w.db.renameTherapist(w.aorTherapist, 1, "Aor Noi")!!
-        assertTrue(r.employeeRenamed)
-        assertFalse(r.shopRenamed)
         assertEquals("Aor", r.therapist.shopName)
-        assertFalse(r.therapist.shopUsesEmployeeName)
+        assertTrue(r.employeeRenamed)
+        assertEquals("Aor", shopName(w, w.aor))
+        assertEquals("Aor Noi", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName, "the display name follows the only therapist")
     }
 
     @Test
@@ -111,7 +100,6 @@ class ManagerAppFeaturesTest {
         assertEquals("Mai Mai", r.therapist.name)
         assertEquals("Duo", r.therapist.shopName)
         assertTrue(r.employeeRenamed)
-        assertFalse(r.shopRenamed)
         assertEquals("Duo", w.e.query("SELECT name FROM shops WHERE id = ${w.duo}") { it.getString(1) })
     }
 
@@ -120,7 +108,6 @@ class ManagerAppFeaturesTest {
         val w = world()
         val r = w.db.renameTherapist(w.duoOne, 1, "Mai")!!
         assertFalse(r.employeeRenamed)
-        assertFalse(r.shopRenamed)
     }
 
     @Test
@@ -129,7 +116,7 @@ class ManagerAppFeaturesTest {
         assertThrows(IllegalArgumentException::class.java) { w.db.renameTherapist(w.aorTherapist, 1, "   ") }
         assertThrows(IllegalArgumentException::class.java) { w.db.renameTherapist(w.aorTherapist, 1, "x".repeat(THERAPIST_NAME_MAX_LENGTH + 1)) }
         assertEquals("Old Aor", w.db.getTherapistForOwner(w.aorTherapist, 1)!!.name)
-        assertEquals("Aor", w.e.query("SELECT name FROM shops WHERE id = ${w.aor}") { it.getString(1) })
+        assertEquals("Aor", shopName(w, w.aor))
     }
 
     @Test
@@ -167,10 +154,17 @@ class ManagerAppFeaturesTest {
         val w = world()
         w.db.moveTherapist(w.duoTwo, 1, w.aor)
         assertEquals("dedicated", w.db.getTherapistForOwner(w.duoOne, 1)!!.numberMode)
-        w.db.updateShopForOwner(w.duo, 1, UpdateShopRequest(useEmployeeName = true))
-        val r = w.db.renameTherapist(w.duoOne, 1, "Mai Solo")!!
-        assertTrue(r.shopRenamed, "the shop is now the therapist's own and has the option on")
-        assertEquals("Mai Solo", r.therapist.shopName)
+        assertEquals("Mai", w.db.getShopDtoForOwner(w.duo, 1)!!.displayName)
+        assertEquals("Duo", shopName(w, w.duo))
+    }
+
+    @Test
+    fun `a therapist is in one shop only, moving is the add and the remove`() {
+        val w = world()
+        w.db.moveTherapist(w.duoOne, 1, w.aor)
+        assertEquals(1, w.e.query("SELECT COUNT(*) FROM employee_shop WHERE employee_id = ${w.duoOne}") { it.getInt(1) })
+        assertEquals(listOf("Old Aor", "Mai"), w.db.getShopDtoForOwner(w.aor, 1)!!.therapists.map { it.name })
+        assertEquals(listOf("Lek"), w.db.getShopDtoForOwner(w.duo, 1)!!.therapists.map { it.name })
     }
 
     // ── Shops ─────────────────────────────────────────────────────────────────
@@ -185,8 +179,8 @@ class ManagerAppFeaturesTest {
         val duo = list.first { it.id == w.duo }
         assertEquals(listOf("Mai", "Lek"), duo.therapists.map { it.name })
         assertEquals("+4550000002", duo.lineNumber)
-        assertFalse(duo.useEmployeeName)
-        assertFalse(duo.nameFollowActive)
+        assertEquals("Duo", duo.displayName, "two therapists: the shop name")
+        assertEquals("Old Aor", list.first { it.id == w.aor }.displayName, "one therapist: the therapist name")
         assertNull(w.db.getShopDtoForOwner(w.other, 1))
     }
 
@@ -203,43 +197,31 @@ class ManagerAppFeaturesTest {
     }
 
     @Test
-    fun `turning Use employee name on gives the shop the employee name at once`() {
+    fun `the shop name is always editable, also with one therapist`() {
         val w = world()
-        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))!!
-        assertEquals("Old Aor", s.name)
-        assertTrue(s.useEmployeeName)
-        assertTrue(s.nameFollowActive)
+        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "  Lotus Spa  "))!!
+        assertEquals("Lotus Spa", s.name)
+        assertEquals("Old Aor", s.displayName)
+        assertEquals("Lotus Spa", shopName(w, w.aor))
+        assertEquals("Old Aor", w.db.getTherapistForOwner(w.aorTherapist, 1)!!.name, "the therapist is not renamed")
     }
 
     @Test
-    fun `Use employee name is refused for a shop with several therapists`() {
-        val w = world()
-        assertThrows(IllegalArgumentException::class.java) {
-            w.db.updateShopForOwner(w.duo, 1, UpdateShopRequest(useEmployeeName = true))
-        }
-        assertFalse(w.db.getShopDtoForOwner(w.duo, 1)!!.useEmployeeName)
-    }
-
-    @Test
-    fun `Use employee name is refused for a shop with no therapist`() {
+    fun `display name is the therapist for one, the shop for two, the shop for none`() {
         val w = world()
         val empty = w.db.addShopForOwner(1, "Empty", null, null)
-        assertThrows(IllegalArgumentException::class.java) {
-            w.db.updateShopForOwner(empty, 1, UpdateShopRequest(useEmployeeName = true))
-        }
+        assertEquals("Old Aor", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName)
+        assertEquals("Duo", w.db.getShopDtoForOwner(w.duo, 1)!!.displayName)
+        assertEquals("Empty", w.db.getShopDtoForOwner(empty, 1)!!.displayName)
+        w.db.employee("Second", null, w.aor).also { w.db.assignEmployeeToShop(it, w.aor, exclusive = false) }
+        assertEquals("Aor", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName, "a second therapist brings the shop name back")
     }
 
     @Test
-    fun `a name is refused while the option is active and allowed after it is turned off`() {
+    fun `a blank therapist name falls back to the shop name`() {
         val w = world()
-        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
-        assertThrows(IllegalArgumentException::class.java) {
-            w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "By hand"))
-        }
-        assertEquals("Old Aor", shopName(w, w.aor))
-        val s = w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(name = "By hand", useEmployeeName = false))!!
-        assertEquals("By hand", s.name)
-        assertFalse(s.useEmployeeName)
+        w.e.exec("UPDATE employees SET name = '  ' WHERE id = ${w.aorTherapist}")
+        assertEquals("Aor", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName)
     }
 
     @Test
@@ -261,78 +243,41 @@ class ManagerAppFeaturesTest {
     }
 
     @Test
-    fun `a second therapist pauses the option and keeps the name, removing one resumes it`() {
+    fun `WebAdmin updateShop sets the name by hand`() {
         val w = world()
-        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
-        val extra = w.db.employee("Newcomer", null, w.duo)
-        w.db.assignEmployeeToShop(extra, w.aor)             // second therapist in Aor
-        val paused = w.db.getShopDtoForOwner(w.aor, 1)!!
-        assertTrue(paused.useEmployeeName)
-        assertFalse(paused.nameFollowActive)
-        assertEquals("Old Aor", paused.name)
-        w.db.renameTherapist(w.aorTherapist, 1, "Renamed")
-        assertEquals("Old Aor", shopName(w, w.aor), "paused: the name does not follow")
-        w.db.removeEmployeeFromAllShops(extra)
-        assertEquals("Renamed", shopName(w, w.aor), "resumed with one therapist left")
+        w.db.updateShop(w.aor, "Typed", null, null, null)
+        assertEquals("Typed", shopName(w, w.aor))
+        assertEquals("Old Aor", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName)
     }
 
     @Test
-    fun `moving a therapist into an empty shop with the option on gives it the name`() {
+    fun `renaming an employee through WebAdmin leaves the shop name alone`() {
         val w = world()
-        val empty = w.db.addShopForOwner(1, "Empty", null, null)
-        w.e.exec("UPDATE shops SET use_employee_name = 1 WHERE id = $empty")
-        w.db.moveTherapist(w.duoOne, 1, empty)
-        assertEquals("Mai", shopName(w, empty))
-    }
-
-    @Test
-    fun `updateEmployee from WebAdmin keeps an active shop in step`() {
-        val w = world()
-        w.db.updateShopForOwner(w.aor, 1, UpdateShopRequest(useEmployeeName = true))
         w.db.updateEmployee(w.aorTherapist, "From WebAdmin", null)
-        assertEquals("From WebAdmin", shopName(w, w.aor))
+        assertEquals("Aor", shopName(w, w.aor))
+        assertEquals("From WebAdmin", w.db.getShopDtoForOwner(w.aor, 1)!!.displayName)
     }
 
     @Test
-    fun `WebAdmin updateShop cannot change the name while active, and sets or keeps the option`() {
+    fun `calls and messages use the display name`() {
         val w = world()
-        w.db.updateShop(w.aor, "Typed", null, null, null, useEmployeeName = true)
-        assertEquals("Old Aor", shopName(w, w.aor))
-        w.db.updateShop(w.aor, "Typed again", null, null, null)          // option not in the form: kept
-        assertEquals("Old Aor", shopName(w, w.aor))
-        w.db.updateShop(w.aor, "Free again", null, null, null, useEmployeeName = false)
-        assertEquals("Free again", shopName(w, w.aor))
-        w.db.updateShop(w.duo, "Duo", null, null, null, useEmployeeName = true)   // two therapists: ignored
-        assertFalse(w.db.getUseEmployeeName(w.duo))
-    }
-
-    @Test
-    fun `the WebAdmin checkbox is read from the form`() {
-        fun p(vararg v: String) = io.ktor.http.parametersOf("useEmployeeName", v.toList())
-        assertEquals(true, useEmployeeNameParam(p("0", "1")))
-        assertEquals(false, useEmployeeNameParam(p("0")))
-        assertNull(useEmployeeNameParam(io.ktor.http.Parameters.Empty))
-    }
-
-    @Test
-    fun `the option is backfilled once for shops whose names already match`() {
-        val e = env()
-        e.db.addShopForOwner(1, "Same", null, null)
-        e.db.addShopForOwner(1, "Differs", null, null)
-        val same = e.query("SELECT id FROM shops WHERE name = 'Same'") { it.getInt(1) }
-        val differs = e.query("SELECT id FROM shops WHERE name = 'Differs'") { it.getInt(1) }
-        e.db.employee("Same", null, same)
-        e.db.employee("Other name", null, differs)
-        e.exec("UPDATE shops SET use_employee_name = 0")
-        // Simulate a database from before the column: drop it, then open again.
-        e.exec("ALTER TABLE shops DROP COLUMN use_employee_name")
-        val reopened = DataBase(e.file.toString())
-        fun flag(id: Int) = reopened.getUseEmployeeName(id)
-        assertTrue(flag(same))
-        assertFalse(flag(differs))
-        reopened.updateShop(same, "Same", null, null, null, useEmployeeName = false)
-        val third = DataBase(e.file.toString())
-        assertFalse(third.getUseEmployeeName(same), "a later start does not set it again")
+        val now = System.currentTimeMillis()
+        for (shop in listOf(w.aor, w.duo)) {
+            w.e.exec("INSERT INTO sms_message (shop_id, counterparty_phone, from_phone, to_phone, direction, body, created_at, status) " +
+                "VALUES ($shop, '+4570000001', '+4570000001', '+4550000001', 'inbound', 'hello', $now, 'received')")
+        }
+        val threads = w.db.getAllSmsConversationsAcrossShops(listOf(w.aor, w.duo)).associate { it.shopId to it.shopName }
+        assertEquals("Old Aor", threads[w.aor], "one therapist: the therapist's name")
+        assertEquals("Duo", threads[w.duo], "two therapists: the shop name")
+        val unhandled = w.db.getUnhandledSmsNotifications(listOf(w.aor, w.duo)).associate { it.shopId to it.shopName }
+        assertEquals("Old Aor", unhandled[w.aor])
+        assertEquals("Duo", unhandled[w.duo])
+        val hits = w.db.searchSmsMessages(listOf(w.aor, w.duo), "hello").associate { it.shopId to it.shopName }
+        assertEquals("Old Aor", hits[w.aor])
+        assertEquals("Duo", hits[w.duo])
+        val threadHits = w.db.searchSmsThreads(listOf(w.aor, w.duo), "+4570000001").associate { it.shopId to it.shopName }
+        assertEquals("Old Aor", threadHits[w.aor])
+        assertEquals("Duo", threadHits[w.duo])
     }
 
     // ── Quick messages ────────────────────────────────────────────────────────

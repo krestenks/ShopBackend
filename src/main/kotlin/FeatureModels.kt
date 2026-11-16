@@ -15,21 +15,18 @@ data class TherapistDto(
     val lineNumber: String?,
     /** "dedicated" when the shop has exactly one therapist, otherwise "shared". */
     val numberMode: String,
-    /** True when the shop has "Use employee name" on, so renaming this therapist renames the shop. */
-    val shopUsesEmployeeName: Boolean = false,
 )
 
 /** A shop as the manager app shows and edits it. */
 @Serializable
 data class ShopDto(
     val id: Int,
+    /** The shop's own name, set by hand. */
     val name: String,
+    /** The name calls and messages show: the therapist's name when the shop has one therapist, else the shop name. */
+    val displayName: String,
     val address: String?,
     val directions: String?,
-    /** The stored option "Use employee name". */
-    val useEmployeeName: Boolean,
-    /** True when the option is on and the shop has exactly one therapist, so the name follows. */
-    val nameFollowActive: Boolean,
     /** The shop's SIM number; null when the shop has no line. */
     val lineNumber: String?,
     val therapists: List<ShopTherapistDto>,
@@ -44,7 +41,6 @@ data class UpdateShopRequest(
     val name: String? = null,
     val address: String? = null,
     val directions: String? = null,
-    val useEmployeeName: Boolean? = null,
 )
 
 @Serializable
@@ -57,7 +53,6 @@ data class UpdateTherapistRequest(
 data class UpdateTherapistResponse(
     val therapist: TherapistDto,
     val employeeRenamed: Boolean,
-    val shopRenamed: Boolean,
 )
 
 @Serializable

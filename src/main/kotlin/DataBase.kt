@@ -1088,29 +1088,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             try { connection.createStatement().use { it.execute(sql) } } catch (_: Exception) {}
         }
 
-        // Shop option "Use employee name". The column is added once; the statement that adds it
-        // fails when it exists, so the backfill below runs only on the start that adds it.
-        val useEmployeeNameAdded = try {
-            connection.createStatement().use {
-                it.execute("ALTER TABLE shops ADD COLUMN use_employee_name INTEGER NOT NULL DEFAULT 0")
-            }
-            true
-        } catch (_: Exception) { false }
-        if (useEmployeeNameAdded) {
-            // Set the option where the shop has one employee and both names are equal now.
-            connection.createStatement().use {
-                it.execute(
-                    """
-                    UPDATE shops SET use_employee_name = 1
-                    WHERE (SELECT COUNT(*) FROM employee_shop es JOIN employees e ON e.id = es.employee_id
-                           WHERE es.shop_id = shops.id) = 1
-                      AND trim(name) = (SELECT trim(e.name) FROM employee_shop es JOIN employees e ON e.id = es.employee_id
-                                        WHERE es.shop_id = shops.id)
-                    """.trimIndent()
-                )
-            }
-        }
-
         // Owner foundation: ensure a default owner exists and backfill existing records
         ensureDefaultOwnerAndBackfill()
 
@@ -2164,7 +2141,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                cs.name AS callapp_name,
                vc.state, vc.outcome, vc.is_active, vc.started_at, vc.ended_at,
                vc.linked_booking_id, vc.operator_phone,
-               sh.name AS shop_name,
+               ${shopDisplayNameSql("sh")} AS shop_name,
                EXISTS (SELECT 1 FROM customers x WHERE x.phone = vc.from_phone AND x.starred_at IS NOT NULL) AS starred
         FROM voice_call vc
         LEFT JOIN shops sh        ON sh.id = vc.shop_id
@@ -3475,7 +3452,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(1, id)
             stmt.executeUpdate()
         }
-        syncShopNamesToEmployees()
     }
 
     fun getEmployeeById(id: Int): Employee? {
@@ -3621,27 +3597,20 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(3, id)
             stmt.executeUpdate()
         }
-        syncShopNamesToEmployees()
     }
 
     /**
-     * Sets the name of every shop that has "Use employee name" on and exactly one employee to
-     * that employee's name. A shop with no employee or several keeps its name (the option is paused).
+     * SQL for the name shown on calls and messages: the therapist's name when the shop has
+     * exactly one therapist, otherwise the shop name. [alias] is the alias of the shops table.
      */
-    fun syncShopNamesToEmployees() {
-        val oneEmployeeName = """
-            (SELECT e.name FROM employee_shop es JOIN employees e ON e.id = es.employee_id WHERE es.shop_id = shops.id)
-        """.trimIndent()
-        val employeeCount = """
-            (SELECT COUNT(*) FROM employee_shop es JOIN employees e ON e.id = es.employee_id WHERE es.shop_id = shops.id)
-        """.trimIndent()
-        connection.createStatement().use {
-            it.executeUpdate(
-                "UPDATE shops SET name = $oneEmployeeName " +
-                    "WHERE use_employee_name = 1 AND $employeeCount = 1 AND name <> $oneEmployeeName"
-            )
-        }
-    }
+    private fun shopDisplayNameSql(alias: String): String = """
+        COALESCE(
+            CASE WHEN (SELECT COUNT(*) FROM employee_shop dn WHERE dn.shop_id = $alias.id) = 1
+                 THEN (SELECT NULLIF(trim(de.name), '') FROM employee_shop dn JOIN employees de ON de.id = dn.employee_id
+                       WHERE dn.shop_id = $alias.id)
+            END,
+            $alias.name)
+    """.trimIndent()
 
     /**
      * True if [managerId] covers [shopId] — either as the shop's PRIMARY manager
@@ -3861,7 +3830,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             it.setInt(1, employeeId)
             it.executeUpdate()
         }
-        syncShopNamesToEmployees()
     }
 
     fun getShopIdForEmployee(employeeId: Int): Int? {
@@ -4654,15 +4622,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
     }
 
-    /**
-     * [useEmployeeName] null keeps the stored option. True is applied only when the shop has
-     * exactly one employee (or already has the option on). While the option is active the shop
-     * name is the employee's name, whatever [name] says.
-     */
-    fun updateShop(
-        id: Int, name: String, address: String?, directions: String?, managerId: Int?,
-        useEmployeeName: Boolean? = null,
-    ) {
+    fun updateShop(id: Int, name: String, address: String?, directions: String?, managerId: Int?) {
         val stmt = connection.prepareStatement("""
         UPDATE shops SET name = ?, address = ?, directions = ?, manager_id = ?
         WHERE id = ?
@@ -4674,36 +4634,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         stmt.setInt(5, id)
         stmt.executeUpdate()
         stmt.close()
-        if (useEmployeeName != null) {
-            val allowed = !useEmployeeName || shopEmployeeCount(id) == 1 || getUseEmployeeName(id)
-            if (allowed) setUseEmployeeName(id, useEmployeeName)
-        }
-        syncShopNamesToEmployees()
-    }
-
-    /** The number of employees in a shop. */
-    fun shopEmployeeCount(shopId: Int): Int =
-        connection.prepareStatement(
-            "SELECT COUNT(*) FROM employee_shop es JOIN employees e ON e.id = es.employee_id WHERE es.shop_id = ?"
-        ).use { stmt ->
-            stmt.setInt(1, shopId)
-            val rs = stmt.executeQuery()
-            if (rs.next()) rs.getInt(1) else 0
-        }
-
-    fun getUseEmployeeName(shopId: Int): Boolean =
-        connection.prepareStatement("SELECT use_employee_name FROM shops WHERE id = ?").use { stmt ->
-            stmt.setInt(1, shopId)
-            val rs = stmt.executeQuery()
-            rs.next() && rs.getInt(1) == 1
-        }
-
-    private fun setUseEmployeeName(shopId: Int, on: Boolean) {
-        connection.prepareStatement("UPDATE shops SET use_employee_name = ? WHERE id = ?").use { stmt ->
-            stmt.setInt(1, if (on) 1 else 0)
-            stmt.setInt(2, shopId)
-            stmt.executeUpdate()
-        }
     }
 
 
@@ -4733,7 +4663,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             stmt.setInt(2, shopId)
             stmt.executeUpdate()
         }
-        syncShopNamesToEmployees()
     }
 
     fun getEmployeesPerShop(): List<Pair<Shop, Employee>> {
@@ -5616,7 +5545,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val placeholders = shopIds.joinToString(",") { "?" }
         val sql = """
             SELECT m.shop_id,
-                   s.name   AS shop_name,
+                   ${shopDisplayNameSql("s")} AS shop_name,
                    m.counterparty_phone,
                    m.customer_id,
                    c.name   AS customer_name,
@@ -5690,7 +5619,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val ph = shopIds.joinToString(",") { "?" }
         val like = "%$q%"
         val sql = """
-            SELECT m.id, m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
+            SELECT m.id, m.shop_id, ${shopDisplayNameSql("sh")} AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
                    m.direction, m.body, m.created_at,
                    EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred,
@@ -5742,7 +5671,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val like = "%$q%"
         val phoneLike = phoneMatchDigits(q)?.let { "%$it%" }
         val sql = """
-            SELECT m.shop_id, sh.name AS shop_name, m.counterparty_phone, m.customer_id,
+            SELECT m.shop_id, ${shopDisplayNameSql("sh")} AS shop_name, m.counterparty_phone, m.customer_id,
                    c.name AS customer_name, cs.name AS callapp_name,
                    m.body AS last_body, m.created_at AS last_at,
                    EXISTS (SELECT 1 FROM customers x WHERE x.phone = m.counterparty_phone AND x.starred_at IS NOT NULL) AS starred
@@ -5819,7 +5748,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val placeholders = shopIds.joinToString(",") { "?" }
         val sql = """
             SELECT m.shop_id,
-                   s.name   AS shop_name,
+                   ${shopDisplayNameSql("s")} AS shop_name,
                    m.counterparty_phone,
                    m.customer_id,
                    c.name   AS customer_name,
@@ -6975,12 +6904,11 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             shopName = rs.getString("shop_name"),
             lineNumber = rs.getString("phone_number")?.trim()?.takeIf { it.isNotBlank() },
             numberMode = if (count == 1) "dedicated" else "shared",
-            shopUsesEmployeeName = rs.getInt("use_employee_name") == 1,
         )
     }
 
     private val therapistSelect = """
-        SELECT e.id, e.name, e.phone, s.id AS shop_id, s.name AS shop_name, t.phone_number, s.use_employee_name,
+        SELECT e.id, e.name, e.phone, s.id AS shop_id, s.name AS shop_name, t.phone_number,
                (SELECT COUNT(*) FROM employee_shop x WHERE x.shop_id = s.id) AS shop_employee_count
         FROM employees e
         JOIN employee_shop es ON es.employee_id = e.id
@@ -7137,28 +7065,23 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     /**
-     * Renames a therapist. When the therapist's shop has "Use employee name" on and no other
-     * therapist, the shop gets the same name, in the same transaction. Returns null when the
-     * therapist is not one of the owner's.
+     * Renames a therapist. The shop name is not changed; calls and messages show the therapist's
+     * name while the therapist is the only one in the shop. Returns null when the therapist is
+     * not one of the owner's.
      */
     fun renameTherapist(id: Int, ownerId: Int, newName: String): UpdateTherapistResponse? {
         val name = newName.trim()
         require(name.isNotEmpty()) { "name is required" }
         require(name.length <= THERAPIST_NAME_MAX_LENGTH) { "name is longer than $THERAPIST_NAME_MAX_LENGTH characters" }
         val current = getTherapistForOwner(id, ownerId) ?: return null
-        val renameShop = current.shopUsesEmployeeName && current.numberMode == "dedicated"
-        inTransaction {
-            connection.prepareStatement("UPDATE employees SET name = ? WHERE id = ?").use { stmt ->
-                stmt.setString(1, name)
-                stmt.setInt(2, id)
-                stmt.executeUpdate()
-            }
-            syncShopNamesToEmployees()
+        connection.prepareStatement("UPDATE employees SET name = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, name)
+            stmt.setInt(2, id)
+            stmt.executeUpdate()
         }
         return UpdateTherapistResponse(
             therapist = getTherapistForOwner(id, ownerId)!!,
             employeeRenamed = name != current.name,
-            shopRenamed = renameShop && name != current.shopName,
         )
     }
 
@@ -7197,7 +7120,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
         connection.prepareStatement(
             """
-            SELECT s.id, s.name, s.address, s.directions, s.use_employee_name, t.phone_number
+            SELECT s.id, s.name, s.address, s.directions, t.phone_number
             FROM shops s
             LEFT JOIN shop_telephony_config t ON t.shop_id = s.id
             WHERE s.owner_id = ?
@@ -7210,15 +7133,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 val id = rs.getInt("id")
                 val therapists = therapistsByShop[id].orEmpty()
-                val uses = rs.getInt("use_employee_name") == 1
+                val name = rs.getString("name")
                 out.add(
                     ShopDto(
                         id = id,
-                        name = rs.getString("name"),
+                        name = name,
+                        displayName = therapists.singleOrNull()?.name?.trim()?.takeIf { it.isNotEmpty() } ?: name,
                         address = rs.getString("address")?.takeIf { it.isNotBlank() },
                         directions = rs.getString("directions")?.takeIf { it.isNotBlank() },
-                        useEmployeeName = uses,
-                        nameFollowActive = uses && therapists.size == 1,
                         lineNumber = rs.getString("phone_number")?.trim()?.takeIf { it.isNotBlank() },
                         therapists = therapists,
                     )
@@ -7234,20 +7156,12 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     /**
      * Changes the fields of a shop that are present in [req]. Returns null when the shop is not
      * the owner's. Throws [IllegalArgumentException] with a message for the app when a value is
-     * not allowed: a name while the option is active, a blank or too long value, or turning the
-     * option on for a shop without exactly one therapist.
+     * not allowed: a blank or too long value.
      */
     fun updateShopForOwner(id: Int, ownerId: Int, req: UpdateShopRequest): ShopDto? {
-        val current = getShopDtoForOwner(id, ownerId) ?: return null
-        val oneTherapist = current.therapists.size == 1
-        val newUse = req.useEmployeeName ?: current.useEmployeeName
-        val turningOn = req.useEmployeeName == true && !current.useEmployeeName
-        require(!turningOn || oneTherapist) {
-            "Use employee name needs a shop with exactly one therapist"
-        }
+        getShopDtoForOwner(id, ownerId) ?: return null
         var name: String? = null
         if (req.name != null) {
-            require(!(newUse && oneTherapist)) { "Turn off Use employee name to set the name by hand" }
             name = req.name.trim()
             require(name.isNotEmpty()) { "name is required" }
             require(name.length <= SHOP_NAME_MAX_LENGTH) { "name is longer than $SHOP_NAME_MAX_LENGTH characters" }
@@ -7282,8 +7196,6 @@ class DataBase(dbFileName: String = "ShopManager.db") {
                     stmt.executeUpdate()
                 }
             }
-            if (req.useEmployeeName != null) setUseEmployeeName(id, req.useEmployeeName)
-            syncShopNamesToEmployees()
         }
         return getShopDtoForOwner(id, ownerId)
     }
@@ -7390,7 +7302,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         val entries = mutableListOf<TimelineEntry>()
 
         val smsSql = buildString {
-            append("SELECT m.id, m.shop_id, s.name AS shop_name, m.created_at, m.direction, m.body, m.status ")
+            append("SELECT m.id, m.shop_id, ${shopDisplayNameSql("s").replace('\n', ' ')} AS shop_name, m.created_at, m.direction, m.body, m.status ")
             append("FROM sms_message m JOIN shops s ON s.id = m.shop_id ")
             append("WHERE s.owner_id = ? AND (m.customer_id = ? OR m.counterparty_phone = ?) ")
             if (shopId != null) append("AND m.shop_id = ? ")
@@ -7415,7 +7327,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         }
 
         val callSql = buildString {
-            append("SELECT v.id, v.shop_id, s.name AS shop_name, v.started_at, v.ended_at, v.from_phone, v.outcome ")
+            append("SELECT v.id, v.shop_id, ${shopDisplayNameSql("s").replace('\n', ' ')} AS shop_name, v.started_at, v.ended_at, v.from_phone, v.outcome ")
             append("FROM voice_call v JOIN shops s ON s.id = v.shop_id ")
             append("WHERE s.owner_id = ? AND (v.customer_id = ? OR v.from_phone = ? OR v.to_phone = ?) ")
             if (shopId != null) append("AND v.shop_id = ? ")

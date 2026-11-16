@@ -71,7 +71,6 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
                 ?: return@patch call.respond(HttpStatusCode.NotFound, "Shop not found")
         }
         var employeeRenamed = false
-        var shopRenamed = false
         if (body.name != null) {
             val renamed = try {
                 db.renameTherapist(id, ownerId, body.name)
@@ -79,10 +78,9 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
                 return@patch call.respond(HttpStatusCode.BadRequest, e.message ?: "Invalid name")
             } ?: return@patch call.respond(HttpStatusCode.NotFound, "Therapist not found")
             employeeRenamed = renamed.employeeRenamed
-            shopRenamed = renamed.shopRenamed
         }
-        println("[MobileApi/therapists] manager=${login.managerId} therapist=$id name=${body.name != null} shop=${body.shopId} shopRenamed=$shopRenamed")
-        call.respond(UpdateTherapistResponse(db.getTherapistForOwner(id, ownerId)!!, employeeRenamed, shopRenamed))
+        println("[MobileApi/therapists] manager=${login.managerId} therapist=$id name=${body.name != null} shop=${body.shopId}")
+        call.respond(UpdateTherapistResponse(db.getTherapistForOwner(id, ownerId)!!, employeeRenamed))
     }
 
     // ── Daily accounts per therapist ──────────────────────────────────────────
@@ -182,7 +180,7 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         val id = call.parameters["id"]?.toIntOrNull() ?: return@patch call.respond(HttpStatusCode.BadRequest, "Missing id")
         val body = runCatching { call.receive<UpdateShopRequest>() }.getOrNull()
             ?: return@patch call.respond(HttpStatusCode.BadRequest, "Invalid request body")
-        if (body.name == null && body.address == null && body.directions == null && body.useEmployeeName == null) {
+        if (body.name == null && body.address == null && body.directions == null) {
             return@patch call.respond(HttpStatusCode.BadRequest, "Nothing to change")
         }
         val updated = try {
@@ -190,7 +188,7 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         } catch (e: IllegalArgumentException) {
             return@patch call.respond(HttpStatusCode.BadRequest, e.message ?: "Invalid value")
         } ?: return@patch call.respond(HttpStatusCode.NotFound, "Shop not found")
-        println("[MobileApi/shops] manager=${login.managerId} shop=$id name=${body.name != null} address=${body.address != null} directions=${body.directions != null} useEmployeeName=${body.useEmployeeName}")
+        println("[MobileApi/shops] manager=${login.managerId} shop=$id name=${body.name != null} address=${body.address != null} directions=${body.directions != null}")
         call.respond(updated)
     }
 
