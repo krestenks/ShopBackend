@@ -104,3 +104,25 @@ const val THERAPIST_NAME_MAX_LENGTH = 60
 const val SHOP_NAME_MAX_LENGTH = 60
 const val SHOP_ADDRESS_MAX_LENGTH = 200
 const val SHOP_DIRECTIONS_MAX_LENGTH = 1000
+
+/** The largest amount accepted in one cell of the daily accounts, in øre (1,000,000 kr). */
+const val ACCOUNT_AMOUNT_MAX_ORE = 100_000_000L
+
+/** One day of a therapist's accounts. Amounts are øre; total = cash + mobilepay + revolut - food. */
+@Serializable
+data class AccountDayDto(
+    val day: String,
+    val cash: Long = 0,
+    val mobilepay: Long = 0,
+    val revolut: Long = 0,
+    val food: Long = 0,
+    val total: Long = 0,
+)
+
+/** Every date of a month with the month totals (`totals.day` holds the month, yyyy-MM). */
+@Serializable
+data class AccountsMonthDto(val month: String, val days: List<AccountDayDto>, val totals: AccountDayDto)
+
+/** The days to save for one month. The total of each day is ignored: the server calculates it. */
+@Serializable
+data class SaveAccountsRequest(val month: String, val days: List<AccountDayDto>)

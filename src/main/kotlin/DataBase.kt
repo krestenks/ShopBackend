@@ -809,6 +809,18 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             );
             """,
             """
+            CREATE TABLE IF NOT EXISTS daily_accounts (
+                employee_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                cash INTEGER NOT NULL DEFAULT 0,
+                mobilepay INTEGER NOT NULL DEFAULT 0,
+                revolut INTEGER NOT NULL DEFAULT 0,
+                food INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (employee_id, day)
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS services (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -6990,6 +7002,84 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     fun getTherapistForOwner(id: Int, ownerId: Int): TherapistDto? =
         getTherapistsForOwner(ownerId).firstOrNull { it.id == id }
+
+    /**
+     * One month of daily accounts for a therapist: every date of the month, with the totals.
+     * Amounts are øre. The day total is cash + MobilePay + Revolut minus food.
+     */
+    fun getAccountsMonth(employeeId: Int, month: java.time.YearMonth): AccountsMonthDto {
+        val entered = HashMap<String, AccountDayDto>()
+        connection.prepareStatement(
+            "SELECT day, cash, mobilepay, revolut, food FROM daily_accounts WHERE employee_id = ? AND day >= ? AND day <= ?"
+        ).use { stmt ->
+            stmt.setInt(1, employeeId)
+            stmt.setString(2, month.atDay(1).toString())
+            stmt.setString(3, month.atEndOfMonth().toString())
+            val rs = stmt.executeQuery()
+            while (rs.next()) {
+                val day = rs.getString("day")
+                entered[day] = accountDay(day, rs.getLong("cash"), rs.getLong("mobilepay"), rs.getLong("revolut"), rs.getLong("food"))
+            }
+        }
+        val days = (1..month.lengthOfMonth()).map { d ->
+            val key = month.atDay(d).toString()
+            entered[key] ?: accountDay(key, 0, 0, 0, 0)
+        }
+        val totals = accountDay(
+            month.toString(),
+            days.sumOf { it.cash }, days.sumOf { it.mobilepay }, days.sumOf { it.revolut }, days.sumOf { it.food },
+        )
+        return AccountsMonthDto(month.toString(), days, totals)
+    }
+
+    private fun accountDay(day: String, cash: Long, mobilepay: Long, revolut: Long, food: Long) =
+        AccountDayDto(day, cash, mobilepay, revolut, food, cash + mobilepay + revolut - food)
+
+    /**
+     * Saves the given days of one month in one transaction. A day with every amount zero is
+     * removed. Throws IllegalArgumentException (shown to the app) for a bad day, a day outside
+     * the month, a repeated day, or an amount that is negative or above the limit.
+     */
+    fun saveAccountsMonth(employeeId: Int, month: java.time.YearMonth, days: List<AccountDayDto>): AccountsMonthDto {
+        val seen = HashSet<String>()
+        for (d in days) {
+            val date = try { java.time.LocalDate.parse(d.day) } catch (_: Exception) {
+                throw IllegalArgumentException("Invalid date: ${d.day}")
+            }
+            if (java.time.YearMonth.from(date) != month) throw IllegalArgumentException("${d.day} is not in $month")
+            if (!seen.add(d.day)) throw IllegalArgumentException("${d.day} is given twice")
+            for (amount in listOf(d.cash, d.mobilepay, d.revolut, d.food)) {
+                if (amount < 0) throw IllegalArgumentException("Amounts cannot be negative")
+                if (amount > ACCOUNT_AMOUNT_MAX_ORE) throw IllegalArgumentException("An amount is above the limit of ${ACCOUNT_AMOUNT_MAX_ORE / 100} kr")
+            }
+        }
+        val now = System.currentTimeMillis()
+        inTransaction {
+            for (d in days) {
+                if (d.cash == 0L && d.mobilepay == 0L && d.revolut == 0L && d.food == 0L) {
+                    connection.prepareStatement("DELETE FROM daily_accounts WHERE employee_id = ? AND day = ?").use { stmt ->
+                        stmt.setInt(1, employeeId)
+                        stmt.setString(2, d.day)
+                        stmt.executeUpdate()
+                    }
+                } else {
+                    connection.prepareStatement(
+                        "INSERT OR REPLACE INTO daily_accounts (employee_id, day, cash, mobilepay, revolut, food, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    ).use { stmt ->
+                        stmt.setInt(1, employeeId)
+                        stmt.setString(2, d.day)
+                        stmt.setLong(3, d.cash)
+                        stmt.setLong(4, d.mobilepay)
+                        stmt.setLong(5, d.revolut)
+                        stmt.setLong(6, d.food)
+                        stmt.setLong(7, now)
+                        stmt.executeUpdate()
+                    }
+                }
+            }
+        }
+        return getAccountsMonth(employeeId, month)
+    }
 
     /**
      * Renames a therapist. When the therapist's shop has "Use employee name" on and no other

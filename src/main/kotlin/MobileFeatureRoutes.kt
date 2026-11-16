@@ -13,6 +13,10 @@ internal fun resolveOwnerId(login: LoginInfo, db: DataBase): Int? =
         ?: login.managerId?.let { db.getOwnerIdForManager(it) }
         ?: login.shopId?.let { db.getOwnerIdForShop(it) }
 
+/** Parses yyyy-MM; null when missing or not a month. */
+internal fun parseAccountsMonth(text: String?): java.time.YearMonth? =
+    text?.let { runCatching { java.time.YearMonth.parse(it) }.getOrNull() }
+
 /** True when the customer belongs to the user's owner. The user's owner must be known. */
 internal fun customerBelongsToOwner(customerId: Int, login: LoginInfo, db: DataBase): Boolean {
     val ownerId = resolveOwnerId(login, db) ?: return false
@@ -75,6 +79,38 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         }
         println("[MobileApi/therapists] manager=${login.managerId} therapist=$id name=${body.name != null} shop=${body.shopId} shopRenamed=$shopRenamed")
         call.respond(UpdateTherapistResponse(db.getTherapistForOwner(id, ownerId)!!, employeeRenamed, shopRenamed))
+    }
+
+    // ── Daily accounts per therapist ──────────────────────────────────────────
+
+    get("/api/mobile/therapists/{id}/accounts") {
+        val login = authenticateManager() ?: return@get
+        if (login.role != "manager") return@get call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@get call.respond(HttpStatusCode.Forbidden, "No owner")
+        val id = call.parameters["id"]?.toIntOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val month = parseAccountsMonth(call.request.queryParameters["month"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, "month must be yyyy-MM")
+        if (db.getTherapistForOwner(id, ownerId) == null) return@get call.respond(HttpStatusCode.NotFound, "Therapist not found")
+        call.respond(db.getAccountsMonth(id, month))
+    }
+
+    put("/api/mobile/therapists/{id}/accounts") {
+        val login = authenticateManager() ?: return@put
+        if (login.role != "manager") return@put call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@put call.respond(HttpStatusCode.Forbidden, "No owner")
+        val id = call.parameters["id"]?.toIntOrNull() ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val body = runCatching { call.receive<SaveAccountsRequest>() }.getOrNull()
+            ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+        val month = parseAccountsMonth(body.month) ?: return@put call.respond(HttpStatusCode.BadRequest, "month must be yyyy-MM")
+        if (body.days.size > 31) return@put call.respond(HttpStatusCode.BadRequest, "At most 31 days per save")
+        if (db.getTherapistForOwner(id, ownerId) == null) return@put call.respond(HttpStatusCode.NotFound, "Therapist not found")
+        val saved = try {
+            db.saveAccountsMonth(id, month, body.days)
+        } catch (e: IllegalArgumentException) {
+            return@put call.respond(HttpStatusCode.BadRequest, e.message ?: "Invalid value")
+        }
+        println("[MobileApi/accounts] manager=${login.managerId} therapist=$id month=$month days=${body.days.size}")
+        call.respond(saved)
     }
 
     // ── Shops ─────────────────────────────────────────────────────────────────
