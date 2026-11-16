@@ -6,8 +6,9 @@ accordingly.
 
 ## The system in one paragraph
 
-Kotlin/Ktor backend + Asterisk 18 (PJSIP) + chan_quectel driving EC25 LTE modems, on one edge box
-(`ssh phone@192.168.0.192`, systemd `shopbackend`). Manager phones run the **ShopManager Android
+Kotlin/Ktor backend + Asterisk 22 (PJSIP) + chan_quectel driving EC25 LTE modems, on one edge box
+(`ssh phone@192.168.0.158`, systemd `shopbackend`; moved from the old edge `192.168.0.192` on
+2026-11-16, see docs/elitedesk-migration.md). Manager phones run the **ShopManager Android
 app** (separate repo: `C:\Users\krest\AndroidStudioProjects\ShopManager`), reaching the backend over
 a Headscale tailnet. chan_quectel source lives **only on the edge** at
 `/home/phone/asterisk-chan-quectel` (git remote `origin` = our fork, `upstream` = RoEdAl).
