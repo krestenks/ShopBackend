@@ -27,7 +27,7 @@ The app is Activities with XML layouts and Retrofit, not Compose.
 | Number ownership | The SIM number stays on the shop (`shop_telephony_config.phone_number`). The app shows whether the number is dedicated or shared. |
 | Dedicated or shared | Derived, not stored. A shop with exactly one `employee_shop` row: "Dedicated to <name>". Any other count: "Shared shop number". |
 | Number editing | Read only in the app. Changed in WebAdmin only. |
-| Therapist name | Editable from the app. In a shop with exactly one therapist, the rename also renames the shop. Otherwise only the employee name changes. |
+| Therapist name | Editable from the app. Only the employee name changes; the shop name is separate (see app-shop-page-plan.md, 2026-11-16). |
 | Therapist page | Name (editable), shop (editable), number (read only, with the dedicated or shared label). |
 | Shared scope | Customer records are tenant-wide (all shops of one owner, all managers). |
 | Quick messages | Private per manager, stored in the backend DB, plain text and emoji, no placeholders. Tap fills the message box, a second tap sends. |

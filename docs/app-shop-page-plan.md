@@ -1,5 +1,22 @@
 # Plan: shop page in the app, with "Use employee name"
 
+## Changed 2026-11-16: the option is removed
+
+The "Use employee name" option, the column `shops.use_employee_name` and the name sync no longer exist. The sections below describe the earlier design and are kept for the shop page layout only.
+
+Current rules:
+
+| Item | Rule |
+|---|---|
+| Shop name | Set by hand in the app and in WebAdmin. Never changed by an employee rename. |
+| Display name | The name shown on calls and SMS lists (call log, SMS threads, unhandled SMS, search, customer timeline). It is the therapist's name when the shop has exactly one employee, otherwise the shop name. A blank therapist name falls back to the shop name. SQL: `shopDisplayNameSql` in `DataBase.kt`. |
+| Employee count | Counts every `employee_shop` link of the shop, whether `available` or not. |
+| Therapist and shop | A therapist works in one shop. Adding a therapist to a shop (shop page, "Add therapist") or choosing another shop on the therapist page moves them. There is no state without a shop. |
+| `ShopDto` | `name` is the shop name, `displayName` the name above. |
+
+Tested 2026-11-16: 289 backend tests pass. On the S21 against staging: shop name saved while the shop has one therapist, therapist not renamed; therapist moved into a shop with no therapist through the shop page and back.
+Not tested on the device: the call and SMS lists after a move (covered by the backend tests only); the WebAdmin forms in a browser.
+
 Status: backend and app built 2026-11-16 (commit 488a3ac and the app commit "Shops page"). Backend tests pass (273). Staging backend runs it. Tested on the S21 against staging 2026-11-16: shop list, address save, rename follows, paused state with two therapists, resume after moving a therapist back. Not tested: the WebAdmin checkbox in a browser, Thai and emoji input. Written 2026-11-16.
 Scope: ShopBackend and the ShopManager app. Nothing here touches call handling or the Asterisk
 provisioning, so Rule 1 (recovery code) is not triggered. Deploying the backend restarts it, so Rule 2 applies at deploy time.
