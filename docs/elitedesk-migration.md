@@ -74,6 +74,17 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTERISK_VERSION_NUM=220000 ..
 - A bridged call from each line to a mobile phone and the S21 app had audio both ways. Audio from the phone into Asterisk runs only while audio is also written to the phone, because chan_quectel links the capture and playback streams; a recording test with nothing playing captures nothing.
 - `/health` is ok and the duty phone registers over the tailnet.
 
+## USB layout of the modems, 2026-11-17
+
+- The standard layout (diag, NMEA, AT, modem, network, audio) needs more endpoints than the AMD xHCI controller (1022:7914) provides for 11 modems. Each modem is set to a reduced layout with `AT+QCFG="usbcfg"` and restarted with `AT+CFUN=1,1`.
+- Shop modems: `0x2C7C,0x0125,0,0,1,0,0,0,1` gives 5 interfaces. The AT port is interface `:1.1` behind a silent port on `:1.0`.
+- Spares without a SIM: the same setting gives 4 interfaces with the AT port on `:1.0`. Spares 1-1.4.2.4 and 1-1.4.3.2 have ADB enabled and take `0,0,1,0,0,1,1` (5 interfaces, AT on `:1.0`). The `usbcfg` write with ADB off is rejected on them.
+- `ModemResolver` tries interfaces `:1.2`, `:1.1`, `:1.0` in that order for the tty (commit 7b76d99).
+- All 11 modems enumerate and answer `AT` after a hub power cycle, and the five shop trunks are Free.
+- A modem that times out at set-config (`error -110`) is revived by writing 1 then 0 to the hub port `disable` file, `/sys/bus/usb/devices/1-1.4.<chip>:1.0/1-1.4.<chip>-port<n>/disable`.
+- PipeWire and WirePlumber are masked and the graphical session is stopped, because they open the modem audio devices.
+- Not tested: call audio on the reduced layout, and a reboot of the host.
+
 ## Open
 
 - `src/smsdb.c: cannot start a transaction within a transaction` is logged three times at modem start-up. Its effect is not examined.
