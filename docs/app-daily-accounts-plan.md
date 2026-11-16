@@ -75,7 +75,7 @@ A month view on each therapist's page. One row per date. Columns: Cash, MobilePa
 
 ## Revision: job lines (2026-11-16)
 
-Request: the month is an overview only. A tap on a day opens that day with the same fields per job, so the manager can enter each amount as the money comes in. Five job lines to start with, and a + button for more.
+Request: the month is an overview only. A tap on a day opens that day with the same fields per job, so the manager can enter each amount as the money comes in. Five job lines to start with, and a + button for more. Changed the same day to one job line to start with: adding a line with + is quick.
 
 | Topic | Decision |
 |---|---|
@@ -83,7 +83,7 @@ Request: the month is an overview only. A tap on a day opens that day with the s
 | Month | `GET .../accounts?month=yyyy-MM` is unchanged in shape. Each day is the sum of its job lines. Read only in the app. |
 | Day | `GET` and `PUT /api/mobile/therapists/{id}/accounts/{yyyy-MM-dd}`. The PUT sends all job lines of the day and replaces the day in one transaction; lines left out are removed. The old month `PUT` is removed. |
 | Limits | At most 20 lines per day (`ACCOUNT_JOB_MAX_LINES`, my choice). Same per-amount limit as before. |
-| App | Month screen: rows open the day. Day screen: 5 lines, + adds one, Day row at the bottom, Save, discard prompt. The month reloads when the day screen closes. |
+| App | Month screen: rows open the day, and today's row is light blue. Day screen: 1 line to start with, + adds one, Day row at the bottom, Save, discard prompt. The month reloads when the day screen closes. |
 | Not included | A note or customer name per job. A job cannot be moved to another day. |
 | Access | Unchanged: managers only, owner scoped. |
 
