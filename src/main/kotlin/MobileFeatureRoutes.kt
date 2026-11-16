@@ -126,6 +126,38 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         call.respond(saved)
     }
 
+    // ── Price list per therapist ──────────────────────────────────────────────
+
+    // Read by a manager of the shop's owner and by the shop's own login; only managers can edit.
+    get("/api/mobile/shops/{id}/price-lists") {
+        val login = authenticateManager() ?: return@get
+        val shopId = call.parameters["id"]?.toIntOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val allowed = when (login.role) {
+            "shop" -> login.shopId == shopId
+            "manager" -> resolveOwnerId(login, db)?.let { db.getShopDtoForOwner(shopId, it) != null } ?: false
+            else -> false
+        }
+        if (!allowed) return@get call.respond(HttpStatusCode.NotFound, "Shop not found")
+        call.respond(ShopPriceListsDto(canEdit = login.role == "manager", therapists = db.getPriceListsForShop(shopId)))
+    }
+
+    put("/api/mobile/therapists/{id}/price-list") {
+        val login = authenticateManager() ?: return@put
+        if (login.role != "manager") return@put call.respond(HttpStatusCode.Forbidden, "Managers only")
+        val ownerId = resolveOwnerId(login, db) ?: return@put call.respond(HttpStatusCode.Forbidden, "No owner")
+        val id = call.parameters["id"]?.toIntOrNull() ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val body = runCatching { call.receive<SavePriceListRequest>() }.getOrNull()
+            ?: return@put call.respond(HttpStatusCode.BadRequest, "Invalid request body")
+        if (db.getTherapistForOwner(id, ownerId) == null) return@put call.respond(HttpStatusCode.NotFound, "Therapist not found")
+        val saved = try {
+            db.setTherapistPriceList(id, body.priceList)
+        } catch (e: IllegalArgumentException) {
+            return@put call.respond(HttpStatusCode.BadRequest, e.message ?: "Invalid price list")
+        }
+        println("[MobileApi/pricelist] manager=${login.managerId} therapist=$id length=${saved.length}")
+        call.respond(SavePriceListRequest(saved))
+    }
+
     // ── Shops ─────────────────────────────────────────────────────────────────
 
     get("/api/mobile/shops") {

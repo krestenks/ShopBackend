@@ -1058,6 +1058,8 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             "ALTER TABLE shops     ADD COLUMN owner_id INTEGER",
             "ALTER TABLE managers  ADD COLUMN owner_id INTEGER",
             "ALTER TABLE employees ADD COLUMN owner_id INTEGER",
+            // Free text price list per therapist (text and emojis), sent as an SMS from the message thread
+            "ALTER TABLE employees ADD COLUMN price_list TEXT",
             "ALTER TABLE services  ADD COLUMN owner_id INTEGER",
             "ALTER TABLE customers ADD COLUMN owner_id INTEGER",
             "ALTER TABLE app_account ADD COLUMN owner_id INTEGER",
@@ -7100,6 +7102,38 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             }
         }
         return getAccountsDay(employeeId, date)
+    }
+
+    /** The price list text of every therapist in a shop, in name order. A therapist with none has an empty text. */
+    fun getPriceListsForShop(shopId: Int): List<TherapistPriceListDto> =
+        connection.prepareStatement(
+            """
+            SELECT e.id, e.name, e.price_list
+            FROM employees e JOIN employee_shop es ON e.id = es.employee_id
+            WHERE es.shop_id = ? ORDER BY e.name COLLATE NOCASE, e.id
+            """.trimIndent()
+        ).use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            val out = ArrayList<TherapistPriceListDto>()
+            while (rs.next()) out += TherapistPriceListDto(rs.getInt("id"), rs.getString("name"), rs.getString("price_list") ?: "")
+            out
+        }
+
+    /**
+     * Saves a therapist's price list and returns the saved text. Line breaks are stored as \n and
+     * leading and trailing white space is removed. A blank text clears the list. Throws
+     * IllegalArgumentException (shown to the app) when the text is longer than PRICE_LIST_MAX_LENGTH.
+     */
+    fun setTherapistPriceList(employeeId: Int, text: String): String {
+        val clean = text.replace("\r\n", "\n").replace('\r', '\n').trim()
+        require(clean.length <= PRICE_LIST_MAX_LENGTH) { "The price list is longer than $PRICE_LIST_MAX_LENGTH characters" }
+        connection.prepareStatement("UPDATE employees SET price_list = ? WHERE id = ?").use { stmt ->
+            stmt.setString(1, clean.ifEmpty { null })
+            stmt.setInt(2, employeeId)
+            stmt.executeUpdate()
+        }
+        return clean
     }
 
     /**

@@ -123,6 +123,20 @@ data class AccountDayDto(
 @Serializable
 data class AccountsMonthDto(val month: String, val days: List<AccountDayDto>, val totals: AccountDayDto)
 
+/** The longest price list text, in UTF-16 characters (an emoji counts as 2, as in an SMS). */
+const val PRICE_LIST_MAX_LENGTH = 1000
+
+/** A therapist's saved price list text; empty when none is saved. */
+@Serializable
+data class TherapistPriceListDto(val therapistId: Int, val name: String, val priceList: String)
+
+/** The price lists of a shop's therapists. `canEdit` is false for the in-shop role. */
+@Serializable
+data class ShopPriceListsDto(val canEdit: Boolean, val therapists: List<TherapistPriceListDto>)
+
+@Serializable
+data class SavePriceListRequest(val priceList: String)
+
 /** The most job lines one therapist can have on one day. */
 const val ACCOUNT_JOB_MAX_LINES = 20
 
