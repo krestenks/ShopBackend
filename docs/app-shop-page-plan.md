@@ -1,6 +1,6 @@
 # Plan: shop page in the app, with "Use employee name"
 
-Status: planned, decisions confirmed 2026-11-16, not started. Written 2026-11-16.
+Status: backend and app built 2026-11-16 (commit 488a3ac and the app commit "Shops page"). Backend tests pass (273). Staging backend runs it. App not yet tested on a device. Written 2026-11-16.
 Scope: ShopBackend and the ShopManager app. Nothing here touches call handling or the Asterisk
 provisioning, so Rule 1 (recovery code) is not triggered. Deploying the backend restarts it, so Rule 2 applies at deploy time.
 
