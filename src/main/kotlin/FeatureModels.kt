@@ -108,7 +108,7 @@ const val SHOP_DIRECTIONS_MAX_LENGTH = 1000
 /** The largest amount accepted in one cell of the daily accounts, in øre (1,000,000 kr). */
 const val ACCOUNT_AMOUNT_MAX_ORE = 100_000_000L
 
-/** One day of a therapist's accounts. Amounts are øre; total = cash + mobilepay + revolut - food. */
+/** One day of a therapist's accounts. Amounts are øre; total = cash - mobilepay - revolut - food. */
 @Serializable
 data class AccountDayDto(
     val day: String,

@@ -7006,7 +7006,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
 
     /**
      * One month of accounts for a therapist: every date of the month with the sum of its job
-     * lines, and the month totals. Amounts are øre. A total is cash + MobilePay + Revolut minus food.
+     * lines, and the month totals. Amounts are øre. A total is cash minus MobilePay, Revolut and food.
      */
     fun getAccountsMonth(employeeId: Int, month: java.time.YearMonth): AccountsMonthDto {
         val entered = HashMap<String, AccountDayDto>()
@@ -7037,7 +7037,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
     }
 
     private fun accountDay(day: String, cash: Long, mobilepay: Long, revolut: Long, food: Long) =
-        AccountDayDto(day, cash, mobilepay, revolut, food, cash + mobilepay + revolut - food)
+        AccountDayDto(day, cash, mobilepay, revolut, food, cash - mobilepay - revolut - food)
 
     /** The stored job lines of one day, in line order, with the day totals. Empty lines are not stored. */
     fun getAccountsDay(employeeId: Int, date: java.time.LocalDate): AccountDayJobsDto {
@@ -7051,7 +7051,7 @@ class DataBase(dbFileName: String = "ShopManager.db") {
             while (rs.next()) {
                 val cash = rs.getLong("cash"); val mobilepay = rs.getLong("mobilepay")
                 val revolut = rs.getLong("revolut"); val food = rs.getLong("food")
-                jobs += AccountJobDto(rs.getInt("line"), cash, mobilepay, revolut, food, cash + mobilepay + revolut - food)
+                jobs += AccountJobDto(rs.getInt("line"), cash, mobilepay, revolut, food, cash - mobilepay - revolut - food)
             }
         }
         return AccountDayJobsDto(

@@ -68,24 +68,25 @@ class DailyAccountsTest {
     }
 
     @Test
-    fun `a job total is received minus food, and the day sums its jobs`() {
+    fun `a job total is cash minus mobilepay, revolut and food, and the day sums its jobs`() {
         val s = setup()
         val saved = s.db.saveAccountsDay(
             s.therapist, day10,
             listOf(
-                job(1, cash = 50000, mobilepay = 120000, food = 4500),
+                job(1, cash = 50000, mobilepay = 20000, food = 4500),
                 job(2, revolut = 30000),
                 job(3, cash = 10000, food = 12000),
             ),
         )
         assertEquals(3, saved.jobs.size)
-        assertEquals(50000 + 120000 - 4500L, saved.jobs[0].total)
-        assertEquals(30000L, saved.jobs[1].total)
+        assertEquals(50000 - 20000 - 4500L, saved.jobs[0].total)
+        assertEquals(-30000L, saved.jobs[1].total, "revolut is subtracted")
         assertEquals(-2000L, saved.jobs[2].total, "a job can be negative")
         assertEquals(60000L, saved.totals.cash)
-        assertEquals(120000L, saved.totals.mobilepay)
+        assertEquals(20000L, saved.totals.mobilepay)
         assertEquals(30000L, saved.totals.revolut)
         assertEquals(16500L, saved.totals.food)
+        assertEquals(60000 - 20000 - 30000 - 16500L, saved.totals.total)
         assertEquals(saved.jobs.sumOf { it.total }, saved.totals.total)
     }
 
@@ -99,10 +100,10 @@ class DailyAccountsTest {
         assertEquals(1500L, d10.cash)
         assertEquals(100L, d10.food)
         assertEquals(1400L, d10.total)
-        assertEquals(700L, m.days[10].total)
+        assertEquals(-700L, m.days[10].total, "mobilepay is subtracted")
         assertEquals(1500L, m.totals.cash)
         assertEquals(700L, m.totals.mobilepay)
-        assertEquals(2100L, m.totals.total)
+        assertEquals(1500 - 700 - 100L, m.totals.total)
         assertEquals(m.days.sumOf { it.total }, m.totals.total)
         assertEquals(0L, s.db.getAccountsMonth(s.therapist, YearMonth.of(2026, 10)).totals.total, "another month is untouched")
     }
