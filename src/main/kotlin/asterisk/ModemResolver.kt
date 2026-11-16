@@ -35,11 +35,11 @@ class ModemResolver {
         private const val EC25_PRODUCT = "0125"
         /**
          * Interfaces that can hold the AT command port, in the order they are tried. The standard
-         * layout (with UAC) has the AT port on interface .2. The reduced layout (AT port and
-         * modem port only, set with AT+QCFG="usbcfg") has it on interface .0, and interface .2 is
-         * then an audio interface without a serial port.
+         * layout (with UAC) has the AT port on interface .2. The reduced layout (set with
+         * AT+QCFG="usbcfg") has it on interface .1 behind a modem port on interface .0, and
+         * interface .2 is then an audio interface without a serial port.
          */
-        private val AT_INTERFACE_SUFFIXES = listOf(":1.2", ":1.0")
+        private val AT_INTERFACE_SUFFIXES = listOf(":1.2", ":1.1", ":1.0")
     }
 
     fun listPhysicalModems(): List<PhysicalModem> {
