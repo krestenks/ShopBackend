@@ -33,8 +33,13 @@ class ModemResolver {
     companion object {
         private const val EC25_VENDOR = "2c7c"
         private const val EC25_PRODUCT = "0125"
-        /** UAC shifts the AT command port to USB interface .2 (if02). */
-        private const val AT_INTERFACE_SUFFIX = ":1.2"
+        /**
+         * Interfaces that can hold the AT command port, in the order they are tried. The standard
+         * layout (with UAC) has the AT port on interface .2. The reduced layout (AT port and
+         * modem port only, set with AT+QCFG="usbcfg") has it on interface .0, and interface .2 is
+         * then an audio interface without a serial port.
+         */
+        private val AT_INTERFACE_SUFFIXES = listOf(":1.2", ":1.0")
     }
 
     fun listPhysicalModems(): List<PhysicalModem> {
@@ -74,11 +79,12 @@ class ModemResolver {
      * survives re-enumeration. Falls back to /dev/ttyUSBn if no by-path symlink is present.
      */
     private fun resolveAtDevice(usbPort: String): String? {
-        val ifaceDir = File("/sys/bus/usb/devices/$usbPort$AT_INTERFACE_SUFFIX")
-        if (!ifaceDir.isDirectory) return null
-        val tty = ifaceDir.listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
-            ?: File(ifaceDir, "tty").listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
-            ?: return null
+        val tty = AT_INTERFACE_SUFFIXES.firstNotNullOfOrNull { suffix ->
+            val ifaceDir = File("/sys/bus/usb/devices/$usbPort$suffix")
+            if (!ifaceDir.isDirectory) return@firstNotNullOfOrNull null
+            ifaceDir.listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
+                ?: File(ifaceDir, "tty").listFiles()?.firstOrNull { it.name.startsWith("ttyUSB") }?.name
+        } ?: return null
         val ttyPath = "/dev/$tty"
         return stableByPathFor(ttyPath) ?: ttyPath
     }
