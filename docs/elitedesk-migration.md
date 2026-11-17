@@ -85,9 +85,15 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTERISK_VERSION_NUM=220000 ..
 - PipeWire and WirePlumber are masked and the graphical session is stopped, because they open the modem audio devices.
 - Verified on 2026-11-17: a bridged call on each of the five shop lines reaches the S21 and the user heard audio. Not tested: a reboot of the host.
 
+## Monitoring on the EliteDesk
+
+- Services (enabled, run at boot): `shopbackend` (contains the SIP monitor, modem watchdog, one-way audio check, system health and Lebara balance), `shopbackend-health.timer`, `dropcatch`, `derpprobe` (relay and app latency to the phones, `/home/phone/derpprobe.csv`) and `linkprobe` (layered reachability of the duty phone, `/home/phone/linkprobe.csv`).
+- `/home/phone/syswatch.sh <shops with a proven first SMS> [seconds]` prints one line per abnormal event (SMS failures, trunk states, duty phone, restarts, recovery actions) and a summary every 25 minutes. It ends itself after the given lifetime (default 1790 s), so it is started by the Claude monitor and re-armed when it expires.
+- `smswatch.sh` and `syswatch-journal.awk` are the pieces `syswatch.sh` uses.
+
 ## Open
 
 - `src/smsdb.c: cannot start a transaction within a transaction` is logged three times at modem start-up. Its effect is not examined.
 - Asterisk 22 logs `Option 'stir_shaken' is no longer supported` for every endpoint written by the backend.
-- The `derpprobe`, `lte_watch` and `smswatch` helpers are not copied. `astdb.sqlite3` is not copied.
+- `astdb.sqlite3` is not copied. `lte_watch` is not copied.
 - Incoming calls from outside have not been tested.
