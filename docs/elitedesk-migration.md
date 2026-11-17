@@ -77,13 +77,13 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTERISK_VERSION_NUM=220000 ..
 ## USB layout of the modems, 2026-11-17
 
 - The standard layout (diag, NMEA, AT, modem, network, audio) needs more endpoints than the AMD xHCI controller (1022:7914) provides for 11 modems. Each modem is set to a reduced layout with `AT+QCFG="usbcfg"` and restarted with `AT+CFUN=1,1`.
-- Shop modems: `0x2C7C,0x0125,0,0,1,0,0,0,1` gives 5 interfaces. The AT port is interface `:1.1` behind a silent port on `:1.0`.
+- Shop modems: `0x2C7C,0x0125,0,0,1,1,0,0,1` (AT and modem port) gives 5 interfaces. The AT port is interface `:1.0`. The modem sends call-progress messages (`+QIND: "ccinfo"`) only to the AT port (`urcport` is `usbat`), so chan_quectel must use `:1.0`; on `:1.1` it never sees the call index change from 1 to 3 and does not start the Dial to the app.
 - Spares without a SIM: the same setting gives 4 interfaces with the AT port on `:1.0`. Spares 1-1.4.2.4 and 1-1.4.3.2 have ADB enabled and take `0,0,1,0,0,1,1` (5 interfaces, AT on `:1.0`). The `usbcfg` write with ADB off is rejected on them.
-- `ModemResolver` tries interfaces `:1.2`, `:1.1`, `:1.0` in that order for the tty (commit 7b76d99).
+- `ModemResolver` tries interfaces `:1.2`, then `:1.0` for the tty.
 - All 11 modems enumerate and answer `AT` after a hub power cycle, and the five shop trunks are Free.
 - A modem that times out at set-config (`error -110`) is revived by writing 1 then 0 to the hub port `disable` file, `/sys/bus/usb/devices/1-1.4.<chip>:1.0/1-1.4.<chip>-port<n>/disable`.
 - PipeWire and WirePlumber are masked and the graphical session is stopped, because they open the modem audio devices.
-- Not tested: call audio on the reduced layout, and a reboot of the host.
+- Verified: a bridged call on shop1 reaches the S21. Not tested: the other four lines, call audio on the reduced layout, and a reboot of the host.
 
 ## Open
 

@@ -36,10 +36,11 @@ class ModemResolver {
         /**
          * Interfaces that can hold the AT command port, in the order they are tried. The standard
          * layout (with UAC) has the AT port on interface .2. The reduced layout (set with
-         * AT+QCFG="usbcfg") has it on interface .1 behind a modem port on interface .0, and
-         * interface .2 is then an audio interface without a serial port.
+         * AT+QCFG="usbcfg") has it on interface .0, and interface .2 is then an audio interface
+         * without a serial port. The AT port is the port the modem sends call-progress messages
+         * to, so it is the one chan_quectel must use; a modem port on interface .1 is not.
          */
-        private val AT_INTERFACE_SUFFIXES = listOf(":1.2", ":1.1", ":1.0")
+        private val AT_INTERFACE_SUFFIXES = listOf(":1.2", ":1.0")
     }
 
     fun listPhysicalModems(): List<PhysicalModem> {
