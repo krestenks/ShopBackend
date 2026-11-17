@@ -83,7 +83,7 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTERISK_VERSION_NUM=220000 ..
 - All 11 modems enumerate and answer `AT` after a hub power cycle, and the five shop trunks are Free.
 - A modem that times out at set-config (`error -110`) is revived by writing 1 then 0 to the hub port `disable` file, `/sys/bus/usb/devices/1-1.4.<chip>:1.0/1-1.4.<chip>-port<n>/disable`.
 - PipeWire and WirePlumber are masked and the graphical session is stopped, because they open the modem audio devices.
-- Verified: a bridged call on shop1 reaches the S21. Not tested: the other four lines, call audio on the reduced layout, and a reboot of the host.
+- Verified on 2026-11-17: a bridged call on each of the five shop lines reaches the S21 and the user heard audio. Not tested: a reboot of the host.
 
 ## Open
 
