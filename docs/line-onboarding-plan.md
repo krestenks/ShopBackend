@@ -143,3 +143,14 @@ Not changed:
 - `AT+QCFG="ims"` mode 2 (carrier controlled) is read as "not enabled". Unverified on this firmware.
 - The 45 s wait of the line test keeps the HTTP request open.
 - Fault injection of the power-cycle guard against a live call has not been run.
+
+## W4 result, 2026-11-19 (card id pinning)
+
+- On a spare modem (no trunk), a udev rule `ATTR{id}="ec_1_1_4_2_2"` renamed the card, and the name came back
+  unchanged after the hub port was switched off and on. The rule applies when the card is created.
+- On a card that a trunk uses, writing the id fails with `Invalid argument`, with the trunk connected and also with the
+  trunk stopped (the sound device was released, the write still failed). A rollout that renames live cards does not work.
+- Every live card therefore takes its pinned name only when its modem enumerates again (hub port cycle or host reboot).
+  The trunk config and the database must name the new card before that happens. The planner rule in W3 corrects the sound
+  card of a trunk that is down, so it also covers a modem that enumerates after the rule is installed.
+- Nothing is installed on the EliteDesk: the test rule was removed, and all eight trunks use their old card names.
