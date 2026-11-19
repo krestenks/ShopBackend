@@ -14,7 +14,8 @@ sudo asterisk -rx "pjsip show endpoint mgr<ID>"   # "Not in use" = reachable, "U
 ```
 
 Do the steps below **on each manager phone**. Paths are Samsung **One UI** (Galaxy
-A70 / S21 / S25 / S26); other brands have equivalents under Battery / Apps / VPN.
+A70 / S21 / S25 / S25 Edge / S26); other brands have equivalents under Battery / Apps /
+VPN.
 
 ---
 
@@ -28,6 +29,9 @@ A70 / S21 / S25 / S26); other brands have equivalents under Battery / Apps / VPN
    Settings → Battery → **Background usage limits** →
    - **Never sleeping apps** → add **ShopManager**
    - make sure it is **not** in *Sleeping apps* or *Deep sleeping apps*.
+
+   On One UI 9 the app is absent from this picker because step 1 already exempts it; see
+   [Setting it up over adb](#setting-it-up-over-adb).
 
 3. **Don't auto-remove the app**
    Settings → Apps → ShopManager → turn **off** "Pause app activity if unused"
@@ -50,6 +54,90 @@ A70 / S21 / S25 / S26); other brands have equivalents under Battery / Apps / VPN
 7. **Dedicated phones on a charger** (optional, best reliability)
    Developer options → **Stay awake** (screen on while charging). Keeps the app hot on
    a phone that lives on the counter/charger.
+
+---
+
+## Setting it up over adb
+
+A phone on a USB cable takes the whole checklist in one pass, and sets the app-ops behind it
+directly rather than through the menus. `pm grant` fails on a permission the manifest does not
+declare, so each command below applies to this app only.
+
+```bash
+ADB=~/AppData/Local/Android/Sdk/platform-tools/adb.exe   # Windows path
+S=<serial>                                               # from: adb devices -l
+P=com.kkstech.shopmanager
+
+# Runtime permissions. Granting them here means the Linphone Core sees them at its first
+# start; granted through the dialog instead, they reach the Core only after the app is
+# reopened.
+$ADB -s $S shell pm grant $P android.permission.POST_NOTIFICATIONS
+$ADB -s $S shell pm grant $P android.permission.BLUETOOTH_CONNECT
+$ADB -s $S shell pm grant $P android.permission.RECORD_AUDIO
+
+# Battery: the exemption behind checklist steps 1 and 2.
+$ADB -s $S shell cmd deviceidle whitelist +$P
+$ADB -s $S shell cmd appops set $P RUN_ANY_IN_BACKGROUND allow
+$ADB -s $S shell cmd appops set $P RUN_IN_BACKGROUND allow
+
+# Call screen over the lock screen, and the incoming-call heads-up.
+$ADB -s $S shell cmd appops set $P SYSTEM_ALERT_WINDOW allow
+$ADB -s $S shell cmd appops set $P USE_FULL_SCREEN_INTENT allow
+
+# Checklist step 3, "Pause app activity if unused".
+$ADB -s $S shell cmd appops set $P AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore
+
+# OTA updates. See below.
+$ADB -s $S shell cmd appops set $P REQUEST_INSTALL_PACKAGES allow
+
+# Checklist step 4. Confirm this one in Settings; see the limits below.
+$ADB -s $S shell settings put secure always_on_vpn_app $P
+$ADB -s $S shell settings put secure always_on_vpn_lockdown 0
+```
+
+Join the tailnet by firing the invite's deep link, which the **Add a phone** page mints:
+
+```bash
+$ADB -s $S shell am start -a android.intent.action.VIEW -d "'shopmanager://join?server=…&key=…&api=…'" $P
+```
+
+The phone then asks for VPN consent, which someone taps. `JoinActivity` stores the invite's
+`api=` value as the app's base URL, so the tailnet IP arrives with the link and is not typed in.
+
+### REQUEST_INSTALL_PACKAGES
+
+`ApkInstaller` calls `canRequestPackageInstalls()` and, when it is false, sends the manager to
+the system's "Install unknown apps" screen. The permission is declared in the manifest but its
+app-op starts unset, which the check treats as denied, so an OTA update costs a detour through
+Settings on every release until the op is set to `allow`.
+
+### Verifying the battery exemption
+
+```bash
+$ADB -s $S shell am get-standby-bucket $P      # 5 = EXEMPTED
+$ADB -s $S shell dumpsys deviceidle whitelist | grep $P
+```
+
+Bucket 5 is `STANDBY_BUCKET_EXEMPTED`, the top of the scale (5 exempted, 10 active, 20 working
+set, 30 frequent, 40 rare, 45 restricted). An app in it is outside App Standby. That is the
+state checklist steps 1 and 2 produce, so bucket 5 plus a whitelist entry is the proof the
+phone is set up, whatever the settings screens look like.
+
+### One UI 9 (Android 17)
+
+Checklist step 2 describes the One UI 6/7 menus. On One UI 9 — Galaxy S25 Edge and later,
+`getprop ro.build.version.oneui` reads `90000` — **ShopManager does not appear in the
+"Never sleeping apps" picker**. The picker offers apps that are candidates for exemption, and
+an app already exempt from battery optimisation has nothing left to grant. Read the standby
+bucket instead of looking for the app in that list.
+
+### What adb does not cover
+
+- **VPN consent** is a tap on the phone, once, when the join link opens.
+- **Always-on VPN**: the secure setting is written and reads back, but nothing in `dumpsys`
+  confirms the framework arms it on One UI 9. Confirm it in Settings → Connections → More
+  connection settings → VPN.
+- **Logging in** as the manager.
 
 ---
 
