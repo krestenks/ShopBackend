@@ -48,6 +48,8 @@ for link in /dev/snd/by-path/*; do
     control=$(basename "$(readlink -f "$link")")        # controlC4
     case "$control" in controlC*) ;; *) continue ;; esac
     card=${control#controlC}
+    # A card can appear under two by-path names (usb-0 and usbv2-0); take it once.
+    case " ${CARDS[*]:-} " in *" $card "*) continue ;; esac
 
     syspath=$(readlink -f "/sys/class/sound/card$card" 2>/dev/null) || continue
     iface=$(dirname "$(dirname "$syspath")")            # .../1-1.2.6:1.5
