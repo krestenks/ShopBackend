@@ -84,4 +84,58 @@ class DevicePathPlannerTest {
         assertTrue(DevicePathPlanner.plan(listOf(shop5, shop6), same) { true }.moves.isEmpty())
         assertTrue(DevicePathPlanner.plan(listOf(shop5, shop6), emptyList()) { true }.moves.isEmpty())
     }
+
+    // ---- a trunk that is not connected reports no IMSI (Nana, 2026-11-17) ----
+
+    private val nanaPath = "/dev/serial/by-path/pci-0000:00:10.0-usb-0:1.4.3.2:1.0-port0"
+    private val nana = shop(8, "I8", nanaPath, "hw:CARD=EC25EUX_6")
+    private fun socketModem(socket: String, card: String?, state: String?, imsi: String? = null) = DetectedModem(
+        usbPort = "1-$socket", atDevice = "/dev/serial/by-path/pci-0000:00:10.0-usb-0:$socket:1.0-port0",
+        alsaDevice = card, imsi = imsi, trunkState = state, held = state != null,
+    )
+
+    @Test fun `a down trunk on the same socket gets the new sound card and keeps its AT path`() {
+        val detected = listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Not connected Start scheduled"))
+        val plan = DevicePathPlanner.plan(listOf(nana), detected) { true }
+        assertEquals(1, plan.moves.size)
+        assertEquals("hw:CARD=EC25EUX", plan.moves[0].modemAlsaDevice)
+        assertEquals(nanaPath, plan.moves[0].modemDataDevice)
+    }
+
+    @Test fun `a trunk that is Free is never moved by the socket rule`() {
+        val detected = listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Free"))
+        assertTrue(DevicePathPlanner.plan(listOf(nana), detected) { true }.moves.isEmpty())
+    }
+
+    @Test fun `an unknown trunk state is never moved by the socket rule`() {
+        assertTrue(DevicePathPlanner.plan(listOf(nana), listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", null))) { true }.moves.isEmpty())
+        assertTrue(DevicePathPlanner.plan(listOf(nana), listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Ring"))) { true }.moves.isEmpty())
+    }
+
+    @Test fun `the socket rule waits for the watchdog to confirm the trunk down`() {
+        val detected = listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Not connected"))
+        val plan = DevicePathPlanner.plan(listOf(nana), detected) { false }
+        assertTrue(plan.moves.isEmpty())
+        assertTrue(plan.notes.any { it.contains("not confirmed down") })
+    }
+
+    @Test fun `a modem on the socket that reports another IMSI is a different SIM and is not touched by the socket rule`() {
+        val detected = listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Not connected", imsi = "OTHER"))
+        assertTrue(DevicePathPlanner.plan(listOf(nana), detected) { true }.moves.isEmpty())
+    }
+
+    @Test fun `the socket rule does not give a sound card that another trunk holds`() {
+        val other = shop(9, "I9", "/dev/serial/by-path/pci-0000:00:10.0-usb-0:1.4.3.1:1.0-port0", "hw:CARD=EC25EUX")
+        val detected = listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Not connected"))
+        val plan = DevicePathPlanner.plan(listOf(nana, other), detected) { true }
+        assertTrue(plan.moves.isEmpty())
+        assertNotNull(plan.refused)
+    }
+
+    @Test fun `two modems on the socket or no socket in the path change nothing`() {
+        val twice = listOf(socketModem("1.4.3.2", "hw:CARD=A", "Not connected"), socketModem("1.4.3.2", "hw:CARD=B", "Not connected"))
+        assertTrue(DevicePathPlanner.plan(listOf(nana), twice) { true }.moves.isEmpty())
+        val noSocket = shop(8, "I8", "/dev/ttyUSB3", "hw:CARD=EC25EUX_6")
+        assertTrue(DevicePathPlanner.plan(listOf(noSocket), listOf(socketModem("1.4.3.2", "hw:CARD=EC25EUX", "Not connected"))) { true }.moves.isEmpty())
+    }
 }

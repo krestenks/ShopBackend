@@ -31,6 +31,7 @@ import asterisk.AsteriskProvisioner
 import asterisk.AsteriskTelephonyService
 import asterisk.DialplanWriter
 import asterisk.ModemScanner
+import asterisk.PortCycler
 import asterisk.PromptGenerator
 import asterisk.QuectelConfigWriter
 import asterisk.internalTelephonyRoutes
@@ -120,6 +121,7 @@ object ShopBackend {
             amiClient = amiClient,
             provisioner = provisioner,
             modemScanner = modemScanner,
+            portCycler = PortCycler(modemScanner, db),
         )
         val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db, smsQueue)
         println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")

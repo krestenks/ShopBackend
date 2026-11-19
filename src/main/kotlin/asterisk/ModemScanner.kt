@@ -26,7 +26,20 @@ data class DetectedModem(
     val assignedShopId: Int? = null,
     val assignedShopName: String? = null,
     val error: String? = null,
+    /** Radio settings read over the AT port. Only read for a modem that no trunk holds. */
+    val readings: ModemReadings? = null,
+    /** Result of [ModemReadiness.evaluate] for [readings]; empty when the modem was not read. */
+    val checks: List<ReadinessCheck> = emptyList(),
 )
+
+/** Which trunk holds a modem, as far as AMI could tell. */
+sealed interface TrunkLookup {
+    /** AMI did not answer, or a trunk's device could not be read, so a trunk may hold the modem. */
+    data object Unknown : TrunkLookup
+    /** AMI answered for every trunk and none holds the modem. */
+    data object None : TrunkLookup
+    data class Held(val trunk: String, val state: String?) : TrunkLookup
+}
 
 /**
  * Enumerates physically-present EC25 modems and reports each with its SIM's IMSI
@@ -39,9 +52,75 @@ class ModemScanner(
     private val config: AsteriskConfig,
     private val amiClient: AmiClient?,
     private val resolver: ModemResolver = ModemResolver(),
+    private val radio: ModemRadio = ModemRadio(),
 ) {
 
-    fun scan(): List<DetectedModem> {
+    /**
+     * Finds the trunk that holds the modem on [usbPort]. Every answer other than "AMI answered for all
+     * trunks" is [TrunkLookup.Unknown], so a caller that must not touch a held modem fails closed.
+     */
+    fun lookupTrunk(usbPort: String): TrunkLookup {
+        val ami = amiClient ?: return TrunkLookup.None
+        val states = ami.quectelDeviceStatesOrNull() ?: return TrunkLookup.Unknown
+        val physical = resolver.listPhysicalModems()
+        val target = physical.firstOrNull { it.usbPort == usbPort } ?: return TrunkLookup.Unknown
+        for ((trunk, state) in states) {
+            val details = ami.quectelDeviceState(trunk)
+            val data = details["Data"]
+            if (data.isNullOrBlank()) {
+                // A trunk without a readable device may be the one that holds this modem.
+                return TrunkLookup.Unknown
+            }
+            if (canonicalTty(data) == canonicalTty(target.atDevice ?: "")) {
+                return TrunkLookup.Held(trunk, details["State"]?.takeIf { it.isNotBlank() } ?: state)
+            }
+        }
+        return TrunkLookup.None
+    }
+
+    fun physicalModem(usbPort: String): PhysicalModem? = resolver.listPhysicalModems().firstOrNull { it.usbPort == usbPort }
+
+    /** One reader or writer at a time on the AT ports that this class opens. */
+    private val radioLock = Any()
+
+    /**
+     * Applies the radio settings that [ModemPreparePlan] plans for the modem on [usbPort].
+     *
+     * TRIGGER:  an administrator presses "Prepare" for one modem.
+     * EVIDENCE: STRONG. The settings are read back from the modem itself.
+     * BLAST:    the one modem; when the carrier profile changes, that modem restarts once.
+     * GUARD:    runs only when AMI answered for every trunk and none holds the modem.
+     * IF WRONG: a modem that no trunk holds restarts or changes a setting. No call can be on it.
+     */
+    fun prepareModem(usbPort: String): String {
+        val modem = physicalModem(usbPort) ?: return "No EC25 modem on $usbPort."
+        val path = modem.atDevice ?: return "The modem on $usbPort has no AT port."
+        when (val lookup = lookupTrunk(usbPort)) {
+            TrunkLookup.None -> Unit
+            TrunkLookup.Unknown -> {
+                println("[Recovery] SUPPRESSED prepare-modem target=$usbPort reason=AMI could not say whether a trunk holds the modem")
+                return "Refused: AMI could not say whether a trunk holds this modem."
+            }
+            is TrunkLookup.Held -> {
+                println("[Recovery] SUPPRESSED prepare-modem target=$usbPort reason=trunk ${lookup.trunk} holds the modem")
+                return "Refused: trunk ${lookup.trunk} holds this modem. Prepare works on modems that no trunk holds."
+            }
+        }
+        synchronized(radioLock) {
+            val before = radio.read(path) ?: return "Could not read the modem on $usbPort."
+            val plan = ModemPreparePlan.plan(before)
+            if (plan.isEmpty()) {
+                val open = ModemReadiness.evaluate(before).filter { it.status != CheckStatus.OK }
+                return if (open.isEmpty()) "Nothing to change. All checks pass."
+                else "Nothing the backend can change. " + open.joinToString(" ") { "${it.name}: ${it.reason}" }
+            }
+            println("[Recovery] prepare-modem target=$usbPort evidence=$before steps=${plan.joinToString(";") { it.command }} callLive=false")
+            return radio.prepare(path, plan).joinToString(" ")
+        }
+    }
+
+    /** [includeRadio] also reads the radio settings of every modem that no trunk holds. */
+    fun scan(includeRadio: Boolean = false): List<DetectedModem> {
         val physical = resolver.listPhysicalModems()
         if (physical.isEmpty()) return emptyList()
 
@@ -80,7 +159,13 @@ class ModemScanner(
                         "so we cannot tell whether a trunk holds this modem — not probing")
                     base.copy(error = "not probed (AMI unavailable)")
                 }
-                else -> probe(base)
+                else -> probe(base).let { probed ->
+                    val path = probed.atDevice
+                    if (includeRadio && probed.error == null && path != null) {
+                        val readings = synchronized(radioLock) { radio.read(path) }
+                        probed.copy(readings = readings, checks = readings?.let { ModemReadiness.evaluate(it) }.orEmpty())
+                    } else probed
+                }
             }
             val shopId = filled.imsi?.let { db.findShopIdByImsi(it) }
             filled.copy(assignedShopId = shopId, assignedShopName = shopId?.let { shopNames[it] })

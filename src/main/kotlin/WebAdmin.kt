@@ -1,3 +1,5 @@
+import asterisk.CheckStatus
+import asterisk.ModemReadiness
 import io.ktor.http.*
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -375,7 +377,7 @@ class WebAdmin(
                 val tmsg = call.request.queryParameters["tmsg"]
                 // Scanning holds the AT ports briefly; do it off the request thread.
                 val modems = if (asteriskAdmin != null && call.request.queryParameters["scan"] == "1") {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { asteriskAdmin.modemScanner.scan() }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { asteriskAdmin.modemScanner.scan(includeRadio = true) }
                 } else emptyList()
 
                 call.respondAdminPage(
@@ -421,7 +423,7 @@ class WebAdmin(
                                     table {
                                         thead { tr {
                                             th { +"USB" }; th { +"IMSI" }; th { +"IMEI" }; th { +"Provider" }
-                                            th { +"Signal" }; th { +"Firmware" }; th { +"Audio" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
+                                            th { +"Signal" }; th { +"Firmware" }; th { +"Audio" }; th { +"Readiness" }; th { +"State" }; th { +"Device" }; th { +"Assigned" }; th { +"Assign / Test" }
                                         } }
                                         tbody {
                                             val unassignedShops = shops.filter { db.getShopTelephonyConfig(it.id).imsi.isNullOrBlank() }
@@ -441,6 +443,21 @@ class WebAdmin(
                                                     td {
                                                         if (usable) span("badge ok") { +"ok" }
                                                         else span("badge warn") { +"UAC off" }
+                                                    }
+                                                    // Readiness is read only for a modem that no trunk holds;
+                                                    // probing a held port could lose a hangup in chan_quectel.
+                                                    td {
+                                                        if (m.checks.isEmpty()) {
+                                                            span("hint") { +(if (m.held) "Not read: the trunk holds the port." else "Not read.") }
+                                                        } else {
+                                                            if (ModemReadiness.isReady(m.checks)) span("badge ok") { +"ready" }
+                                                            else span("badge warn") { +"not ready" }
+                                                            ul {
+                                                                for (c in m.checks.filter { it.status != CheckStatus.OK }) {
+                                                                    li { b { +"${c.name} (${c.status.name.lowercase()}): " }; +c.reason }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                     td { +(m.trunkState ?: "-") }
                                                     td { +(m.atDevice ?: "-") }
@@ -468,6 +485,22 @@ class WebAdmin(
                                                             hiddenInput { name = "usbPort"; value = m.usbPort }
                                                             textInput { name = "to"; placeholder = "+45… (your phone)" }
                                                             submitInput(classes = "btn") { value = "Test SMS" }
+                                                        }
+                                                        // Prepare applies the fixable settings; it refuses when a trunk holds the modem.
+                                                        if (!m.held && m.checks.any { it.status == CheckStatus.FIXABLE }) {
+                                                            form(action = "/telephony/modem/prepare", method = FormMethod.post) {
+                                                                style = "display:inline"
+                                                                hiddenInput { name = "usbPort"; value = m.usbPort }
+                                                                submitInput(classes = "btn") { value = "Prepare" }
+                                                            }
+                                                        }
+                                                        // Power cycle switches the hub port off and on; it refuses while a trunk may be on a call.
+                                                        form(action = "/telephony/modem/power-cycle", method = FormMethod.post) {
+                                                            style = "display:inline"
+                                                            attributes["onsubmit"] =
+                                                                "return confirm('Switch the USB port of modem ${m.usbPort} off and on? The modem is gone for about 20 seconds.')"
+                                                            hiddenInput { name = "usbPort"; value = m.usbPort }
+                                                            submitInput(classes = "btn") { value = "Power cycle" }
                                                         }
                                                         // Firmware update — only for UNASSIGNED modems (never flash a live shop line).
                                                         if (m.assignedShopId == null) {
@@ -515,6 +548,14 @@ class WebAdmin(
                                         td {
                                             a(href = "/telephony/shop?id=${s.id}", classes = "btn") { +"Manage line" }
                                             if (!tele.imsi.isNullOrBlank() && asteriskAdmin != null) {
+                                                +" "
+                                                // The test takes up to 45 s: it waits for chan_quectel to report a failed send.
+                                                form(action = "/telephony/line/test", method = FormMethod.post) {
+                                                    style = "display:inline"
+                                                    hiddenInput { name = "shopId"; value = s.id.toString() }
+                                                    textInput { name = "to"; placeholder = "+45… (your phone)" }
+                                                    submitInput(classes = "btn") { value = "Test line" }
+                                                }
                                                 +" "
                                                 form(action = "/telephony/unassign", method = FormMethod.post) {
                                                     style = "display:inline"
@@ -1729,6 +1770,65 @@ class WebAdmin(
                             asteriskAdmin.modemScanner.sendTestSms(usbPort, to, "Test SMS from modem $usbPort — note this sender number.")
                         }
                         "Test SMS to $to from modem $usbPort: $r. Read the sender number on that phone."
+                    }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                // Applies the settings of docs/phone-server-setup.md section 7b to a modem that no trunk holds.
+                post("/telephony/modem/prepare") {
+                    val usbPort = call.receiveParameters()["usbPort"]?.trim().orEmpty()
+                    val msg = if (usbPort.isBlank()) "⚠️ Need a modem." else {
+                        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            asteriskAdmin.modemScanner.prepareModem(usbPort)
+                        }
+                        "Prepare $usbPort: $r Scan again to see the result."
+                    }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                // Switches the hub port of one modem off and on. Refuses unless the trunk is Free or down.
+                post("/telephony/modem/power-cycle") {
+                    val usbPort = call.receiveParameters()["usbPort"]?.trim().orEmpty()
+                    val msg = if (usbPort.isBlank()) "⚠️ Need a modem." else {
+                        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            asteriskAdmin.portCycler.cycle(usbPort)
+                        }
+                        "Power cycle $usbPort: $r"
+                    }
+                    call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
+                }
+
+                // Sends one SMS from a shop's trunk and reports what the backend can prove about the line.
+                post("/telephony/line/test") {
+                    val params = call.receiveParameters()
+                    val sid = params["shopId"]?.toIntOrNull()
+                    val to = params["to"]?.trim().orEmpty()
+                    val msg = if (sid == null || to.isBlank()) "⚠️ Need a shop and a destination number." else {
+                        val startedAt = System.currentTimeMillis()
+                        val sent = telephonyService.sendSms(sid, telephony.resolveShopSenderNumber(db, sid), to, "Line test, shop $sid.")
+                        var failure: ReliabilityEvent? = null
+                        var waited = 0
+                        if (sent.success) {
+                            // chan_quectel reports a failed send about 15 s after it accepted the message.
+                            while (failure == null && waited < 45) {
+                                kotlinx.coroutines.delay(3_000)
+                                waited += 3
+                                failure = db.getReliabilityEvents(30).firstOrNull {
+                                    it.category == "sms_send_failed" && it.shopId == sid && it.createdAt >= startedAt
+                                }
+                            }
+                        }
+                        val tele = db.getShopTelephonyConfig(sid)
+                        val trunkState = asteriskAdmin.amiClient.quectelDeviceStatesOrNull()?.get(asteriskAdmin.config.trunkName(sid))
+                        val result = asterisk.LineTestReport.build(
+                            queued = sent.success,
+                            queueDetail = sent.errorMessage ?: sent.body,
+                            failureReport = failure?.message,
+                            trunkState = trunkState,
+                            balanceKr = telephony.LebaraBalance.parseKr(tele.balance),
+                            waitedSeconds = waited,
+                        )
+                        "Line test, shop $sid: ${asterisk.LineTestReport.toMessage(result)}"
                     }
                     call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }

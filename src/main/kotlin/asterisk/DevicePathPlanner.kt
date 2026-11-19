@@ -37,6 +37,48 @@ data class DevicePathPlan(
  *    card names follow USB enumeration order.
  */
 object DevicePathPlanner {
+    /** Trunk states in which the driver has no working connection to the modem, so nothing runs on it. */
+    private val DOWN_STATE_PREFIXES = listOf("not connected", "not initialized", "not initia")
+
+    /** The part of a serial or sysfs path that names the USB socket, for example `1.4.3.2`. */
+    private val SOCKET_IN_SERIAL_PATH = Regex("usb(?:v2)?-\\d+:([0-9.]+):")
+
+    private fun socketOfSerialPath(path: String?): String? =
+        path?.let { SOCKET_IN_SERIAL_PATH.find(it)?.groupValues?.get(1) }
+
+    fun isDownState(state: String?): Boolean {
+        val s = state?.trim()?.lowercase() ?: return false
+        return DOWN_STATE_PREFIXES.any { s.startsWith(it) }
+    }
+
+    /**
+     * A trunk that is not connected reports no IMSI, so no modem matches the shop by IMSI. When
+     * the modem sitting on the USB socket of the shop's current AT path also reports no IMSI and its
+     * trunk is in a known down state, the sound card of that socket is the only thing that can have
+     * changed (card ids follow USB registration order). Only the sound card is updated; the AT path
+     * is kept. Every other case changes nothing.
+     */
+    private fun sameSocketSoundCardMove(
+        shop: ShopTelephonyConfig,
+        detected: List<DetectedModem>,
+        movable: (ShopTelephonyConfig) -> Boolean,
+        notes: MutableList<String>,
+    ): ShopTelephonyConfig? {
+        val socket = socketOfSerialPath(shop.modemDataDevice) ?: return null
+        val onSocket = detected.filter { it.usbPort.substringAfter('-') == socket }
+        val modem = onSocket.singleOrNull() ?: return null
+        if (modem.imsi != null || !isDownState(modem.trunkState)) return null
+        val card = modem.alsaDevice
+        if (card.isNullOrBlank() || card == shop.modemAlsaDevice) return null
+        if (!movable(shop)) {
+            notes += "shop ${shop.shopId}: socket $socket now has sound card $card but the trunk is not confirmed down — not moving it"
+            return null
+        }
+        notes += "shop ${shop.shopId}: trunk is down on socket $socket and its sound card changed from " +
+            "${shop.modemAlsaDevice} to $card — correcting the sound card only"
+        return shop.copy(modemAlsaDevice = card)
+    }
+
     fun plan(
         shops: List<ShopTelephonyConfig>,
         detected: List<DetectedModem>,
@@ -50,6 +92,7 @@ object DevicePathPlanner {
             val modem = detected.firstOrNull { it.imsi == imsi }
             if (modem == null) {
                 notes += "shop ${shop.shopId}: no modem currently reports IMSI $imsi"
+                sameSocketSoundCardMove(shop, detected, movable, notes)?.let { moves += it }
                 continue
             }
             if (modem.atDevice == shop.modemDataDevice && modem.alsaDevice == shop.modemAlsaDevice) continue
