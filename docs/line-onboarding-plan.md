@@ -154,3 +154,12 @@ Not changed:
   The trunk config and the database must name the new card before that happens. The planner rule in W3 corrects the sound
   card of a trunk that is down, so it also covers a modem that enumerates after the rule is installed.
 - Nothing is installed on the EliteDesk: the test rule was removed, and all eight trunks use their old card names.
+
+## W4 staged, 2026-11-19 (not applied)
+
+`scripts/pin-alsa-ids-at-reboot.sh` is on the server at `/home/phone/pin-alsa-ids-at-reboot.sh`. The dry run (the default) lists the
+trunk config lines, the database rows and the udev rule that it would write. Every card id named in the config and database
+equals an id in the rule (checked). `--apply` stops the backend and Asterisk, backs up the config and database, writes the new
+names and the rule, and reboots the host. It refuses unless Asterisk shows no active channel and all trunks are `Free`.
+The outage is about 3 minutes. Not applied: it needs a time with the shops closed.
+Rollback: restore the two backup files it prints, delete `/etc/udev/rules.d/89-ec25-alsa-names.rules`, reboot.
