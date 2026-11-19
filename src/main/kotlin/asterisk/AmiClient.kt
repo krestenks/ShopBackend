@@ -144,6 +144,17 @@ class AmiClient(private val config: AsteriskConfig) {
         return lines.any { it.contains("Quectel/") }
     }
 
+    /**
+     * True when Asterisk has a channel of [trunk], false when provably none, null if the listing could
+     * not be read completely. A complete listing has the summary line.
+     */
+    fun trunkHasChannelOrNull(trunk: String): Boolean? {
+        if (!connected) return null
+        val lines = commandOrNull("core show channels") ?: return null
+        if (lines.none { ACTIVE_CALLS_RE.containsMatchIn(it) }) return null
+        return lines.any { it.contains("Quectel/$trunk-") }
+    }
+
     fun reloadChanQuectel() {
         command("module reload chan_quectel.so")
     }

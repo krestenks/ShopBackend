@@ -115,3 +115,31 @@ reported.
 ## Order
 
 W1, W3, W2, W6, W5, W7 (code), then W4 (server), then review, deploy, verify.
+
+## Review result, 2026-11-19
+
+Three parallel reviews (recovery checklist, correctness, concurrency) read the commit. Findings that were
+confirmed in the code and fixed:
+
+- The scan decided "no trunk holds this modem" from a snapshot in which a failed AMI query dropped a trunk. The radio
+  read now asks `lookupTrunk` immediately before it and reads only on a definite "none".
+- `lookupTrunk` treated a modem without a resolved AT port, and a missing AMI client, as "no trunk". Both are now unknown.
+- Prepare re-asks `lookupTrunk` immediately before the writes.
+- The power-cycle guard refused every non-Free state with no bound. Force is the bound: it needs Asterisk to show no channel of the
+  trunk, and still refuses when the channel list cannot be read.
+- The power cycle excludes scans, reads and prepare (same lock), refuses while a firmware update runs, and records the
+  database event after the helper, so no write sits between the guard and the helper.
+- The helper script switches the port on again on any exit (trap).
+- The helper output was read before the timeout was applied; the process is now stopped first.
+- `isReady` was true for a modem that answered nothing; the SIM and audio checks must now be OK.
+- A context that is not listed is unknown, not off. Turning VoLTE on is followed by one restart, as in section 7b.
+- The line test matches a failure by shop, time and recipient in one query, and does not run twice for one shop.
+- The planner rule carries its TRIGGER/EVIDENCE/BLAST/GUARD/IF WRONG block, and an applied rewrite logs a `[Recovery]` line.
+
+Not changed:
+
+- `probe()`, `atSendSms` and QFirehose open AT ports outside the new lock (existing behaviour).
+- `AmiClient.trunkInCall` returns false when the state cannot be read, and the call states do not include "Ring" (existing).
+- `AT+QCFG="ims"` mode 2 (carrier controlled) is read as "not enabled". Unverified on this firmware.
+- The 45 s wait of the line test keeps the HTTP request open.
+- Fault injection of the power-cycle guard against a live call has not been run.

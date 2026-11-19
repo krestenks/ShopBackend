@@ -502,6 +502,17 @@ class WebAdmin(
                                                             hiddenInput { name = "usbPort"; value = m.usbPort }
                                                             submitInput(classes = "btn") { value = "Power cycle" }
                                                         }
+                                                        // Force is for a trunk stuck in a state such as Dialing. It still refuses while Asterisk shows a channel of the trunk.
+                                                        if (m.held) {
+                                                            form(action = "/telephony/modem/power-cycle", method = FormMethod.post) {
+                                                                style = "display:inline"
+                                                                attributes["onsubmit"] =
+                                                                    "return confirm('Force: switch the USB port of ${m.usbPort} off and on although its trunk is not Free? It is refused if Asterisk has a channel of that trunk.')"
+                                                                hiddenInput { name = "usbPort"; value = m.usbPort }
+                                                                hiddenInput { name = "force"; value = "1" }
+                                                                submitInput(classes = "btn danger") { value = "Force" }
+                                                            }
+                                                        }
                                                         // Firmware update — only for UNASSIGNED modems (never flash a live shop line).
                                                         if (m.assignedShopId == null) {
                                                             form(action = "/telephony/modem/firmware-update", method = FormMethod.post) {
@@ -1788,10 +1799,12 @@ class WebAdmin(
 
                 // Switches the hub port of one modem off and on. Refuses unless the trunk is Free or down.
                 post("/telephony/modem/power-cycle") {
-                    val usbPort = call.receiveParameters()["usbPort"]?.trim().orEmpty()
+                    val params = call.receiveParameters()
+                    val usbPort = params["usbPort"]?.trim().orEmpty()
+                    val force = params["force"] == "1"
                     val msg = if (usbPort.isBlank()) "⚠️ Need a modem." else {
                         val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            asteriskAdmin.portCycler.cycle(usbPort)
+                            asteriskAdmin.portCycler.cycle(usbPort, force)
                         }
                         "Power cycle $usbPort: $r"
                     }
@@ -1799,23 +1812,26 @@ class WebAdmin(
                 }
 
                 // Sends one SMS from a shop's trunk and reports what the backend can prove about the line.
+                val lineTestsRunning = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
                 post("/telephony/line/test") {
                     val params = call.receiveParameters()
                     val sid = params["shopId"]?.toIntOrNull()
                     val to = params["to"]?.trim().orEmpty()
-                    val msg = if (sid == null || to.isBlank()) "⚠️ Need a shop and a destination number." else {
+                    val suffix = to.filter { it.isDigit() }.takeLast(8)
+                    val msg = if (sid == null || suffix.length < 6) "⚠️ Need a shop and a destination number." else if (!lineTestsRunning.add(sid)) {
+                        "⚠️ A line test for shop $sid is already running."
+                    } else try {
                         val startedAt = System.currentTimeMillis()
                         val sent = telephonyService.sendSms(sid, telephony.resolveShopSenderNumber(db, sid), to, "Line test, shop $sid.")
                         var failure: ReliabilityEvent? = null
                         var waited = 0
                         if (sent.success) {
                             // chan_quectel reports a failed send about 15 s after it accepted the message.
+                            // Only a failure that names this recipient counts, so another SMS of the shop cannot fail the test.
                             while (failure == null && waited < 45) {
                                 kotlinx.coroutines.delay(3_000)
                                 waited += 3
-                                failure = db.getReliabilityEvents(30).firstOrNull {
-                                    it.category == "sms_send_failed" && it.shopId == sid && it.createdAt >= startedAt
-                                }
+                                failure = db.findSmsSendFailure(sid, startedAt, suffix)
                             }
                         }
                         val tele = db.getShopTelephonyConfig(sid)
@@ -1826,9 +1842,12 @@ class WebAdmin(
                             failureReport = failure?.message,
                             trunkState = trunkState,
                             balanceKr = telephony.LebaraBalance.parseKr(tele.balance),
+                            balanceAgeHours = tele.balanceAt?.let { (System.currentTimeMillis() - it) / 3_600_000L },
                             waitedSeconds = waited,
                         )
                         "Line test, shop $sid: ${asterisk.LineTestReport.toMessage(result)}"
+                    } finally {
+                        lineTestsRunning.remove(sid)
                     }
                     call.respondRedirect("/telephony/setup?tmsg=${java.net.URLEncoder.encode(msg, Charsets.UTF_8)}")
                 }

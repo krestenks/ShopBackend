@@ -57,6 +57,14 @@ object DevicePathPlanner {
      * trunk is in a known down state, the sound card of that socket is the only thing that can have
      * changed (card ids follow USB registration order). Only the sound card is updated; the AT path
      * is kept. Every other case changes nothing.
+     *
+     * TRIGGER:  a modem scan during provisioning or a watchdog resync finds no modem with the shop's IMSI.
+     * EVIDENCE: WEAK (a missing IMSI), so the move is limited to a trunk that the driver reports as down
+     *           and to the sound card name, and the usual collision check applies to the result.
+     * BLAST:    one trunk that is already down. A working trunk is never moved by this rule.
+     * GUARD:    trunk state must be a known down state; one modem on the socket; both devices resolved;
+     *           the watchdog passes [movable] = confirmed down. The config reload that follows checks for a live call.
+     * IF WRONG: a trunk that was down stays down; no customer is affected.
      */
     private fun sameSocketSoundCardMove(
         shop: ShopTelephonyConfig,

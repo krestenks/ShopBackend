@@ -36,7 +36,8 @@ class ModemRadio {
                     val count = port.readBytes(buffer, buffer.size)
                     if (count > 0) reply.append(String(buffer, 0, count))
                     val text = reply.toString()
-                    if (text.contains("\r\nOK\r\n") || text.contains("ERROR")) break
+                    // An error reply is complete only when its line has ended: "+CME ERROR: 10" can arrive in two chunks.
+                    if (text.contains("\r\nOK\r\n") || Regex("ERROR[^\r\n]*\r\n").containsMatchIn(text)) break
                 } else {
                     Thread.sleep(25)
                 }

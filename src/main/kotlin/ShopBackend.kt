@@ -31,6 +31,7 @@ import asterisk.AsteriskProvisioner
 import asterisk.AsteriskTelephonyService
 import asterisk.DialplanWriter
 import asterisk.ModemScanner
+import asterisk.ModemFirmwareUpdater
 import asterisk.PortCycler
 import asterisk.PromptGenerator
 import asterisk.QuectelConfigWriter
@@ -116,12 +117,14 @@ object ShopBackend {
             promptGenerator = PromptGenerator(asteriskConfig),
             modemScanner = modemScanner,
         )
+        val firmwareUpdater = ModemFirmwareUpdater()
         val asteriskAdmin = AsteriskAdmin(
             config = asteriskConfig,
             amiClient = amiClient,
             provisioner = provisioner,
             modemScanner = modemScanner,
-            portCycler = PortCycler(modemScanner, db),
+            portCycler = PortCycler(modemScanner, db, amiClient, { firmwareUpdater.activeUnit() != null }),
+            firmwareUpdater = firmwareUpdater,
         )
         val telephonyService: TelephonyService = AsteriskTelephonyService(amiClient, asteriskConfig, db, smsQueue)
         println("[Telephony] Asterisk AMI ${asteriskConfig.amiHost}:${asteriskConfig.amiPort}, configs in ${asteriskConfig.configPath}")

@@ -60,10 +60,13 @@ class ModemScanner(
      * trunks" is [TrunkLookup.Unknown], so a caller that must not touch a held modem fails closed.
      */
     fun lookupTrunk(usbPort: String): TrunkLookup {
-        val ami = amiClient ?: return TrunkLookup.None
+        // Without AMI nothing can say whether a trunk holds the modem.
+        val ami = amiClient ?: return TrunkLookup.Unknown
         val states = ami.quectelDeviceStatesOrNull() ?: return TrunkLookup.Unknown
         val physical = resolver.listPhysicalModems()
         val target = physical.firstOrNull { it.usbPort == usbPort } ?: return TrunkLookup.Unknown
+        // A modem whose AT port is not resolved cannot be compared with a trunk's device.
+        if (target.atDevice.isNullOrBlank()) return TrunkLookup.Unknown
         for ((trunk, state) in states) {
             val details = ami.quectelDeviceState(trunk)
             val data = details["Data"]
@@ -71,7 +74,7 @@ class ModemScanner(
                 // A trunk without a readable device may be the one that holds this modem.
                 return TrunkLookup.Unknown
             }
-            if (canonicalTty(data) == canonicalTty(target.atDevice ?: "")) {
+            if (canonicalTty(data) == canonicalTty(target.atDevice)) {
                 return TrunkLookup.Held(trunk, details["State"]?.takeIf { it.isNotBlank() } ?: state)
             }
         }
@@ -82,6 +85,9 @@ class ModemScanner(
 
     /** One reader or writer at a time on the AT ports that this class opens. */
     private val radioLock = Any()
+
+    /** Runs [block] while no scan, read or prepare of this class runs. Used by the power cycle. */
+    fun <T> exclusively(block: () -> T): T = synchronized(radioLock) { block() }
 
     /**
      * Applies the radio settings that [ModemPreparePlan] plans for the modem on [usbPort].
@@ -113,6 +119,11 @@ class ModemScanner(
                 val open = ModemReadiness.evaluate(before).filter { it.status != CheckStatus.OK }
                 return if (open.isEmpty()) "Nothing to change. All checks pass."
                 else "Nothing the backend can change. " + open.joinToString(" ") { "${it.name}: ${it.reason}" }
+            }
+            // The first lookup is some seconds old after the reads; ask again immediately before the writes.
+            if (lookupTrunk(usbPort) != TrunkLookup.None) {
+                println("[Recovery] SUPPRESSED prepare-modem target=$usbPort reason=a trunk may hold the modem now")
+                return "Refused: a trunk may hold this modem now. Nothing was changed."
             }
             println("[Recovery] prepare-modem target=$usbPort evidence=$before steps=${plan.joinToString(";") { it.command }} callLive=false")
             return radio.prepare(path, plan).joinToString(" ")
@@ -161,7 +172,9 @@ class ModemScanner(
                 }
                 else -> probe(base).let { probed ->
                     val path = probed.atDevice
-                    if (includeRadio && probed.error == null && path != null) {
+                    // The radio read sends about ten commands, so it needs the strict answer: only when AMI
+                    // answered for every trunk and none holds the modem, asked now and not from the snapshot above.
+                    if (includeRadio && probed.error == null && path != null && lookupTrunk(m.usbPort) == TrunkLookup.None) {
                         val readings = synchronized(radioLock) { radio.read(path) }
                         probed.copy(readings = readings, checks = readings?.let { ModemReadiness.evaluate(it) }.orEmpty())
                     } else probed

@@ -28,6 +28,18 @@ class LineTestAndPortCycleTest {
         }
     }
 
+    @Test fun `Force releases a stuck state only when Asterisk shows no channel of the trunk`() {
+        val stuck = TrunkLookup.Held("shop6", "Dialing")
+        assertFalse(PortCycleGuard.decide(stuck, trunkHasChannel = false, force = false).allowed)
+        assertTrue(PortCycleGuard.decide(stuck, trunkHasChannel = false, force = true).allowed)
+        assertFalse(PortCycleGuard.decide(stuck, trunkHasChannel = true, force = true).allowed)
+        assertFalse(PortCycleGuard.decide(stuck, trunkHasChannel = null, force = true).allowed)
+    }
+
+    @Test fun `Force never overrides an AMI that did not answer`() {
+        assertFalse(PortCycleGuard.decide(TrunkLookup.Unknown, trunkHasChannel = false, force = true).allowed)
+    }
+
     // ---- line test text ----
 
     @Test fun `a failed SMS is reported with the balance fact`() {

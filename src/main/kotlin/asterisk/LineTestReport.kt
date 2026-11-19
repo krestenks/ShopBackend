@@ -18,6 +18,7 @@ object LineTestReport {
         trunkState: String?,
         balanceKr: Double?,
         waitedSeconds: Int,
+        balanceAgeHours: Long? = null,
     ): LineTestResult {
         val facts = mutableListOf<String>()
         val state = trunkState?.trim().orEmpty()
@@ -26,13 +27,14 @@ object LineTestReport {
             state.equals("free", ignoreCase = true) -> facts += "Trunk state: Free."
             else -> facts += "Trunk state: $state."
         }
+        val age = balanceAgeHours?.let { " (read $it h ago)" }.orEmpty()
         facts += when {
             balanceKr == null -> "Balance: none read for this SIM."
             LebaraBalance.isBelowHardFloor(balanceKr) ->
-                "Balance: ${"%.2f".format(balanceKr)} kr, at or below the ${LebaraBalance.HARD_FLOOR_KR.toInt()} kr renewal price. The next renewal fails and outgoing calls stop."
+                "Balance: ${"%.2f".format(balanceKr)} kr$age, at or below the ${LebaraBalance.HARD_FLOOR_KR.toInt()} kr renewal price, so the next renewal fails and outgoing calls stop."
             balanceKr < LebaraBalance.THRESHOLD_KR ->
-                "Balance: ${"%.2f".format(balanceKr)} kr, below the ${LebaraBalance.THRESHOLD_KR.toInt()} kr warning level."
-            else -> "Balance: ${"%.2f".format(balanceKr)} kr."
+                "Balance: ${"%.2f".format(balanceKr)} kr$age, below the ${LebaraBalance.THRESHOLD_KR.toInt()} kr warning level."
+            else -> "Balance: ${"%.2f".format(balanceKr)} kr$age."
         }
         val headline = when {
             !queued -> "The test SMS was not queued: $queueDetail"

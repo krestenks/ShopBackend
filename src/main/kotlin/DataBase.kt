@@ -4429,6 +4429,28 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return out
     }
 
+    /**
+     * The newest failed-SMS event of [shopId] since [sinceMs] whose message names a number that ends in
+     * [numberSuffix] (the last digits of the recipient). Null when there is none.
+     */
+    fun findSmsSendFailure(shopId: Int, sinceMs: Long, numberSuffix: String): ReliabilityEvent? {
+        connection.prepareStatement(
+            """SELECT id, created_at, severity, category, shop_id, message FROM reliability_event
+               WHERE category = 'sms_send_failed' AND shop_id = ? AND created_at >= ? AND message LIKE ?
+               ORDER BY id DESC LIMIT 1"""
+        ).use { st ->
+            st.setInt(1, shopId)
+            st.setLong(2, sinceMs)
+            st.setString(3, "%$numberSuffix%")
+            val rs = st.executeQuery()
+            if (!rs.next()) return null
+            return ReliabilityEvent(
+                rs.getInt("id"), rs.getLong("created_at"), rs.getString("severity"),
+                rs.getString("category"), shopId, rs.getString("message"),
+            )
+        }
+    }
+
     /** Latest reported radio/signal + battery + throttle telemetry for a manager's phone. */
     data class ManagerSignal(
         val managerId: Int,

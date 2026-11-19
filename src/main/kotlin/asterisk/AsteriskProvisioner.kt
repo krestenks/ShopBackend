@@ -265,7 +265,15 @@ class AsteriskProvisioner(
                     "modems are up.",
             )
         }
-        plan.moves.forEach { db.upsertShopTelephonyConfig(it) }
+        val before = db.getAllConfiguredShopTelephonyConfigs().associateBy { it.shopId }
+        plan.moves.forEach { move ->
+            val old = before[move.shopId]
+            println(
+                "[Recovery] device-path rewrite target=shop${move.shopId} context=$context " +
+                    "evidence=scan data=${old?.modemDataDevice}->${move.modemDataDevice} alsa=${old?.modemAlsaDevice}->${move.modemAlsaDevice} callLive=false",
+            )
+            db.upsertShopTelephonyConfig(move)
+        }
         return plan.moves
     }
 

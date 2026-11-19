@@ -88,6 +88,27 @@ class ModemReadinessTest {
         assertTrue(ModemPreparePlan.plan(r).none { it.command.contains("usbcfg") })
     }
 
+    @Test fun `a modem that answered nothing is never ready`() {
+        assertFalse(ModemReadiness.isReady(ModemReadiness.evaluate(ModemReadings())))
+    }
+
+    @Test fun `a SIM that is busy after boot is not ready`() {
+        // AT+CPIN? answered with +CME ERROR: 14, which is not parsed as a state
+        val r = ModemReadings(simState = null, usbAudio = true, autoSelect = 1, imsConfigured = true)
+        assertFalse(ModemReadiness.isReady(ModemReadiness.evaluate(r)))
+    }
+
+    @Test fun `a context that is not listed is unknown and plans no bearer write`() {
+        assertNull(ModemReadingsParser.contextActive("+CGACT: 1,1\r\n+CGACT: 3,0", 2))
+        val r = ModemReadings("READY", true, "FDD LTE", 1, "ROW_Generic_3GPP", true, false, null, true)
+        assertTrue(ModemPreparePlan.plan(r).isEmpty())
+    }
+
+    @Test fun `turning VoLTE on restarts the modem and does not write the bearer in the same plan`() {
+        val r = ModemReadings("READY", true, "FDD LTE", 1, "ROW_Generic_3GPP", false, false, false, true)
+        assertEquals(listOf("AT+QCFG=\"ims\",1", "AT+CFUN=1,1"), ModemPreparePlan.plan(r).map { it.command })
+    }
+
     @Test fun `a modem that did not answer plans nothing`() {
         val r = ModemReadings()
         assertTrue(ModemPreparePlan.plan(r).isEmpty())

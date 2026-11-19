@@ -71,7 +71,8 @@ object ModemReadingsParser {
 
     fun contextActive(cgact: String?, context: Int): Boolean? {
         if (cgact == null || !cgact.contains("+CGACT")) return null
-        val m = Regex("\\+CGACT: $context,(\\d+)").find(cgact) ?: return false
+        // A context that is not listed is not defined yet, which is different from a defined context that is off.
+        val m = Regex("\\+CGACT: $context,(\\d+)").find(cgact) ?: return null
         return m.groupValues[1] == "1"
     }
 
@@ -153,9 +154,15 @@ object ModemReadiness {
         return checks
     }
 
-    /** True when no check is FIXABLE or BLOCKED. UNKNOWN checks do not stop a line, but are shown. */
+    /**
+     * True when no check is FIXABLE or BLOCKED and the SIM and the audio checks are OK. Other UNKNOWN
+     * checks (for example VoLTE registration still pending) are shown but do not stop a line. A modem
+     * that answered nothing has no OK SIM check, so it is never ready.
+     */
     fun isReady(checks: List<ReadinessCheck>): Boolean =
-        checks.none { it.status == CheckStatus.FIXABLE || it.status == CheckStatus.BLOCKED }
+        checks.none { it.status == CheckStatus.FIXABLE || it.status == CheckStatus.BLOCKED } &&
+            checks.any { it.name == "SIM" && it.status == CheckStatus.OK } &&
+            checks.any { it.name == "Audio" && it.status == CheckStatus.OK }
 }
 
 /** One AT command to send, and what it changes. */
@@ -170,21 +177,22 @@ object ModemPreparePlan {
         val steps = mutableListOf<PrepareStep>()
         val simReady = r.simState == "READY"
         val profileChanges = r.autoSelect == 0
+        val imsChanges = r.imsConfigured == false
         if (profileChanges) {
             steps += PrepareStep("AT+QMBNCFG=\"AutoSel\",1", "Turn on carrier profile auto-select")
         }
-        if (r.imsConfigured == false) {
+        if (imsChanges) {
             steps += PrepareStep("AT+QCFG=\"ims\",1", "Turn on VoLTE")
         }
-        // The IMS bearer is only brought up by hand when the profile is already active. A profile that
-        // was just switched on becomes active after the restart, and the bearer then comes up by itself.
-        val bearerDown = simReady && !profileChanges && r.autoSelect == 1 && r.activeProfile != null &&
+        // The IMS bearer is only brought up by hand when no setting changes. A changed setting takes
+        // effect after the restart below, and the bearer then comes up by itself.
+        val bearerDown = simReady && !profileChanges && !imsChanges && r.autoSelect == 1 && r.activeProfile != null &&
             r.imsRegistered == false && r.imsContextActive == false
         if (bearerDown) {
             steps += PrepareStep("AT+CGACT=1,2", "Bring up the IMS data bearer")
         }
-        if (profileChanges) {
-            steps += PrepareStep("AT+CFUN=1,1", "Restart the modem so that the carrier profile becomes active", restartsModem = true)
+        if (profileChanges || imsChanges) {
+            steps += PrepareStep("AT+CFUN=1,1", "Restart the modem so that the changed settings take effect", restartsModem = true)
         }
         return steps
     }

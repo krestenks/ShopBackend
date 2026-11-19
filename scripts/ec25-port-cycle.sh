@@ -25,6 +25,9 @@ if [ ! -w "$disable" ]; then
   echo "hub port control not found: $disable"; exit 4
 fi
 
+# The port is switched on again however this script ends, so a signal in the 4 s window cannot leave it off.
+trap 'echo 0 > "$disable"' EXIT HUP INT TERM
+
 echo 1 > "$disable" || { echo "could not switch the port off"; exit 5; }
 sleep 4
 echo 0 > "$disable" || { echo "could not switch the port on"; exit 6; }
