@@ -1,0 +1,63 @@
+From bd2f96a95f5fb9eace64a2abbbfb977efbb26172 Mon Sep 17 00:00:00 2001
+From: Kresten Kjaer Sorensen <krestenks@gmail.com>
+Date: Fri, 20 Nov 2026 11:02:05 +0100
+Subject: [PATCH] Let MessageSend reach the modem, and ask for a status report
+
+msg_send tested ast_msg_has_destination(), which reports whether a handler can
+route the message, not whether the message carries a destination number. The
+test is true for a message sent through the MessageSend AMI action, so every
+such message was refused with "Destination number not specified" and the
+action was unusable. The destination number is the To field, so that is what
+is now tested.
+
+The report flag defaulted to 0 here while the CLI send uses 1.
+smsdb_outgoing_add() tracks every outgoing message for validity x 60 seconds
+whatever the flag, and only a status report clears the entry, so a message sent
+without one stayed until its validity lapsed and was then announced as
+expired - a delivered message reported as a failure 15 minutes later.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/msg_tech.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/src/msg_tech.c b/src/msg_tech.c
+index cce5929..52fbb00 100644
+--- a/src/msg_tech.c
++++ b/src/msg_tech.c
+@@ -33,7 +33,10 @@ static int parse_validity(const char* const arg)
+ 
+ static int parse_report_flag(const char* arg)
+ {
+-    static const int DEF_REPORT_FLAG = 0;
++    /* A status report is requested by default, as the CLI send does. The outgoing message is
++     * tracked in the smsdb until the report clears it; without a report it stays until its
++     * validity lapses and is then announced as expired. */
++    static const int DEF_REPORT_FLAG = 1;
+ 
+     if (ast_strlen_zero(arg)) {
+         return DEF_REPORT_FLAG;
+@@ -71,14 +74,16 @@ static int msg_send(const struct ast_msg* msg, const char* to, attribute_unused
+     char* dest = ast_strdupa(to);
+     strsep(&dest, ":");
+ 
+-    if (ast_msg_has_destination(msg)) {
++    const char* const msg_to   = ast_msg_get_to(msg);
++    const char* const msg_body = ast_msg_get_body(msg);
++
++    /* The destination number is the message's To field. ast_msg_has_destination() answers a
++     * different question: whether a handler can route the message. */
++    if (ast_strlen_zero(msg_to)) {
+         ast_log(LOG_ERROR, "Destination number not specified\n");
+         return -1;
+     }
+ 
+-    const char* const msg_to   = ast_msg_get_to(msg);
+-    const char* const msg_body = ast_msg_get_body(msg);
+-
+     int validity = parse_validity(NULL);
+     int report   = parse_report_flag(NULL);
+     parse_msg_vars(msg, &validity, &report);
+-- 
+2.53.0
+
