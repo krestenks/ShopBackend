@@ -13,20 +13,32 @@ import org.asteriskjava.manager.action.OriginateAction
 import org.asteriskjava.manager.event.ManagerEvent
 import org.asteriskjava.manager.response.CommandResponse
 import org.asteriskjava.manager.response.ManagerResponse
+import java.util.Base64
 
 /**
- * Custom AMI action provided by chan_quectel (RoEdAl fork): sends an SMS out of
- * a GSM trunk. asterisk-java serialises the bean properties into AMI headers.
+ * Asterisk's `MessageSend` action, addressed to chan_quectel's `mobile` message technology.
+ * asterisk-java serialises the bean properties into AMI headers.
+ *
+ * The body travels base64-encoded, so every character in it — newlines included — reaches the
+ * modem as written. `Destination` selects the trunk and `To` carries the number; the library's
+ * own MessageSendAction has no Destination property, which chan_quectel needs to pick a device.
  */
-class QuectelSendSmsAction(
-    private val device: String,
-    private val number: String,
-    private val message: String,
+class QuectelMessageSendAction(
+    trunkName: String,
+    toNumberE164: String,
+    message: String,
 ) : AbstractManagerAction() {
-    override fun getAction() = "QuectelSendSMS"
-    fun getDevice() = device
-    fun getNumber() = number
-    fun getMessage() = message
+    private val destination = "mobile:$trunkName"
+    private val to = toNumberE164
+
+    /** Carriage returns are dropped, so a CRLF body arrives with the line endings an SMS uses. */
+    private val base64Body: String =
+        Base64.getEncoder().encodeToString(message.replace("\r", "").toByteArray(Charsets.UTF_8))
+
+    override fun getAction() = "MessageSend"
+    fun getDestination() = destination
+    fun getTo() = to
+    fun getBase64Body() = base64Body
 }
 
 /**
@@ -280,31 +292,22 @@ class AmiClient(private val config: AsteriskConfig) {
     }
 
     /**
-     * Sends an SMS out of [trunkName] (e.g. "shop3"). Prefers the chan_quectel AMI
-     * action; falls back to the CLI command (validated on the phone server) if the
-     * action is missing in the installed driver build.
+     * Sends an SMS out of [trunkName] (e.g. "shop3") through Asterisk's `MessageSend` action,
+     * which hands the body to chan_quectel's `mobile` message technology base64-encoded.
+     *
+     * The CLI command `quectel sms send` cannot carry a message body: Asterisk's CLI parser
+     * removes a backslash and passes the next character through literally, so an escaped
+     * newline arrives at the modem as the letter "n".
      */
     fun sendSms(trunkName: String, toNumberE164: String, message: String): AmiSmsResult {
         // Raw send. Serialization + call-gating live in [SmsQueue], which all senders go through.
-        // AMI headers are line-based — a raw newline would corrupt the protocol frame.
-        val safeMessage = message.replace("\r", "").replace("\n", "\\n")
-        try {
-            val response = sendAction(QuectelSendSmsAction(trunkName, toNumberE164, safeMessage))
-            if (!response.response.equals("Error", ignoreCase = true)) {
-                return AmiSmsResult(true, response.message ?: "queued")
-            }
-            // Unknown action → fall through to CLI; any other error is a real failure.
-            if (response.message?.contains("Invalid/unknown command", ignoreCase = true) != true) {
-                return AmiSmsResult(false, response.message ?: "AMI error")
-            }
-        } catch (e: Exception) {
-            println("[AMI] QuectelSendSMS action failed (${e.message}) — falling back to CLI")
-        }
         return try {
-            val cliMessage = safeMessage.replace("\"", "'")
-            val out = command("quectel sms send $trunkName $toNumberE164 \"$cliMessage\"")
-            val text = out.joinToString(" ").trim()
-            AmiSmsResult(!text.contains("error", ignoreCase = true), text.ifBlank { "queued" })
+            val response = sendAction(QuectelMessageSendAction(trunkName, toNumberE164, message))
+            if (response.response.equals("Error", ignoreCase = true)) {
+                AmiSmsResult(false, response.message ?: "AMI error")
+            } else {
+                AmiSmsResult(true, response.message ?: "queued")
+            }
         } catch (e: Exception) {
             AmiSmsResult(false, "AMI unavailable: ${e.message}")
         }
