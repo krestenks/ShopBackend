@@ -78,6 +78,8 @@ test:
 ```
 
 `strcasecmp` returns 0 on a match, so this assigns the report flag for every variable **except**
-the one named `report`, and a variable actually named `report` is ignored. We left it alone
-because our own fix does not depend on it, but it means the flag cannot be set per message as
-intended.
+the one named `report`, and a variable actually named `report` is ignored, which means the flag
+cannot be set per message as intended.
+
+We have since fixed this in our fork (adding the missing `!`), because our own continuation
+variables fed that branch. It is not part of the patch above.

@@ -20,25 +20,60 @@ import java.util.Base64
  * asterisk-java serialises the bean properties into AMI headers.
  *
  * The body travels base64-encoded, so every character in it — newlines included — reaches the
- * modem as written. `Destination` selects the trunk and `To` carries the number; the library's
- * own MessageSendAction has no Destination property, which chan_quectel needs to pick a device.
+ * modem as written.
+ *
+ * Asterisk refuses an AMI header line longer than about 1024 characters, and base64 makes the
+ * body a third longer again, so `Base64Body` alone cannot carry a full price list. It takes the
+ * first [HEAD] characters, which Asterisk decodes into the message body, and the remainder
+ * follows in the `bodycont1` variable for the driver to append. Both split points are multiples
+ * of 4, so each part decodes on its own.
+ *
+ * asterisk-java joins the whole variable map onto one header line, so there is exactly one
+ * continuation variable; a second would share that line and overrun it.
+ *
+ * `Destination` selects the trunk and `To` carries the number. The library's own
+ * MessageSendAction has no Destination property, which chan_quectel needs to pick a device.
  */
-class QuectelMessageSendAction(
+class QuectelMessageSendAction private constructor(
     trunkName: String,
     toNumberE164: String,
-    message: String,
+    encoded: String,
 ) : AbstractManagerAction() {
     private val destination = "mobile:$trunkName"
     private val to = toNumberE164
-
-    /** Carriage returns are dropped, so a CRLF body arrives with the line endings an SMS uses. */
-    private val base64Body: String =
-        Base64.getEncoder().encodeToString(message.replace("\r", "").toByteArray(Charsets.UTF_8))
+    private val head = encoded.take(HEAD)
+    private val variables: Map<String, String> =
+        encoded.drop(HEAD).takeIf { it.isNotEmpty() }?.let { mapOf("bodycont1" to it) } ?: emptyMap()
 
     override fun getAction() = "MessageSend"
     fun getDestination() = destination
     fun getTo() = to
-    fun getBase64Body() = base64Body
+    fun getBase64Body() = head
+    fun getVariables() = variables
+
+    companion object {
+        /** Base64 characters carried by `Base64Body`, leaving room for the header name. */
+        private const val HEAD = 1000
+
+        /** Base64 characters carried by the continuation variable, on its own header line. */
+        private const val CONTINUATION = 900
+
+        /** Longest message this transport carries, in UTF-8 bytes. */
+        const val MAX_BODY_BYTES = (HEAD + CONTINUATION) / 4 * 3
+
+        /**
+         * The action for [message], or null when the encoded body does not fit the two headers —
+         * sending part of it would deliver a truncated message.
+         *
+         * Carriage returns are dropped, so a CRLF body arrives with the line endings an SMS uses.
+         */
+        fun of(trunkName: String, toNumberE164: String, message: String): QuectelMessageSendAction? {
+            val encoded = Base64.getEncoder()
+                .encodeToString(message.replace("\r", "").toByteArray(Charsets.UTF_8))
+            if (encoded.length > HEAD + CONTINUATION) return null
+            return QuectelMessageSendAction(trunkName, toNumberE164, encoded)
+        }
+    }
 }
 
 /**
@@ -301,8 +336,13 @@ class AmiClient(private val config: AsteriskConfig) {
      */
     fun sendSms(trunkName: String, toNumberE164: String, message: String): AmiSmsResult {
         // Raw send. Serialization + call-gating live in [SmsQueue], which all senders go through.
+        val action = QuectelMessageSendAction.of(trunkName, toNumberE164, message)
+            ?: return AmiSmsResult(
+                false,
+                "Message is too long to send (over ${QuectelMessageSendAction.MAX_BODY_BYTES} bytes)",
+            )
         return try {
-            val response = sendAction(QuectelMessageSendAction(trunkName, toNumberE164, message))
+            val response = sendAction(action)
             if (response.response.equals("Error", ignoreCase = true)) {
                 AmiSmsResult(false, response.message ?: "AMI error")
             } else {
