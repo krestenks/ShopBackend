@@ -1,6 +1,6 @@
 # Elitedesk phone server (phone-server01)
 
-Live phone server since 2026-11-16. It replaced the old edge (`phone@192.168.0.192`, Asterisk 18), which is stopped with its services disabled and kept for rollback.
+Live phone server since 2026-11-16. It replaced the old edge (`phone@192.168.0.192`, Asterisk 18), which is powered off with its services disabled and kept for rollback.
 
 ## Machine
 
@@ -97,3 +97,24 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTERISK_VERSION_NUM=220000 ..
 - Asterisk 22 logs `Option 'stir_shaken' is no longer supported` for every endpoint written by the backend.
 - `astdb.sqlite3` is not copied. `lte_watch` is not copied.
 - Incoming calls from outside have not been tested.
+
+## Old edge decommission, 2026-11-20
+
+The old edge is powered off, at 20:03. Its disk is untouched.
+
+State when it was powered off: `shopbackend`, `shopbackend-health.timer`, `dropcatch` and `asterisk`
+inactive and disabled, no Asterisk or JVM process, no EC25 modem on the USB bus, `tailscaled` not
+running, and nothing listening on 8080, 5060, 5038 or 8088. The live box held the tailnet node
+`edge-1` (100.64.0.4), eight trunks Free, ten manager contacts Available and `/health` ok, before
+and after.
+
+`update-manager` holds a blocking shutdown inhibitor on a login session, and the box has a running
+graphical session, so `systemctl poweroff` takes about two minutes to complete and the host answers
+on the network while it runs. Read reachability, not the exit status, to tell whether it is down.
+
+Powering it on again needs the power button. `ethtool` is not installed, so wake-on-LAN is
+unverified. `HandleLidSwitch` is `ignore`, so it runs with the lid closed.
+
+Rollback to this box costs more than it did before the cutover: power it on by hand, re-enable the
+four units, move the modems and the USB hub back, and bring up Tailscale. Its `tailscaled.state` was
+copied to the EliteDesk, so only one of the two boxes can be `edge-1` at a time.
