@@ -35,6 +35,10 @@ data class ShopDto(
 @Serializable
 data class ShopTherapistDto(val id: Int, val name: String)
 
+/** The address that the app sends to a customer; empty when the shop has none. Only managers can change it. */
+@Serializable
+data class ShopAddressDto(val canEdit: Boolean, val address: String)
+
 /** Each field is changed only when present. A blank address or directions clears it. */
 @Serializable
 data class UpdateShopRequest(

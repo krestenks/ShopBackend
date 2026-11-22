@@ -7054,6 +7054,14 @@ class DataBase(dbFileName: String = "ShopManager.db") {
         return getAccountsDay(employeeId, date)
     }
 
+    /** The address of a shop, or an empty text when it has none. */
+    fun getShopAddress(shopId: Int): String =
+        connection.prepareStatement("SELECT address FROM shops WHERE id = ?").use { stmt ->
+            stmt.setInt(1, shopId)
+            val rs = stmt.executeQuery()
+            if (rs.next()) rs.getString("address")?.trim().orEmpty() else ""
+        }
+
     /** The price list text of every therapist in a shop, in name order. A therapist with none has an empty text. */
     fun getPriceListsForShop(shopId: Int): List<TherapistPriceListDto> =
         connection.prepareStatement(

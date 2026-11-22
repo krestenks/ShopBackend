@@ -139,6 +139,19 @@ fun Route.mobileFeatureRoutes(db: DataBase) {
         call.respond(ShopPriceListsDto(canEdit = login.role == "manager", therapists = db.getPriceListsForShop(shopId)))
     }
 
+    // Same access as the price lists: a manager of the shop's owner, or the shop's own login. Saving uses PATCH /api/mobile/shops/{id}.
+    get("/api/mobile/shops/{id}/address") {
+        val login = authenticateManager() ?: return@get
+        val shopId = call.parameters["id"]?.toIntOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing id")
+        val allowed = when (login.role) {
+            "shop" -> login.shopId == shopId
+            "manager" -> resolveOwnerId(login, db)?.let { db.getShopDtoForOwner(shopId, it) != null } ?: false
+            else -> false
+        }
+        if (!allowed) return@get call.respond(HttpStatusCode.NotFound, "Shop not found")
+        call.respond(ShopAddressDto(canEdit = login.role == "manager", address = db.getShopAddress(shopId)))
+    }
+
     put("/api/mobile/therapists/{id}/price-list") {
         val login = authenticateManager() ?: return@put
         if (login.role != "manager") return@put call.respond(HttpStatusCode.Forbidden, "Managers only")
